@@ -29,6 +29,15 @@ sstable을 여는 것이 확인되므로 투입 시점은 그 이전이다. §0�
 티어링 수정 3건(태그 열거 타임아웃, 배치 콜드 삭제 가드, 커버리지 원장 과대 신고)이 반영됐고,
 투명 티어드 읽기는 배포 직후 운영 콜드 데이터 집계로 검증했습니다.
 
+**현황 갱신 (2026-09-13 실측) — 노드 41은 이제 네이티브 단일 노드가 아니라 컨테이너 2노드입니다.**
+카산드라는 `plantpulse-datalake`(10.99.0.100)와 `plantpulse-datalake-worker-1`(10.99.0.101) 두
+컨테이너 안에서 **하나의 클러스터**로 돌고, `pp` 키스페이스는 **RF=2**, 두 노드 모두 UN이며 Load는
+각각 18.42 / 17.13 GiB입니다(8월의 단일 노드 622 GiB와는 다른 데이터셋이다). 계층화는 그대로
+`pp.tm_tag_point`(hot 12h / chunk 15m / interval 5m / cold 3651d)와
+`pp.tm_asset_data_based_second`(cold 32d)에 켜져 있고, 양 노드에서 인코딩이 돌고 있습니다
+(Tags Skipped 0, Late Merges 0, Last Run이 interval 안). **이 문서의 §0.6 배포 절차는 이 구성에서
+무효입니다** — 아래 §0.6 머리말을 먼저 읽으십시오.
+
 ---
 
 ## 0. 되돌릴 수 없는 지점들
@@ -130,6 +139,37 @@ nodetool version && nodetool status              # 올라왔는지, 링에 붙�
 
 ### 0.6 운영 노드 41의 배포 절차 (실측으로 확립된 것)
 
+> **⚠️ 2026-09-13 기준, 아래 jar 교체 절차는 실행 중인 카산드라에 도달하지 않습니다.** 노드 41의
+> 카산드라는 컨테이너(`plantpulse-datalake`, `plantpulse-datalake-worker-1`) 안으로 옮겨갔고,
+> **설치본 전체가 컨테이너 이미지 안에** 있습니다 — 볼륨으로 나와 있는 것은 데이터(`/data1/pp-data`)
+> 뿐입니다. 따라서 호스트의 `$CASSANDRA_HOME/lib/apache-cassandra-timeseries-6.0.0.jar`을 바꿔도
+> 돌고 있는 노드는 바뀌지 않습니다. 실제로 발견 시점에 두 jar은 이미 갈라져 있었습니다:
+> 호스트 `417e5d2336`(2026-08-30 빌드, 사용되지 않음) vs **실행 중 컨테이너 `396a576c66`
+> (2026-09-06 빌드 = 당시 `main`에서 머지 커밋 하나만 뺀 것)**. 지금 무엇이 돌고 있는지는 **항상
+> 컨테이너 안의 jar 매니페스트로** 확인하십시오:
+>
+> ```bash
+> docker ps --format '{{.Names}}'                       # 어느 컨테이너가 카산드라인지 먼저
+> docker exec plantpulse-datalake bash -lc \
+>   'unzip -p $CASSANDRA_HOME/lib/apache-cassandra-timeseries-6.0.0.jar META-INF/MANIFEST.MF' \
+>   | grep -E 'Implementation-(Git-SHA|Build-Date)'
+> ```
+>
+> 새 빌드를 넣는 일은 **컨테이너 이미지 쪽 작업이므로 플랫폼 소관**입니다. 이 문서는 카산드라 쪽
+> 결론만 적는다: 호스트 jar 교체로 배포했다고 판단하지 말 것.
+>
+> **컨테이너 구성에서의 운영 접근법** (nodetool은 호스트에서 치면 9042/7000을 docker-proxy가
+> 점유하고 있어 JMX 스택트레이스만 나옵니다):
+>
+> ```bash
+> C=/opt/kopens/plantpulse-platform/plantpulse-storage/db/cassandra
+> docker exec plantpulse-datalake $C/bin/nodetool status
+> docker exec plantpulse-datalake $C/bin/nodetool tieringstatus
+> docker exec -it plantpulse-datalake $C/bin/cqlsh -u cassandra 10.99.0.100 9042   # PasswordAuthenticator
+> ```
+>
+> 아래 절차는 **네이티브 설치본으로 되돌아갔을 때를 위해** 그대로 남겨 둡니다.
+
 노드 41(Haswell E5-2676 v3, 48스레드)에서 실제로 쓰는 절차와, 이 노드 특유의 함정입니다.
 
 ```bash
@@ -173,7 +213,19 @@ cat /proc/$(pgrep -f '[o]rg.apache.cassandra.service.CassandraDaemon' | head -1)
   전까지는 기동 후 확인·수동 설정이 운영 절차입니다.
 - **상시 감시 항목** (5분 주기 스크립트, JMX 포함): 노드 상태·예외·ERROR·드롭 / 쓰기 지연·데이터
   신선도 / 청크 증가·콜드 flush 실패(`cf_fail`)·memtable 폴백(`fallback`) / JMX
-  `ParkedTimeSeriesWindows`·`FarFutureTimeSeriesSSTables`(비어야 정상).
+  `ParkedTimeSeriesWindows`·`FarFutureTimeSeriesSSTables`(비어야 정상). 두 JMX 값은 전용 nodetool
+  서브커맨드가 없어 `nodetool sjk mx`로 읽습니다 —
+  [prod-tscs-settings.md §3](prod-tscs-settings.md)에 명령이 있습니다.
+- **`ParkedTimeSeriesWindows`가 비어 있지 않을 때 — 진단 절차는
+  [prod-tscs-settings.md §2](prod-tscs-settings.md)에 있습니다.** 원인은 대개 컴팩션 결함이 아니라
+  window-routing 예산(64 MiB, 비압축 기준)을 넘는 대형 파티션이고, 판정은 `tablestats`가 아니라
+  `exceeded the ...-byte window-routing buffer` WARN으로 합니다. 여기서는 계층화 관점의 결론만
+  적는다: **파킹은 계층화를 막지 않습니다** — 재인코더는 frozen-window 이벤트를 소비하지 않고
+  (이 빌드에는 `WindowFrozenListener` 등록 구현 자체가 없다), 2026-09-13에 `tm_tag_point`의 창
+  2개가 태그 `TAG_LS_ARR100` 때문에 파킹돼 있는 동안에도 그 태그는 713청크/443,047샘플이 정상
+  적재돼 있었습니다. 잃는 것은 그 창의 창 단위 프루닝과 통삭제 효율이지 데이터가 아닙니다.
+  그리고 **재시작은 조치가 아닙니다** — 파킹 상태는 메모리라 재기동하면 지워지고 몇 분 뒤 같은
+  창이 다시 파킹됩니다.
 
 ---
 
@@ -447,7 +499,10 @@ JIT 티어 간 인코더 바이트 결정성 테스트(`ChunkV4CodecTest.encoder
   `conf/`·`bin/`·엔트리포인트·JVM 플래그로 돌지만 노드 41은 그 노드의 `cassandra.yaml`,
   `jvm*.options`, `bin/start.sh`(OOM 보호), HA 워치독과 함께 돕니다. 따라서 통합 테스트가 초록인
   것은 **"이미지 환경에서 코드가 동작한다"**는 뜻이지 **"노드 41 설정에서 동작한다"**는 뜻이
-  아닙니다. §0.5의 비교표(포크가 바꾼 것은 메인 jar뿐)가 그 간극이 좁다는 근거이지만, 그것은
+  아닙니다. (**2026-09-13 갱신:** 노드 41 자체가 컨테이너로 옮겨가면서 이 간극은 좁아졌지만
+  사라지지는 않았습니다 — 노드 41이 도는 것은 릴리스 게이트가 검증한 `docker/Dockerfile` 이미지가
+  아니라 플랫폼의 `plantpulse-datalake` 이미지이고, `conf/`·JVM 플래그도 그쪽 것입니다.)
+  §0.5의 비교표(포크가 바꾼 것은 메인 jar뿐)가 그 간극이 좁다는 근거이지만, 그것은
   *읽어서 확인한* 것이지 *그 조합으로 실행해서 확인한* 것이 아닙니다. 운영 `cassandra.yaml`과
   `jvm*.options`를 마운트해 통합 테스트를 한 번 더 돌리면 실측으로 바뀝니다.
 - **GitLab CI는 2026-08-07 이후 아무것도 확인해 주지 않았습니다.** 프로젝트 러너 4개가 전부
@@ -476,9 +531,12 @@ JIT 티어 간 인코더 바이트 결정성 테스트(`ChunkV4CodecTest.encoder
   0-파일 백업이 초록으로 지나간다. 수리는 플랫폼(`plantpulse-backup`) 소관 — 카산드라 쪽
   임시 안전판으로 두 청크 테이블의 스냅샷(`chunks-safety-20260828`, 60 GB)을 호스트 234의
   `/data1/backup-node41-chunks/`로 복사해 두었다.
-- **실제 다중 노드 운영 클러스터에서 돌려본 적이 없습니다.** 3노드 jvm-dtest는 통과했고(재인코더의
-  프라이머리 레인지 분할, 코디네이터 독립 투명 읽기, 지각 행 생존, 노드 재시작), 그 테스트가 실제
-  스키마 전파 결함을 잡아냈지만, 이는 실 운영 부하와 다릅니다.
+- **실제 다중 노드 운영 클러스터에서 돌려본 적이 없습니다 — 부분적으로 해소됐습니다.** 3노드
+  jvm-dtest는 통과했고(재인코더의 프라이머리 레인지 분할, 코디네이터 독립 투명 읽기, 지각 행 생존,
+  노드 재시작), 그 테스트가 실제 스키마 전파 결함을 잡아냈지만, 이는 실 운영 부하와 다릅니다.
+  **2026-09-13 기준 노드 41은 RF=2의 2노드 클러스터로 돌고 있고**(§0.6 머리말), 양 노드에서
+  재인코딩이 각자의 레인지에 대해 돌아가는 것과 투명 티어드 읽기가 확인됐습니다. 다만 관측 구간이
+  짧고(컨테이너 재생성 직후) 노드 장애·복구 시나리오는 여전히 운영에서 겪어 보지 않았습니다.
 - **질의 성능** ([벤치마크](tiering-benchmark.md), 2026-08-04 · 234 = Xeon Silver 4114T · v4 실측):
   저장 **7.1×** 절감(237.8 → 33.3 MB, 20M행), 집계·gap-fill은 비계층 대비 **4~6× 빠릅니다** —
   v3 시절의 "저장 절감의 대가로 질의 감속" 트레이드오프는 v4에서 사라졌습니다. 재인코딩 처리량

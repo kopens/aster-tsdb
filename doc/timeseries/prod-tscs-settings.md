@@ -140,7 +140,18 @@ compacted max/mean, 예산은 `WindowRoutingIterator.maxBufferedBytesPerPartitio
 | `tm_flow_log` | ws=1d, ret=8d, TTL=7d | mean 144 MB — 파킹 수명 ~8일 | `bucket` 입도 축소 |
 
 **변경 불필요:** `tm_tag_point`, `tm_asset_data_based_second` — 티어링 설정 정합(hot 12h ≫
-chunk 15m, cold_window·TTL 일치), 파킹 없음, 순항 중.
+chunk 15m, cold_window·TTL 일치), 순항 중.
+
+> **정정 (2026-09-13 실측): `tm_tag_point`도 이제 파킹이 있습니다.** 노드 10.99.0.101에서 창 2개
+> (2026-09-08, 09-09)가 파킹됐고, 원인은 §2.0 A그룹과 같은 기전입니다 — 태그
+> `TAG_LS_ARR100`(파티션 키 `tag_id`) 하나가 예산을 넘겨 unsplit으로 기록되고, 그 sstable이
+> `[09-04..09-08]` 구간을 걸칩니다. 같은 시점 `tm_tag_point_snapshot`은 양 노드에서 창 8개
+> (09-02~09-09)로 §2.0의 기존 진단과 일치합니다. `tm_tag_point`는 `ws=1d`, `retention=3651d`
+> (≈10년)이므로 **§2.1이 `tm_tag_point_snapshot`에 적용한 "파킹 수명이 retention으로 유계"라는
+> 위안이 여기엔 없습니다** — 방치하면 사실상 영구 잔존입니다. 처방은 A그룹과 같습니다: 굵은 시간
+> 버킷을 파티션 키에 넣는 재파티셔닝(프로젝트), 또는 `window_size` 확대로 경계 걸침 빈도 축소.
+> 계층화 자체는 이 파킹에 막히지 않습니다
+> ([production-rollout.md §0.6](production-rollout.md) 감시 항목 참고).
 
 ## 2. 파킹된 창 진단
 
@@ -261,12 +272,18 @@ repair·스트리밍·읽기를 모두 나쁘게 합니다.
 grep "Parking window"        system.log | grep -o "of [a-z_]*\.[a-z_]*" | sort | uniq -c
 grep "window-routing buffer" system.log | grep -o "of [a-z_]*\.[a-z_]*" | sort | uniq -c
 
-# 파킹된 창 목록 (JMX 전용 — nodetool 서브커맨드 없음)
+# 파킹된 창 목록 (JMX 전용 — 전용 nodetool 서브커맨드는 없지만 nodetool sjk 로 읽을 수 있다)
 #   org.apache.cassandra.db:type=Tables,keyspace=<ks>,table=<t>
-#     ParkedTimeSeriesWindows      파킹된 창 -> 물고 있는 SSTable
-#     FarFutureTimeSeriesSSTables  max_future_window 밖이라 모든 자동 경로에서 제외된 SSTable
-# 둘 다 비어 있는 것이 정상입니다.
+#     ParkedTimeSeriesWindows      파킹된 창 -> 물고 있는 SSTable   (정상: {})
+#     FarFutureTimeSeriesSSTables  max_future_window 밖이라 모든 자동 경로에서 제외된 SSTable (정상: [])
+nodetool sjk mx --get \
+  -b "org.apache.cassandra.db:type=Tables,keyspace=pp,table=tm_tag_point" \
+  -f ParkedTimeSeriesWindows
 ```
+
+노드 41처럼 카산드라가 컨테이너 안에 있으면 앞에 `docker exec <컨테이너>`를 붙이고 `nodetool`은
+절대 경로로 부르십시오 — 호스트에서 그냥 치면 JMX 포트가 컨테이너 밖으로 나와 있지 않아
+연결 스택트레이스만 나옵니다([production-rollout.md §0.6](production-rollout.md)).
 
 ## 4. 운영 실측 (노드 41, 2026-08-02, 24k rows/s 유입)
 
