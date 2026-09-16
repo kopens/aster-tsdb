@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Container image of cassandra-timeseries (Apache Cassandra 6.0.0 + time-series functions).
 # Built as a multi-stage image so CI (kaniko) and local `docker build` need nothing but the repo checkout:
-#   docker build -t cassandra-timeseries:6.0.0 -f docker/Dockerfile .
+#   docker build -t aster-tsdb:6.0.0 -f docker/Dockerfile .
 # The image is Testcontainers-compatible (see docker-entrypoint.sh) and is consumed by e.g. the
 # plantpulse-jdbc-cassandra-driver integration tests via -Pcassandra.image=<image>.
 
