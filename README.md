@@ -4,56 +4,84 @@
 
 # Aster Timeseries Database
 
-**A drop-in Apache Cassandra 6.0 with industrial time-series built in.** `aster-tsdb` is KOPENS' fork of
-[apache/cassandra](https://github.com/apache/cassandra) (`cassandra-6.0` branch) for sensor and tag data from
-factories and plants.
+**A database tuned for the time-series workloads of industrial sites.** 21 CQL functions, gap-fill,
+and tiered storage that compresses itself — **7.1× smaller on disk and 3–6× faster to query**, with
+the CQL unchanged and the cluster still a Cassandra cluster.
 
-Time-series data from industrial sites has a few properties of its own: every tag (series) accumulates endlessly at second resolution, years of it must be retained for compliance, edge devices that lost connectivity push days of backlog in one go (late backfill), and queries are almost always "this tag, this period". Stock Cassandra handles this workload, but compression, retention and aggregation all stay the application's problem.
+It is a fork of [apache/cassandra](https://github.com/apache/cassandra) (`cassandra-6.0`) and it
+ships under upstream's own file name, `apache-cassandra-6.0.0.jar`. Swapping that jar into an
+existing 6.0.0 installation is the whole installation: it reads existing data as-is, the CQL grammar
+does not change, and every new feature is opt-in.
 
-This fork moves that part **into the database** — time-series computation finishes on the server (21 CQL functions plus gap-fill), old data is compressed and expired automatically (tiered storage plus a time-series compaction strategy), and **CQL does not change**. Compressed history reads back through an ordinary `SELECT` (transparent reads). The application never has to know whether the data is compressed.
+| Measured against upstream 6.0.0 | Upstream | Aster TSDB |
+| --- | --- | --- |
+| 20M rows on disk | 237.8 MB | **33.3 MB** — 7.1× smaller |
+| `count(*)`, 40k-row partition | 303 ms | **50 ms** — 6.1× faster |
+| p95 per tag, 90 tags (3.6M rows) | 14.2 s | **2.6 s** — 5.4× faster |
+| Hourly average, 90 tags | 14.9 s | **4.2 s** — 3.5× faster |
+| Time-series computation | the application pulls raw rows and computes | **finishes on the server** |
+| Compression & retention | the application's problem | **a table policy** |
 
-## It is a drop-in, on purpose
+> **Every query measured is the same or faster after tiering** — unbounded scans, single-row lookups
+> and static-column reads included. Compression here buys storage *and* latency; usually you spend
+> one to get the other. Full numbers and caveats: [tiering benchmark](doc/timeseries/).
 
-The build produces **`apache-cassandra-6.0.0.jar`** — the upstream file name, not a renamed one. The on-disk
-format and the CQL grammar are upstream's, so it **reads existing 6.0 data as-is** and every new feature is
-opt-in. Swapping the jar into an existing 6.0.0 installation is the whole installation procedure; nothing that
-reads a version string sees a different answer, including `nodetool version`, which still reports `6.0.0`
-because the release version *is* upstream's.
+## Against TimescaleDB and InfluxDB
 
-That is the point — and it raises the obvious question: **so how do you tell an Aster jar from a stock one?**
-The identity is in the jar manifest, which upstream leaves empty:
+| | TimescaleDB | InfluxDB 3 Core (OSS) | **Aster TSDB** |
+| --- | --- | --- | --- |
+| Base | PostgreSQL extension | purpose-built engine | Apache Cassandra 6.0 fork |
+| Query language | SQL | SQL / InfluxQL | CQL |
+| Bucketing | `time_bucket` | `date_bin_gapfill` | `time_bucket` / `time_bucket_gapfill` |
+| Gap-fill (`locf` / `interpolate`) | yes | yes | yes |
+| Time-series functions | Toolkit | SQL built-ins | **21, Timescale's vocabulary** |
+| Compression | yes | yes | yes — **7.1× measured** |
+| Retention | policy | policy | **whole-window drop (TSCS)** |
+| Full-text search | PostgreSQL FTS | limited | SAI `LIKE` + analyzer |
+| **Scale-out, in the open-source product** | multi-node deprecated after 2.13 — application-level sharding | single node | **add nodes** |
+| **HA / replication, in the open-source product** | PostgreSQL replication | **commercial only** | **included, multi-DC** |
+| Adopting it on an existing Cassandra fleet | — | — | **swap one jar** |
 
-```bash
-unzip -p apache-cassandra-6.0.0.jar META-INF/MANIFEST.MF | grep -E 'Implementation-|Aster-'
-```
+The first eight rows are rough parity, and that is the point: **you give up no time-series
+capability by choosing this.** The difference is the last three. Timescale stopped shipping
+horizontal scale-out — multi-node was deprecated after 2.13, so scaling out is sharding you build
+yourself ([deprecation notice](https://github.com/timescale/timescaledb/blob/main/docs/MultiNodeDeprecation.md)).
+InfluxDB 3 Core is a single node, and clustering, HA and read replicas are reserved for the
+commercial editions ([InfluxDB 3 Core](https://www.influxdata.com/products/influxdb/),
+[Enterprise clustering](https://docs.influxdata.com/influxdb3/enterprise/admin/clustering/)).
 
-```
-Implementation-Title:   Aster TSDB
-Implementation-Version: 6.0.0                      <- upstream's release version, unchanged
-Implementation-Vendor:  KOPENS
-Aster-Product:          Aster Timeseries Database
-Aster-Upstream:         apache/cassandra cassandra-6.0
-Aster-Upstream-SHA:     35d6f8c81666df465ac3ea7e63bb8d186a6e0495
-```
+Here, clustering and replication are not a tier. This *is* Cassandra: it grows by adding nodes,
+replicates across racks and data centres, survives losing one, and none of that is behind a licence.
 
-A stock Apache jar has none of the `Aster-*` attributes. `Aster-Upstream-SHA` names the exact upstream commit
-this build was merged with, so "which Cassandra is underneath?" has an answer you can `git log`, not a claim.
-CI fails the build if any of those attributes is missing, so the identity cannot quietly fall off.
+> The competitor columns describe each product's structure and are cited above; check their current
+> docs before making a decision on them. The Aster column's numbers are ours, measured, and the
+> benchmark that produced them is in this repository.
 
-**Upstream is followed, not frozen.** `main` is kept merged with apache/cassandra's `cassandra-6.0`; when
-upstream releases, we move with it and `Aster-Upstream-SHA` moves in the same commit. See
-[Branches and upstream policy](#branches-and-upstream-policy).
+## The workload this is built for
 
-Spark integration comes from the companion fork [cassandra-spark-connector](https://dev.kopens.io/common/cassandra-spark-connector) (Spark 4.1.2).
+Industrial sites make a particular shape of data: every tag accumulates endlessly at second
+resolution, years of it must be retained for compliance, edge devices that lost connectivity push
+days of backlog in one go, and queries are almost always "this tag, this period". Stock Cassandra
+carries that load — but bucketing, compression, retention and aggregation all stay the application's
+problem. This fork moves them **into the database**: computation finishes server-side, old windows
+compress and expire by themselves, and compressed history still reads back through an ordinary
+`SELECT`.
 
-### Licence and attribution
+Spark integration comes from the companion fork
+[cassandra-spark-connector](https://dev.kopens.io/common/cassandra-spark-connector) (Spark 4.1.2).
 
-Apache License 2.0, upstream's — `LICENSE`, `NOTICE` and the per-file copyright headers are kept intact, and
-our own changes are marked `~~ PLANTPULSE FORK CHANGE ~~` in the source. Apache Cassandra is a trademark of the
-Apache Software Foundation; this is an independent fork and is **not affiliated with or endorsed by the ASF**.
-The product name in the manifest exists precisely so the two cannot be mistaken for each other.
+## ✨ What this fork adds
 
-> Deep-dive documents under [doc/timeseries/](doc/timeseries/) are currently written in Korean; [examples.md](doc/timeseries/examples.md) is in English.
+| Feature | Summary | Detail |
+| --- | --- | --- |
+| **21 time-series CQL functions** | `time_bucket`, `first`/`last`, `delta`/`rate`/`derivative`, reset-aware `counter_delta`/`counter_rate`, `percentile`, `time_weighted_average`, `integral`, `variance`/`stddev`, `histogram`, `approx_count_distinct`, bivariate `corr`/`covar_*`/`regr_*` | [Usage §2–9](#using-time-series-cql) |
+| **Gap-fill** | `GROUP BY time_bucket_gapfill(width, ts, start, finish)` — materialises empty buckets, with `locf()`/`interpolate()` fill policies | [Usage §3](#3-filling-gaps-time_bucket_gapfill) |
+| **Full-text search** | SAI `LIKE` with `index_analyzer` (ngram/standard/cjk/keyword or JSON) — true substring matching including mid-word fragments, fragments spanning a space, and Korean, with no `ALLOW FILTERING` | [fulltext-search.md](doc/timeseries/fulltext-search.md) |
+| **Time-series compaction (TSCS)** | `TimeSeriesCompactionStrategy` — window ordering, in-window UCS delegation, whole-window retention drops, closed-window freeze (one SSTable per window, `WindowFrozenListener` event hook, far-future guard `max_future_window`, and reclamation of data already expired **at the moment of freeze** without retention — data expiring after the freeze needs `retention`), plus late-data isolation (flush and streaming split at window boundaries so backfill lands locally in its own past window; legacy spanning SSTables are split automatically) and a **dedicated memtable** (opt-in per table — rows are assigned to their TSCS window at write time, removing flush routing and the 64 MiB partition cap; primitive-array column storage measured at **5.5× less heap per row**; cold windows on a tiered table flush straight to chunks) | [timeseries-compaction.md](doc/timeseries/timeseries-compaction.md) · [timeseries-memtable.md](doc/timeseries/timeseries-memtable.md) |
+| **Column-oriented chunk codec (chunk format v4)** *(tiered storage, stage 1)* | One window = a shared timestamp axis plus an independent section per regular column, losslessly compressed, every block independently decodable and randomly addressable. `double` uses ALP/ALP-RD (the only double codec); integers and time types use FOR/delta bit-packing; `boolean` packs to one bit; `text` and opaque bytes use a dictionary (DICT) or RAW. A column whose value never changes becomes CONSTANT and an all-null column becomes ALL_NULL, both O(1). Measured at **~1.7 B/row** on 20M rows of the production shape — **7.1×** against row storage's 11.9 B/row, host 234 | [Format spec](doc/timeseries/chunk-format-v4.md) · [Codec bake-off](doc/timeseries/codec-bakeoff.md) |
+| **Tiered storage (chunk store)** *(tiered storage, stage 2)* | A `timeseries_tiering` table extension policy — a background re-encoder compresses windows past `hot_window` into chunks and moves them to `<table>__chunks` (late-row merge, `cold_window` expiry, a consistency-level quorum floor). `nodetool retier`/`tieringstatus`, `system_views.timeseries_tiering`. **Transparent reads**: a `SELECT` on the base table merges hot rows with chunks automatically — ranges, point lookups, aggregates, gap-fill and `LIMIT`/`DESC` all work across hot and cold | [tiered-storage.md](doc/timeseries/tiered-storage.md) |
+| **Test infrastructure** | 93 docker integration assertions (the release gate), a 49-assertion three-node cluster test, a 100-million-row scale harness, jvm-dtests, a JMH performance regression gate, and a GC comparison (ZGC vs G1) | [Reports](doc/timeseries/) |
+| **Packaging / CI** | Testcontainers-compatible docker image, GitLab CI (build → test → image → integration gate → release), automated tag releases | [.gitlab-ci.yml](.gitlab-ci.yml) |
 
 ## 🎯 What it buys you (against upstream Cassandra 6.0.0)
 
@@ -94,18 +122,34 @@ ORDER BY timestamp ASC;
 
 **5. Full-text search over log and event bodies.** SAI `LIKE` with `index_analyzer` gives real substring matching — Korean included — without `ALLOW FILTERING`.
 
-## ✨ What this fork adds
+## Getting started
 
-| Feature | Summary | Detail |
-| --- | --- | --- |
-| **21 time-series CQL functions** | `time_bucket`, `first`/`last`, `delta`/`rate`/`derivative`, reset-aware `counter_delta`/`counter_rate`, `percentile`, `time_weighted_average`, `integral`, `variance`/`stddev`, `histogram`, `approx_count_distinct`, bivariate `corr`/`covar_*`/`regr_*` | [Usage §2–9](#using-time-series-cql) |
-| **Gap-fill** | `GROUP BY time_bucket_gapfill(width, ts, start, finish)` — materialises empty buckets, with `locf()`/`interpolate()` fill policies | [Usage §3](#3-filling-gaps-time_bucket_gapfill) |
-| **Full-text search** | SAI `LIKE` with `index_analyzer` (ngram/standard/cjk/keyword or JSON) — true substring matching including mid-word fragments, fragments spanning a space, and Korean, with no `ALLOW FILTERING` | [fulltext-search.md](doc/timeseries/fulltext-search.md) |
-| **Time-series compaction (TSCS)** | `TimeSeriesCompactionStrategy` — window ordering, in-window UCS delegation, whole-window retention drops, closed-window freeze (one SSTable per window, `WindowFrozenListener` event hook, far-future guard `max_future_window`, and reclamation of data already expired **at the moment of freeze** without retention — data expiring after the freeze needs `retention`), plus late-data isolation (flush and streaming split at window boundaries so backfill lands locally in its own past window; legacy spanning SSTables are split automatically) and a **dedicated memtable** (opt-in per table — rows are assigned to their TSCS window at write time, removing flush routing and the 64 MiB partition cap; primitive-array column storage measured at **5.5× less heap per row**; cold windows on a tiered table flush straight to chunks) | [timeseries-compaction.md](doc/timeseries/timeseries-compaction.md) · [timeseries-memtable.md](doc/timeseries/timeseries-memtable.md) |
-| **Column-oriented chunk codec (chunk format v4)** *(tiered storage, stage 1)* | One window = a shared timestamp axis plus an independent section per regular column, losslessly compressed, every block independently decodable and randomly addressable. `double` uses ALP/ALP-RD (the only double codec); integers and time types use FOR/delta bit-packing; `boolean` packs to one bit; `text` and opaque bytes use a dictionary (DICT) or RAW. A column whose value never changes becomes CONSTANT and an all-null column becomes ALL_NULL, both O(1). Measured at **~1.7 B/row** on 20M rows of the production shape — **7.1×** against row storage's 11.9 B/row, host 234 | [Format spec](doc/timeseries/chunk-format-v4.md) · [Codec bake-off](doc/timeseries/codec-bakeoff.md) |
-| **Tiered storage (chunk store)** *(tiered storage, stage 2)* | A `timeseries_tiering` table extension policy — a background re-encoder compresses windows past `hot_window` into chunks and moves them to `<table>__chunks` (late-row merge, `cold_window` expiry, a consistency-level quorum floor). `nodetool retier`/`tieringstatus`, `system_views.timeseries_tiering`. **Transparent reads**: a `SELECT` on the base table merges hot rows with chunks automatically — ranges, point lookups, aggregates, gap-fill and `LIMIT`/`DESC` all work across hot and cold | [tiered-storage.md](doc/timeseries/tiered-storage.md) |
-| **Test infrastructure** | 93 docker integration assertions (the release gate), a 49-assertion three-node cluster test, a 100-million-row scale harness, jvm-dtests, a JMH performance regression gate, and a GC comparison (ZGC vs G1) | [Reports](doc/timeseries/) |
-| **Packaging / CI** | Testcontainers-compatible docker image, GitLab CI (build → test → image → integration gate → release), automated tag releases | [.gitlab-ci.yml](.gitlab-ci.yml) |
+```bash
+# 1. put the jar in place of the stock one
+cp apache-cassandra-6.0.0.jar $CASSANDRA_HOME/lib/
+
+# 2. that is the installation. Existing data, existing CQL, existing tooling.
+#    nodetool version still reports 6.0.0 - the release version is upstream's.
+```
+
+Because the file name and the version are upstream's, the jar cannot tell you which one it is by its
+name. The manifest can — upstream leaves these attributes empty:
+
+```bash
+unzip -p apache-cassandra-6.0.0.jar META-INF/MANIFEST.MF | grep -E 'Implementation-|Aster-'
+```
+
+```
+Implementation-Title:   Aster TSDB
+Implementation-Vendor:  KOPENS
+Aster-Product:          Aster Timeseries Database
+Aster-Upstream:         apache/cassandra cassandra-6.0
+Aster-Upstream-SHA:     35d6f8c81666df465ac3ea7e63bb8d186a6e0495
+```
+
+`Aster-Upstream-SHA` names the exact upstream commit this build was merged with, so "which Cassandra
+is underneath?" has an answer you can `git log`. CI fails the build if any of these is missing.
+`main` is kept merged with apache/cassandra's `cassandra-6.0`, and that SHA moves in the same commit.
 
 ## 📖 Documentation
 
@@ -791,3 +835,9 @@ Where the scale test measures the execution time of one analytical query, throug
 ## Development
 
 Build, test and code-style rules are in [CLAUDE.md](CLAUDE.md) and [AGENTS.md](AGENTS.md) — the full test suite takes hours, so run only the targeted tests. Test layout is in [TESTING.md](TESTING.md). Time-series test entry points: `org.apache.cassandra.cql3.functions.TimeSeriesFctsTest`, `org.apache.cassandra.db.aggregation.TimeBucketGapFillerTest`.
+
+
+## License
+
+Apache License 2.0, the same as upstream — `LICENSE` and `NOTICE` are kept as they are.
+Apache Cassandra is a trademark of the Apache Software Foundation; this is an independent fork.

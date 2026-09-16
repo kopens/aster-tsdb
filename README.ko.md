@@ -4,51 +4,82 @@
 
 # Aster Timeseries Database
 
-**산업 시계열을 데이터베이스 안에 넣은, 드롭인 Apache Cassandra 6.0.** `aster-tsdb` 는 공장·플랜트의
-센서·태그 데이터를 위한 KOPENS 의 [apache/cassandra](https://github.com/apache/cassandra)(`cassandra-6.0` 브랜치) 포크입니다.
+**산업 현장의 시계열 워크로드에 최적화된 데이터베이스.** CQL 함수 21종, gap-fill, 스스로 압축하는
+계층형 저장 — **디스크 7.1× 절감, 질의 3~6× 가속**. CQL 은 그대로고, 클러스터는 여전히 Cassandra
+클러스터입니다.
 
-공장·플랜트의 시계열 데이터는 몇 가지 고유한 성질을 가집니다: 태그(시리즈)마다 초 단위로 끝없이 쌓이고, 몇 년치를 규정상 보관해야 하며, 엣지 장비가 통신 두절 뒤 며칠치를 한꺼번에 밀어 넣고(지각 백필), 조회는 거의 항상 "이 태그의 이 기간"입니다. 범용 Cassandra는 이 워크로드를 감당하지만, 압축·보존·집계는 전부 애플리케이션 몫으로 남습니다.
+[apache/cassandra](https://github.com/apache/cassandra)(`cassandra-6.0`)의 포크이며 상류와 같은
+파일 이름인 `apache-cassandra-6.0.0.jar` 로 나갑니다. 기존 6.0.0 설치에 그 jar 을 바꿔 넣는 것이
+설치의 전부입니다 — 기존 데이터를 그대로 읽고, CQL 문법은 바뀌지 않으며, 새 기능은 전부 옵트인입니다.
 
-이 포크는 그 부분을 **데이터베이스 안으로 가져옵니다** — 시계열 연산을 서버에서 끝내고(21종 CQL 함수 + gap-fill), 오래된 데이터를 자동으로 압축·보존하며(계층형 저장 + 시계열 전용 컴팩션), 그러면서도 **CQL은 그대로**입니다. 압축된 과거 데이터도 평범한 `SELECT`로 읽힙니다(투명 읽기). 애플리케이션은 데이터가 압축돼 있는지 알 필요가 없습니다.
+| 업스트림 6.0.0 대비 실측 | 업스트림 | Aster TSDB |
+| --- | --- | --- |
+| 2천만 행 저장 용량 | 237.8 MB | **33.3 MB** — 7.1× 작다 |
+| `count(*)` (4만 행 파티션) | 303 ms | **50 ms** — 6.1× 빠르다 |
+| 태그 90개 p95 (360만 행) | 14.2 s | **2.6 s** — 5.4× 빠르다 |
+| 태그 90개 시간별 평균 | 14.9 s | **4.2 s** — 3.5× 빠르다 |
+| 시계열 연산 | 애플리케이션이 원시 행을 끌어와 계산 | **서버에서 끝난다** |
+| 압축·보존 | 애플리케이션 몫 | **테이블 정책** |
 
-## 드롭인이다 — 의도한 것입니다
+> **재 본 모든 질의가 티어링 후 «같거나 빠릅니다»** — 무제한 스캔, 단행 조회, 정적 컬럼 읽기까지
+> 포함해서입니다. 보통은 저장을 줄이면 지연을 내주는데 여기서는 둘 다 가져갑니다.
+> 전체 수치와 주의사항: [티어링 벤치마크](doc/timeseries/).
 
-빌드 산출물은 **`apache-cassandra-6.0.0.jar`** 입니다. 개명한 이름이 아니라 **상류와 같은 파일 이름**입니다.
-온디스크 포맷과 CQL 문법이 업스트림 그대로라 **기존 6.0 데이터를 그대로 읽고**, 새 기능은 전부 옵트인입니다.
-기존 6.0.0 설치에 jar 를 바꿔 넣는 것이 설치 절차의 전부이며, 버전 문자열을 읽는 어떤 것도 다른 답을 보지
-않습니다 — `nodetool version` 도 여전히 `6.0.0` 입니다. 릴리즈 버전 자체가 업스트림 것이기 때문입니다.
+## TimescaleDB · InfluxDB 와 비교하면
 
-바로 그게 목적이고, 그래서 당연한 질문이 따라옵니다 — **그러면 이게 진짜 Cassandra 인지 Aster TSDB 인지
-어떻게 아나?** 정체성은 업스트림이 비워 두는 jar 매니페스트에 적혀 있습니다:
+| | TimescaleDB | InfluxDB 3 Core (OSS) | **Aster TSDB** |
+| --- | --- | --- | --- |
+| 기반 | PostgreSQL 확장 | 전용 엔진 | Apache Cassandra 6.0 포크 |
+| 질의 언어 | SQL | SQL / InfluxQL | CQL |
+| 버킷팅 | `time_bucket` | `date_bin_gapfill` | `time_bucket` / `time_bucket_gapfill` |
+| Gap-fill (`locf`/`interpolate`) | 있음 | 있음 | 있음 |
+| 시계열 함수 | Toolkit | SQL 내장 | **21종, Timescale 어휘** |
+| 압축 | 있음 | 있음 | 있음 — **실측 7.1×** |
+| 보존 | 정책 | 정책 | **윈도우 통째 드롭(TSCS)** |
+| 전문 검색 | PostgreSQL FTS | 제한적 | SAI `LIKE` + 분석기 |
+| **수평 확장 (오픈소스판)** | 2.13 이후 multi-node 폐기 — 직접 만드는 샤딩 | 단일 노드 | **노드를 더해 늘린다** |
+| **고가용성·복제 (오픈소스판)** | PostgreSQL 복제 | **상용 전용** | **포함 · 멀티 DC** |
+| 기존 Cassandra 에 도입 | — | — | **jar 하나 교체** |
 
-```bash
-unzip -p apache-cassandra-6.0.0.jar META-INF/MANIFEST.MF | grep -E 'Implementation-|Aster-'
-```
+앞의 여덟 행은 대체로 동등하고, 그게 요점입니다 — **이걸 고른다고 시계열 기능을 포기하지
+않습니다.** 갈리는 곳은 마지막 세 행입니다. Timescale 은 수평 확장을 접었습니다(2.13 이후
+multi-node 폐기, 확장은 직접 만드는 샤딩,
+[폐기 공지](https://github.com/timescale/timescaledb/blob/main/docs/MultiNodeDeprecation.md)).
+InfluxDB 3 Core 는 단일 노드이고 클러스터링·HA·읽기 복제는 상용판 몫입니다
+([InfluxDB 3 Core](https://www.influxdata.com/products/influxdb/),
+[Enterprise 클러스터링](https://docs.influxdata.com/influxdb3/enterprise/admin/clustering/)).
 
-```
-Implementation-Title:   Aster TSDB
-Implementation-Version: 6.0.0                      <- 상류 릴리즈 버전 그대로
-Implementation-Vendor:  KOPENS
-Aster-Product:          Aster Timeseries Database
-Aster-Upstream:         apache/cassandra cassandra-6.0
-Aster-Upstream-SHA:     35d6f8c81666df465ac3ea7e63bb8d186a6e0495
-```
+여기서는 클러스터링과 복제가 «등급» 이 아닙니다. 이건 Cassandra 입니다 — 노드를 더해 늘리고,
+랙과 데이터센터에 걸쳐 복제하고, 한 대를 잃어도 살아 있으며, 그중 어느 것도 라이선스 뒤에
+있지 않습니다.
 
-순정 Apache jar 에는 `Aster-*` 속성이 하나도 없습니다. `Aster-Upstream-SHA` 는 이 빌드가 병합한 업스트림
-커밋을 그대로 가리키므로, "밑에 깔린 Cassandra 가 무엇이냐" 는 주장이 아니라 `git log` 로 확인되는 사실입니다.
-그 속성 중 하나라도 빠지면 CI 가 빌드를 실패시킵니다 — 정체성이 조용히 떨어져 나가지 못합니다.
+> 경쟁 제품 열은 각 제품의 «구조» 를 적고 출처를 달았습니다. 판단 전에 각자의 최신 문서를
+> 확인하십시오. Aster 열의 수치는 우리 실측이고, 그 벤치마크는 이 저장소 안에 있습니다.
 
-**업스트림은 고정이 아니라 추적합니다.** `main` 은 apache/cassandra 의 `cassandra-6.0` 과 계속 머지된
-상태로 유지하며, 업스트림이 릴리즈하면 따라 올리고 `Aster-Upstream-SHA` 도 같은 커밋에서 함께 움직입니다.
+## 어떤 워크로드를 위한 것인가
 
-Spark 연동은 짝이 되는 포크 [cassandra-spark-connector](https://dev.kopens.io/common/cassandra-spark-connector)(Spark 4.1.2)로 제공됩니다.
+산업 현장의 데이터는 모양이 정해져 있습니다: 태그마다 초 단위로 끝없이 쌓이고, 규정상 몇 년치를
+보관해야 하며, 통신이 끊겼던 엣지 장비가 며칠치를 한꺼번에 밀어 넣고, 조회는 거의 항상
+"이 태그의 이 기간"입니다. 범용 Cassandra 도 이 부하를 감당합니다 — 다만 버킷팅·압축·보존·집계가
+전부 애플리케이션 몫으로 남습니다. 이 포크는 그것을 **데이터베이스 안으로** 가져옵니다.
+연산은 서버에서 끝나고, 오래된 윈도우는 스스로 압축·만료되며, 압축된 과거 데이터도 평범한
+`SELECT` 로 그대로 읽힙니다.
 
-### 라이선스와 귀속
+Spark 연동은 짝이 되는 포크
+[cassandra-spark-connector](https://dev.kopens.io/common/cassandra-spark-connector)(Spark 4.1.2)로 제공됩니다.
 
-업스트림과 같은 Apache License 2.0 입니다 — `LICENSE`·`NOTICE`·파일별 저작권 헤더를 그대로 유지하고,
-우리 변경은 소스에 `~~ PLANTPULSE FORK CHANGE ~~` 로 표시합니다. Apache Cassandra 는 Apache Software
-Foundation 의 상표이며, 이 프로젝트는 독립 포크로서 **ASF 와 제휴 관계가 없고 승인받지도 않았습니다.**
-매니페스트의 제품명은 바로 그 둘이 혼동되지 않게 하려고 있는 것입니다.
+## ✨ 구현 기능 (업스트림 대비 이 포크의 델타)
+
+| 기능 | 내용 | 상세 |
+| --- | --- | --- |
+| **시계열 CQL 함수 21종** | `time_bucket`, `first`/`last`, `delta`/`rate`/`derivative`, 리셋 보정 `counter_delta`/`counter_rate`, `percentile`, `time_weighted_average`, `integral`, `variance`/`stddev`, `histogram`, `approx_count_distinct`, 이변량 `corr`/`covar_*`/`regr_*` | [사용법 §2~9](#시계열-cql-사용법) |
+| **Gap-fill** | `GROUP BY time_bucket_gapfill(width, ts, start, finish)` — 빈 버킷 실체화 + `locf()`/`interpolate()` 채움 정책 | [사용법 §3](#3-빈-구간-채우기-time_bucket_gapfill) |
+| **풀텍스트 검색** | SAI `LIKE` + `index_analyzer`(ngram/standard/cjk/keyword + JSON) — 단어 중간 조각·공백 걸침·한글까지 진짜 부분문자열 매치, ALLOW FILTERING 불필요 | [fulltext-search.md](doc/timeseries/fulltext-search.md) |
+| **시계열 컴팩션 (TSCS)** | `TimeSeriesCompactionStrategy` — 창 정렬 + 창 내부 UCS 위임 + retention 창 통삭제 + 닫힌 창 동결(창당 1 SSTable, `WindowFrozenListener` 이벤트 훅, far-future 가드 `max_future_window`, **동결 시점에** 이미 만료된 TTL 데이터는 retention 없이 회수 — 동결 이후 만료되는 데이터는 `retention` 필요) + 지각 격리(flush/스트리밍 창 경계 스플릿 — 백필이 과거 창에 국소 편입, 레거시 걸침 SSTable 자동 분할) + **전용 memtable**(테이블별 옵트인 — 행을 쓰기 시점에 TSCS 창으로 배정해 flush 라우팅·64 MiB 파티션 상한 제거, 원시 배열 컬럼 저장으로 행당 힙 **5.5×↓** 실측, 계층화 테이블의 콜드 창은 flush 시점에 바로 청크로) | [timeseries-compaction.md](doc/timeseries/timeseries-compaction.md) · [timeseries-memtable.md](doc/timeseries/timeseries-memtable.md) · [설계 스펙](docs/superpowers/specs/2026-07-31-timeseries-compaction-design.md) |
+| **컬럼 지향 청크 코덱 (chunk format v4)** *(계층형 저장 1단계)* | 창 1개 = 공유 타임스탬프 축 + 일반 컬럼별 독립 섹션의 무손실 압축, 모든 블록이 독립 디코드·랜덤 접근. `double`은 ALP/ALP-RD(유일한 double 코덱), 정수·시각 계열은 FOR/델타 비트팩, `boolean`은 1비트팩, `text`·불투명 바이트는 사전(DICT)/RAW. 값이 일정한 컬럼은 CONSTANT, 전부 null인 컬럼은 ALL_NULL로 O(1) 처리. 운영 형태 2,000만 건 실측 **~1.7 B/행** (행 저장 11.9 B/행 대비 **7.1×**, 호스트 234) | [포맷 규격](doc/timeseries/chunk-format-v4.md) · [코덱 실측 비교](doc/timeseries/codec-bakeoff.md) · [설계 스펙](docs/superpowers/specs/2026-07-31-industrial-tiered-storage-design.md) |
+| **계층형 저장 (청크 스토어)** *(계층형 저장 2단계)* | 테이블 확장 `timeseries_tiering` 정책 — 백그라운드 재인코더가 hot_window를 지난 창을 청크로 압축해 `<테이블>__chunks`로 이동(지각 데이터 병합, cold_window 만료, CL 쿼럼 하한). `nodetool retier`/`tieringstatus`, `system_views.timeseries_tiering`. **투명 읽기(SP3)**: 베이스 테이블 SELECT가 핫 로우+청크를 자동 병합 — 시간범위·포인트·집계·gap-fill·LIMIT/DESC가 핫·콜드에 걸쳐 동작 | [tiered-storage.md](doc/timeseries/tiered-storage.md) |
+| **테스트 인프라** | 도커 통합 테스트 93건(릴리스 게이트), 3노드 클러스터 테스트 49건, 1억 건 스케일 하네스, jvm-dtest, JMH 성능 회귀 게이트, GC 비교(ZGC vs G1) | [보고서들](doc/timeseries/) |
+| **배포/CI** | Testcontainers 호환 도커 이미지, GitLab CI(빌드→테스트→이미지→통합 게이트→릴리스), 태그 릴리스 자동화 | [.gitlab-ci.yml](.gitlab-ci.yml) |
 
 ## 🎯 핵심 — 무엇이 좋아지나 (업스트림 Cassandra 6.0.0 대비)
 
@@ -97,18 +128,35 @@ chunk format v4 — [벤치마크 전문](doc/timeseries/tiering-benchmark.md):
 
 **5. 로그·이벤트 본문 검색.** SAI `LIKE` + `index_analyzer`로 한글 포함 부분문자열 검색이 `ALLOW FILTERING` 없이 동작합니다.
 
-## ✨ 구현 기능 (업스트림 대비 이 포크의 델타)
+## 시작하기
 
-| 기능 | 내용 | 상세 |
-| --- | --- | --- |
-| **시계열 CQL 함수 21종** | `time_bucket`, `first`/`last`, `delta`/`rate`/`derivative`, 리셋 보정 `counter_delta`/`counter_rate`, `percentile`, `time_weighted_average`, `integral`, `variance`/`stddev`, `histogram`, `approx_count_distinct`, 이변량 `corr`/`covar_*`/`regr_*` | [사용법 §2~9](#시계열-cql-사용법) |
-| **Gap-fill** | `GROUP BY time_bucket_gapfill(width, ts, start, finish)` — 빈 버킷 실체화 + `locf()`/`interpolate()` 채움 정책 | [사용법 §3](#3-빈-구간-채우기-time_bucket_gapfill) |
-| **풀텍스트 검색** | SAI `LIKE` + `index_analyzer`(ngram/standard/cjk/keyword + JSON) — 단어 중간 조각·공백 걸침·한글까지 진짜 부분문자열 매치, ALLOW FILTERING 불필요 | [fulltext-search.md](doc/timeseries/fulltext-search.md) |
-| **시계열 컴팩션 (TSCS)** | `TimeSeriesCompactionStrategy` — 창 정렬 + 창 내부 UCS 위임 + retention 창 통삭제 + 닫힌 창 동결(창당 1 SSTable, `WindowFrozenListener` 이벤트 훅, far-future 가드 `max_future_window`, **동결 시점에** 이미 만료된 TTL 데이터는 retention 없이 회수 — 동결 이후 만료되는 데이터는 `retention` 필요) + 지각 격리(flush/스트리밍 창 경계 스플릿 — 백필이 과거 창에 국소 편입, 레거시 걸침 SSTable 자동 분할) + **전용 memtable**(테이블별 옵트인 — 행을 쓰기 시점에 TSCS 창으로 배정해 flush 라우팅·64 MiB 파티션 상한 제거, 원시 배열 컬럼 저장으로 행당 힙 **5.5×↓** 실측, 계층화 테이블의 콜드 창은 flush 시점에 바로 청크로) | [timeseries-compaction.md](doc/timeseries/timeseries-compaction.md) · [timeseries-memtable.md](doc/timeseries/timeseries-memtable.md) · [설계 스펙](docs/superpowers/specs/2026-07-31-timeseries-compaction-design.md) |
-| **컬럼 지향 청크 코덱 (chunk format v4)** *(계층형 저장 1단계)* | 창 1개 = 공유 타임스탬프 축 + 일반 컬럼별 독립 섹션의 무손실 압축, 모든 블록이 독립 디코드·랜덤 접근. `double`은 ALP/ALP-RD(유일한 double 코덱), 정수·시각 계열은 FOR/델타 비트팩, `boolean`은 1비트팩, `text`·불투명 바이트는 사전(DICT)/RAW. 값이 일정한 컬럼은 CONSTANT, 전부 null인 컬럼은 ALL_NULL로 O(1) 처리. 운영 형태 2,000만 건 실측 **~1.7 B/행** (행 저장 11.9 B/행 대비 **7.1×**, 호스트 234) | [포맷 규격](doc/timeseries/chunk-format-v4.md) · [코덱 실측 비교](doc/timeseries/codec-bakeoff.md) · [설계 스펙](docs/superpowers/specs/2026-07-31-industrial-tiered-storage-design.md) |
-| **계층형 저장 (청크 스토어)** *(계층형 저장 2단계)* | 테이블 확장 `timeseries_tiering` 정책 — 백그라운드 재인코더가 hot_window를 지난 창을 청크로 압축해 `<테이블>__chunks`로 이동(지각 데이터 병합, cold_window 만료, CL 쿼럼 하한). `nodetool retier`/`tieringstatus`, `system_views.timeseries_tiering`. **투명 읽기(SP3)**: 베이스 테이블 SELECT가 핫 로우+청크를 자동 병합 — 시간범위·포인트·집계·gap-fill·LIMIT/DESC가 핫·콜드에 걸쳐 동작 | [tiered-storage.md](doc/timeseries/tiered-storage.md) |
-| **테스트 인프라** | 도커 통합 테스트 93건(릴리스 게이트), 3노드 클러스터 테스트 49건, 1억 건 스케일 하네스, jvm-dtest, JMH 성능 회귀 게이트, GC 비교(ZGC vs G1) | [보고서들](doc/timeseries/) |
-| **배포/CI** | Testcontainers 호환 도커 이미지, GitLab CI(빌드→테스트→이미지→통합 게이트→릴리스), 태그 릴리스 자동화 | [.gitlab-ci.yml](.gitlab-ci.yml) |
+```bash
+# 1. 순정 jar 자리에 넣는다
+cp apache-cassandra-6.0.0.jar $CASSANDRA_HOME/lib/
+
+# 2. 이게 설치의 전부다. 기존 데이터, 기존 CQL, 기존 운영 도구 그대로.
+#    nodetool version 도 여전히 6.0.0 이다 — 릴리즈 버전 자체가 상류 것이다.
+```
+
+파일 이름도 버전도 상류 것이라, jar 은 자기 이름으로 무엇인지 말해 주지 못합니다. 매니페스트가
+말합니다 — 상류는 이 속성들을 비워 둡니다:
+
+```bash
+unzip -p apache-cassandra-6.0.0.jar META-INF/MANIFEST.MF | grep -E 'Implementation-|Aster-'
+```
+
+```
+Implementation-Title:   Aster TSDB
+Implementation-Vendor:  KOPENS
+Aster-Product:          Aster Timeseries Database
+Aster-Upstream:         apache/cassandra cassandra-6.0
+Aster-Upstream-SHA:     35d6f8c81666df465ac3ea7e63bb8d186a6e0495
+```
+
+`Aster-Upstream-SHA` 는 이 빌드가 병합한 상류 커밋을 그대로 가리키므로 "밑에 깔린 Cassandra 가
+무엇이냐" 는 `git log` 로 확인되는 사실입니다. 그중 하나라도 빠지면 CI 가 빌드를 실패시킵니다.
+`main` 은 apache/cassandra 의 `cassandra-6.0` 과 계속 머지된 상태로 유지하며, 그 SHA 도 같은
+커밋에서 함께 움직입니다.
 
 ## 📖 문서
 
@@ -794,3 +842,9 @@ GC를 바꿔 비교할 수도 있습니다 — `SCALE_GC=g1`(기본은 `zgc`, `c
 ## 개발
 
 빌드/테스트/코드 스타일 규칙은 [CLAUDE.md](CLAUDE.md)와 [AGENTS.md](AGENTS.md)를 참고하세요(전체 테스트 스위트는 몇 시간이 걸리므로 대상 테스트만 실행합니다). 테스트 레이아웃은 [TESTING.md](TESTING.md)에 있습니다. 시계열 테스트 진입점: `org.apache.cassandra.cql3.functions.TimeSeriesFctsTest`, `org.apache.cassandra.db.aggregation.TimeBucketGapFillerTest`.
+
+
+## 라이선스
+
+Apache License 2.0, 업스트림과 같습니다 — `LICENSE`·`NOTICE` 는 그대로 둡니다.
+Apache Cassandra 는 Apache Software Foundation 의 상표이며, 이 프로젝트는 독립 포크입니다.
