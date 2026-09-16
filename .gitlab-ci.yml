@@ -18,6 +18,13 @@ workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_TAG
+    # A push to a branch that already has an open MR used to build the SAME COMMIT TWICE - once as
+    # a branch pipeline, once as the MR's - and this project has one dedicated runner with a ~28
+    # minute build (measured 2026-09-16: pipelines 67201 and 67202, same sha 7c3907e7, both
+    # running build-jar at the same moment). The MR pipeline is the one the merge gate reads, so
+    # the branch copy is pure cost. Branches with no MR still build.
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
     - if: $CI_COMMIT_BRANCH
 
 variables:
@@ -36,6 +43,10 @@ default:
     - git config --global --add safe.directory "$CI_PROJECT_DIR" || true
 
 build-jar:
+  # Throw-away work: a newer commit makes this run pointless, and the project has
+  # ONE dedicated runner. auto_cancel_pending_pipelines is already enabled, but it
+  # cannot cancel a RUNNING pipeline unless every running job says it is safe to.
+  interruptible: true
   stage: build
   timeout: 90m
   script:
@@ -73,6 +84,10 @@ build-jar:
 
 # Targeted tests only — the full Cassandra suite takes hours (see AGENTS.md).
 timeseries-tests:
+  # Throw-away work: a newer commit makes this run pointless, and the project has
+  # ONE dedicated runner. auto_cancel_pending_pipelines is already enabled, but it
+  # cannot cancel a RUNNING pipeline unless every running job says it is safe to.
+  interruptible: true
   stage: test
   timeout: 90m
   # One line per class. Full per-class output goes to build/ci-logs/ and is kept as an
@@ -105,6 +120,10 @@ timeseries-tests:
 # every jamm walk bigger), and a timeout verdict would eat the sample table that makes the
 # failure diagnosable.
 timeseries-heap-soak:
+  # Throw-away work: a newer commit makes this run pointless, and the project has
+  # ONE dedicated runner. auto_cancel_pending_pipelines is already enabled, but it
+  # cannot cancel a RUNNING pipeline unless every running job says it is safe to.
+  interruptible: true
   stage: test
   timeout: 90m
   needs: []
@@ -152,10 +171,14 @@ timeseries-heap-soak:
 #
 # Consumption (e.g. before the plantpulse-jdbc-cassandra-driver integration tests):
 #   curl -sH "PRIVATE-TOKEN: <token>" \
-#     "$CI_API_V4_URL/projects/<id>/packages/generic/cassandra-timeseries-docker/<version>/cassandra-timeseries-6.0.0-docker.tar" \
+#     "$CI_API_V4_URL/projects/<id>/packages/generic/aster-tsdb-docker/<version>/aster-tsdb-6.0.0-docker.tar" \
 #     | podman load   # or: docker load
 #   ./gradlew integrationTest -Pcassandra.image=aster-tsdb:6.0.0
 docker-image:
+  # Throw-away work: a newer commit makes this run pointless, and the project has
+  # ONE dedicated runner. auto_cancel_pending_pipelines is already enabled, but it
+  # cannot cancel a RUNNING pipeline unless every running job says it is safe to.
+  interruptible: true
   stage: image
   timeout: 90m
   needs: []
@@ -174,12 +197,12 @@ docker-image:
       --context "$CI_PROJECT_DIR"
       --dockerfile "$CI_PROJECT_DIR/docker/Dockerfile"
       --no-push
-      --tar-path "$CI_PROJECT_DIR/cassandra-timeseries-6.0.0-docker.tar"
+      --tar-path "$CI_PROJECT_DIR/aster-tsdb-6.0.0-docker.tar"
       --destination "aster-tsdb:6.0.0"
   artifacts:
-    name: "cassandra-timeseries-6.0.0-docker"
+    name: "aster-tsdb-6.0.0-docker"
     paths:
-      - cassandra-timeseries-6.0.0-docker.tar
+      - aster-tsdb-6.0.0-docker.tar
     expire_in: 3 days
 
 # Release gate: boot the image that is about to be published and run the time-series CQL
@@ -193,6 +216,10 @@ docker-image:
 # the Cassandra container over the network: it starts the container and drives every command through
 # `docker exec`, so the container being a sibling of this job rather than a child changes nothing.
 docker-integration-test:
+  # Throw-away work: a newer commit makes this run pointless, and the project has
+  # ONE dedicated runner. auto_cancel_pending_pipelines is already enabled, but it
+  # cannot cancel a RUNNING pipeline unless every running job says it is safe to.
+  interruptible: true
   stage: integration
   timeout: 60m
   needs:
@@ -216,7 +243,7 @@ docker-integration-test:
       when: manual
       allow_failure: true
   script:
-    - docker load -i cassandra-timeseries-6.0.0-docker.tar
+    - docker load -i aster-tsdb-6.0.0-docker.tar
     - ./docker/integration-test.sh aster-tsdb:6.0.0
   artifacts:
     name: "timeseries-integration-test-report"
@@ -235,6 +262,10 @@ docker-integration-test:
 # capacity rather than on the product is worse than no gate. Play it by hand when the cluster path
 # has changed (compaction, streaming, tiering) or before a release worth the extra confidence.
 docker-cluster-test:
+  # Throw-away work: a newer commit makes this run pointless, and the project has
+  # ONE dedicated runner. auto_cancel_pending_pipelines is already enabled, but it
+  # cannot cancel a RUNNING pipeline unless every running job says it is safe to.
+  interruptible: true
   stage: integration
   timeout: 60m
   needs:
@@ -260,7 +291,7 @@ docker-cluster-test:
       when: manual
       allow_failure: true
   script:
-    - docker load -i cassandra-timeseries-6.0.0-docker.tar
+    - docker load -i aster-tsdb-6.0.0-docker.tar
     - ./docker/cluster-test.sh aster-tsdb:6.0.0
   after_script:
     - docker rm -f cassandra-ts-cluster-1 cassandra-ts-cluster-2 cassandra-ts-cluster-3 || true
@@ -298,8 +329,8 @@ docker-image-publish:
     # Folded block scalar: a plain scalar cannot contain ": " (the JOB-TOKEN header), which broke the pipeline.
     - >-
       curl --fail --silent --show-error -H "JOB-TOKEN: $CI_JOB_TOKEN"
-      --upload-file cassandra-timeseries-6.0.0-docker.tar
-      "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/cassandra-timeseries-docker/${CI_COMMIT_TAG:-6.0.0}/cassandra-timeseries-6.0.0-docker.tar"
+      --upload-file aster-tsdb-6.0.0-docker.tar
+      "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/aster-tsdb-docker/${CI_COMMIT_TAG:-6.0.0}/aster-tsdb-6.0.0-docker.tar"
 
 # On tag pushes (e.g. 6.0.0-r1), publish a GitLab Release pointing at the built jar.
 changelog:

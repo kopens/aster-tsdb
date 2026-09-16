@@ -39,7 +39,7 @@ cd "$REPO"
 
 # The image the docker stages build and test. Tagged by git describe rather than a fixed 6.0.0 so a
 # run cannot silently test an image somebody else left behind under the release tag.
-IMAGE="${CI_LOCAL_IMAGE:-cassandra-timeseries:local-$(git rev-parse --short HEAD)}"
+IMAGE="${CI_LOCAL_IMAGE:-aster-tsdb:local-$(git rev-parse --short HEAD)}"
 STAGE="${CI_LOCAL_STAGE:-}"
 WITH_CLUSTER=false
 

@@ -618,7 +618,7 @@ def main():
         s.add_argument('--series', type=int, default=500)
         s.add_argument('--loaders', type=int, default=12)
         s.add_argument('--load-secs', type=int, default=0)
-        s.add_argument('--image', default='cassandra-timeseries:6.0.0')
+        s.add_argument('--image', default='aster-tsdb:6.0.0')
         s.add_argument('--md-out', default='', help='also write a Markdown report to this path')
         s.add_argument('--json-out', default='', help='also write machine-readable results here')
         s.add_argument('--table', default=TABLE, help='table to load into / query')
