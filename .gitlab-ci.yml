@@ -410,3 +410,58 @@ release:
           url: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/aster-tsdb/$CI_COMMIT_TAG/apache-cassandra-6.0.0-bin.tar.gz"
         - name: "apache-cassandra-6.0.0.jar (Aster TSDB)"
           url: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/aster-tsdb/$CI_COMMIT_TAG/apache-cassandra-6.0.0.jar"
+
+#---------------------------------------------------------------------------------------------------
+# mirror:github - publish main to github.com/kopens/aster-tsdb, but only bytes that passed.
+#
+# WHY A JOB AND NOT GitLab's BUILT-IN PUSH MIRROR
+# A push mirror fires the moment main moves, with no idea whether the pipeline went green - a red
+# main would be on the public landing page within seconds. This job runs after the two jobs that
+# actually gate main, so what reaches GitHub is what built and tested.
+#
+# WHY needs: [build-jar, timeseries-tests] AND NOT the docker jobs
+# Measured, not assumed: on $CI_DEFAULT_BRANCH every docker-* job is `when: manual` with
+# `allow_failure: true`. `needs:` on a manual job is not skipped - it waits for a human forever,
+# which would turn this mirror into a button nobody presses. build-jar and timeseries-tests carry
+# no rules, so they run on every ref and are the real gate for main.
+#
+# CREDENTIAL: project CI variable GITHUB_PUSH_TOKEN (masked, protected) - a fine-grained GitHub PAT
+# with contents:write on kopens/aster-tsdb and nothing else. Absent is a HARD FAILURE, not a skip:
+# a mirror that quietly does nothing is worse than one that is visibly broken.
+mirror:github:
+  stage: release
+  needs: ["build-jar", "timeseries-tests"]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  variables:
+    # A shallow clone cannot be pushed, and the submodule is not part of what GitHub needs.
+    GIT_DEPTH: "0"
+    GIT_SUBMODULE_STRATEGY: none
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates curl > /dev/null
+  script:
+    - |
+      set -e
+      [ -n "${GITHUB_PUSH_TOKEN:-}" ] || {
+        echo "[mirror] FAIL GITHUB_PUSH_TOKEN is not set - the GitHub mirror cannot run." >&2
+        echo "[mirror]      Add it as a masked+protected project variable (a fine-grained PAT with" >&2
+        echo "[mirror]      contents:write on kopens/aster-tsdb). Failing instead of skipping: a" >&2
+        echo "[mirror]      mirror that silently does nothing looks identical to a working one." >&2
+        exit 1
+      }
+      echo "[mirror] pushing $CI_COMMIT_SHA to github.com/kopens/aster-tsdb main"
+      git push "https://x-access-token:${GITHUB_PUSH_TOKEN}@github.com/kopens/aster-tsdb.git" \
+        "${CI_COMMIT_SHA}:refs/heads/main"
+    - |
+      set -e
+      # "git push exited 0" and "GitHub main is at that commit" are different statements. Ask GitHub.
+      got=$(curl -sS -H "Authorization: Bearer ${GITHUB_PUSH_TOKEN}" \
+                 -H "Accept: application/vnd.github+json" \
+                 "https://api.github.com/repos/kopens/aster-tsdb/git/ref/heads/main" \
+            | tr ',' '\n' | sed -n 's/.*"sha" *: *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)
+      echo "[mirror] github main = ${got:-<could not read>}"
+      [ "$got" = "$CI_COMMIT_SHA" ] || {
+        echo "[mirror] FAIL github main is '${got:-<unreadable>}', expected $CI_COMMIT_SHA" >&2
+        exit 1
+      }
+      echo "[mirror] OK   github main == $CI_COMMIT_SHA"
