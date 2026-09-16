@@ -1,6 +1,6 @@
 # time-series CQL integration test
 
-image `cassandra-timeseries:6.0.0` · runtime `docker` · 2026-07-31 07:13 UTC
+image `aster-tsdb:6.0.0` · runtime `docker` · 2026-07-31 07:13 UTC
 
 **52 passed, 0 failed** — assertions run against a live node booted from the image.
 

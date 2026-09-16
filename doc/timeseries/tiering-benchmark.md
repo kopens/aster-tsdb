@@ -15,7 +15,7 @@
 | 항목 | 값 |
 | --- | --- |
 | 호스트 | **234** — Xeon Silver 4114T (Skylake-SP, 40 threads, 250 GB RAM), 단일 노드 도커 컨테이너 |
-| 이미지 | `cassandra-timeseries:6.0.0-v4wired` (CI와 동일 베이스, chunk format **v4**, master `5cbdf914fa`) · 2026-08-04 |
+| 이미지 | `aster-tsdb:6.0.0-v4wired` (CI와 동일 베이스, chunk format **v4**, master `5cbdf914fa`) · 2026-08-04 |
 | 테이블 형태 | `tm_tag_point` — 파티션 키 `tag_id`, 클러스터링 `timestamp DESC`, static 7개, 일반 컬럼 8개 |
 | 행 수 | **20,000,000** |
 | 태그(파티션) | **500개**, 태그당 **40,000행** = 1초 간격 11.1시간 |

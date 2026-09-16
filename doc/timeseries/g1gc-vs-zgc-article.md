@@ -2,7 +2,7 @@
 
 **Apache Cassandra 6.0.0 기반 시계열 DB에 1억 건을 넣고, 두 가비지 컬렉터로 같은 쿼리를 돌려 비교한 기록**
 
-작성일: 2026-07-30 · 대상: [cassandra-timeseries](https://dev.kopens.io/common/cassandra-timeseries) (Apache Cassandra 6.0.0 + 네이티브 시계열 CQL 함수)
+작성일: 2026-07-30 · 대상: [cassandra-timeseries](https://dev.kopens.io/common/aster-tsdb) (Apache Cassandra 6.0.0 + 네이티브 시계열 CQL 함수)
 
 > 측정 환경: 구형 24코어 컨테이너(X5670급), v3 청크 시절. GC 간 **상대 비교**와 결론
 > (Generational ZGC 채택 — 현행 설정)은 유효하나, 절대 수치는 현재 기준이 아니다.
@@ -126,11 +126,11 @@ GC 설정 적용 → 컨테이너 기동 → 웜업 패스(쿼리 17종) → 측
 # ZGC (기본값)
 SCALE_ROWS=100000000 SCALE_SERIES=1000 SCALE_HEAP=16G SCALE_LOADERS=16 \
 SCALE_GC=zgc SCALE_PASSES=2 SCALE_WBENCH_ROWS=10000000 \
-SCALE_REPORT=build/scale-zgc.html ./docker/scale-test.sh cassandra-timeseries:6.0.0
+SCALE_REPORT=build/scale-zgc.html ./docker/scale-test.sh aster-tsdb:6.0.0
 
 # G1 (같은 데이터 재사용)
 SCALE_SKIP_LOAD=1 SCALE_GC=g1 SCALE_PASSES=2 SCALE_WBENCH_ROWS=10000000 \
-SCALE_REPORT=build/scale-g1.html ./docker/scale-test.sh cassandra-timeseries:6.0.0
+SCALE_REPORT=build/scale-g1.html ./docker/scale-test.sh aster-tsdb:6.0.0
 
 # 비교표 생성
 python3 docker/gc-compare.py build/scale-zgc build/scale-g1 > gc-comparison.md

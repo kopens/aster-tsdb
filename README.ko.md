@@ -1,6 +1,6 @@
 [English](README.md) · [한국어](README.ko.md)
 
-# cassandra-timeseries
+# aster-tsdb
 
 **Apache Cassandra for Industrial Timeseries Workload**
 — 산업 현장의 센서·태그 데이터를 위한 분산 시계열 데이터베이스.
@@ -689,8 +689,8 @@ ALTER TABLE pp.tm_tag_point WITH extensions = {};
 유닛 테스트는 함수를 프로세스 안에서 검증하지만, [docker/integration-test.sh](docker/integration-test.sh)는 **실제 이미지를 띄워** 스키마 생성부터 읽기 경로·집계·네이티브 프로토콜까지 통과하는 시계열 CQL 결과를 손으로 계산한 값과 대조합니다(93개 검증, 프로세스 재시작 포함).
 
 ```bash
-docker build -t cassandra-timeseries:6.0.0 -f docker/Dockerfile .
-./docker/integration-test.sh cassandra-timeseries:6.0.0     # CONTAINER_RUNTIME=podman 도 지원
+docker build -t aster-tsdb:6.0.0 -f docker/Dockerfile .
+./docker/integration-test.sh aster-tsdb:6.0.0     # CONTAINER_RUNTIME=podman 도 지원
 ```
 
 실행하면 항목·CQL·결과가 그대로 출력되고, `build/timeseries-it-report.html`(+ 같은 내용의 `.md`)에 보고서가 생성됩니다. **실행 결과 예시: [통합 테스트 보고서](doc/timeseries/integration-test-report.md)** — 각 검증의 CQL·응답·소요 시간이 그대로 들어 있습니다.
@@ -702,7 +702,7 @@ CI에서는 태그를 밀면 `docker-image → docker-integration-test → docke
 [docker/cluster-test.sh](docker/cluster-test.sh)는 도커 네트워크 위에 실제 컨테이너 3개를 RF=3으로 띄워 49개를 검증합니다 — 단일 노드가 닿지 못하는 것들입니다: 코디네이터 3개 각각을 통한 집계·gap-fill, 레플리카마다 독립적으로 일어나는 TSCS 동결 수렴, OS 프로세스 간 실제 repair 스트리밍, 레플리카를 정말 정지시킨 상태의 QUORUM.
 
 ```bash
-./docker/cluster-test.sh cassandra-timeseries:6.0.0
+./docker/cluster-test.sh aster-tsdb:6.0.0
 ```
 
 CI에서는 수동입니다(2G JVM 3개가 공용 러너에 안 들어갈 수 있음). 컴팩션·스트리밍·repair·계층화를 건드린 릴리스라면 손으로 한 번 돌리십시오.
@@ -724,7 +724,7 @@ CI에서는 수동입니다(2G JVM 3개가 공용 러너에 안 들어갈 수 �
 
 ```bash
 SCALE_ROWS=100000000 SCALE_SERIES=1000 SCALE_LOADERS=16 SCALE_HEAP=16G \
-  ./docker/scale-test.sh cassandra-timeseries:6.0.0
+  ./docker/scale-test.sh aster-tsdb:6.0.0
 # 적재된 데이터를 재사용해 쿼리만 다시 재기: SCALE_SKIP_LOAD=1
 ```
 

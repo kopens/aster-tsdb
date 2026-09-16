@@ -7,15 +7,15 @@
 # release gate: the unit tests exercise the functions in-process, this exercises them
 # through a real node (schema, read path, aggregation, native protocol, cqlsh output).
 #
-#   ./docker/integration-test.sh [image]           # default: cassandra-timeseries:6.0.0
+#   ./docker/integration-test.sh [image]           # default: aster-tsdb:6.0.0
 #   CONTAINER_RUNTIME=podman ./docker/integration-test.sh
 #
 # Build the image first:
-#   docker build -t cassandra-timeseries:6.0.0 -f docker/Dockerfile .
+#   docker build -t aster-tsdb:6.0.0 -f docker/Dockerfile .
 #
 set -uo pipefail
 
-IMAGE="${1:-cassandra-timeseries:6.0.0}"
+IMAGE="${1:-aster-tsdb:6.0.0}"
 RUNTIME="${CONTAINER_RUNTIME:-}"
 CONTAINER="cassandra-ts-it-$$"
 READY_TIMEOUT="${READY_TIMEOUT:-300}"
@@ -256,7 +256,7 @@ HTML
 
 # The image under test is built from the repo (docker/Dockerfile compiles it in a builder stage), so
 # the version the node reports is the one thing that distinguishes "I tested this change" from "I
-# tested whatever was tagged cassandra-timeseries:6.0.0 last month". It also pins the fork's
+# tested whatever was tagged aster-tsdb:6.0.0 last month". It also pins the fork's
 # versioning rule -- an upstream merge that resets base.version to an alpha would land here.
 section "image identity"
 check "the node reports release_version 6.0.0" \

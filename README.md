@@ -1,6 +1,6 @@
 [English](README.md) · [한국어](README.ko.md)
 
-# cassandra-timeseries
+# aster-tsdb
 
 **Apache Cassandra for industrial time-series workloads** — a distributed time-series database for sensor and tag data from factories and plants.
 
@@ -682,8 +682,8 @@ The build artifact is always `apache-cassandra-6.0.0.jar` (`base.version` is pin
 Unit tests exercise the functions in-process; [docker/integration-test.sh](docker/integration-test.sh) **boots a real image** and checks time-series CQL results against hand-computed values all the way through schema creation, the read path, aggregation and the native protocol — 93 assertions, including a process restart.
 
 ```bash
-docker build -t cassandra-timeseries:6.0.0 -f docker/Dockerfile .
-./docker/integration-test.sh cassandra-timeseries:6.0.0     # CONTAINER_RUNTIME=podman also works
+docker build -t aster-tsdb:6.0.0 -f docker/Dockerfile .
+./docker/integration-test.sh aster-tsdb:6.0.0     # CONTAINER_RUNTIME=podman also works
 ```
 
 It prints every assertion with the CQL it ran and the rows it got back, and writes a report to `build/timeseries-it-report.html` (and the same content as `.md`). **Example output: [integration test report](doc/timeseries/integration-test-report.md).**
@@ -695,7 +695,7 @@ In CI, pushing a tag runs `docker-image → docker-integration-test → docker-i
 [docker/cluster-test.sh](docker/cluster-test.sh) runs three real containers on a docker network at RF=3 — 49 assertions covering what a single node cannot reach: aggregation and gap-fill through every coordinator, TSCS freeze converging on each replica independently, a real repair stream between operating-system processes, and QUORUM behaviour with a replica actually stopped.
 
 ```bash
-./docker/cluster-test.sh cassandra-timeseries:6.0.0
+./docker/cluster-test.sh aster-tsdb:6.0.0
 ```
 
 It is manual in CI (three 2G JVMs may not fit a shared runner), so run it by hand before any release that touches compaction, streaming, repair or tiering.
@@ -717,7 +717,7 @@ It takes the minimum of three sweeps (one sweep is not a measurement on a shared
 
 ```bash
 SCALE_ROWS=100000000 SCALE_SERIES=1000 SCALE_LOADERS=16 SCALE_HEAP=16G \
-  ./docker/scale-test.sh cassandra-timeseries:6.0.0
+  ./docker/scale-test.sh aster-tsdb:6.0.0
 # Reuse loaded data and re-measure queries only: SCALE_SKIP_LOAD=1
 ```
 

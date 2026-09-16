@@ -1,7 +1,7 @@
 # 계층화 벤치마크 원자료 — 비계층 베이스라인
 
 **호스트 234** — Xeon Silver 4114T (Skylake-SP, 40 threads, 250 GB RAM) · **2026-08-04** ·
-도커 이미지 `cassandra-timeseries:6.0.0-v4wired` (CI와 동일 베이스, chunk format **v4**, master `5cbdf914fa`) ·
+도커 이미지 `aster-tsdb:6.0.0-v4wired` (CI와 동일 베이스, chunk format **v4**, master `5cbdf914fa`) ·
 하네스 [`docker/scale-test.sh`](../../docker/scale-test.sh) (12 로더 · 100행 unlogged batch · 힙 16G · generational ZGC) ·
 **20,000,000행 / 500태그**.
 
@@ -11,7 +11,7 @@
 
 # tm_tag_point scale test
 
-image `cassandra-timeseries:6.0.0-v4wired` · table `scale.tm_tag_point` · single node in a container · 2026-08-03 19:59 UTC
+image `aster-tsdb:6.0.0-v4wired` · table `scale.tm_tag_point` · single node in a container · 2026-08-03 19:59 UTC
 
 - **20,000,000** rows loaded
 - **500** tags (partitions), **40,000 rows per tag** = 11.1 h of history at 1 sample/1s

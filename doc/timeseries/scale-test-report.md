@@ -20,5 +20,5 @@
 
 ```bash
 SCALE_ROWS=100000000 SCALE_SERIES=1000 SCALE_LOADERS=16 SCALE_HEAP=16G \
-  ./docker/scale-test.sh cassandra-timeseries:6.0.0
+  ./docker/scale-test.sh aster-tsdb:6.0.0
 ```

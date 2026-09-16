@@ -25,9 +25,9 @@ so use the API instead.
 ```bash
 glab ci list --per-page 5
 glab ci get -p <id>                                            # job names + statuses
-glab api projects/common%2Fcassandra-timeseries/runners        # is anything online?
-glab api projects/common%2Fcassandra-timeseries/pipelines/<id>/jobs
-glab api projects/common%2Fcassandra-timeseries/jobs/<id>/trace | sed -e 's/\x1b\[[0-9;]*m//g'
+glab api projects/common%2Faster-tsdb/runners        # is anything online?
+glab api projects/common%2Faster-tsdb/pipelines/<id>/jobs
+glab api projects/common%2Faster-tsdb/jobs/<id>/trace | sed -e 's/\x1b\[[0-9;]*m//g'
 ```
 
 Check this before quoting CI as evidence, and say plainly which of the runs below you actually did.
@@ -44,7 +44,7 @@ the docker image, the integration test.
 ```
 
 It tags the image by commit, so a run cannot silently verify something left behind under
-`cassandra-timeseries:6.0.0`, and it fails if the jar predates the run — `ant` reports success
+`aster-tsdb:6.0.0`, and it fails if the jar predates the run — `ant` reports success
 without building when it is missing from PATH, and `ant-log-summary.py` prints `BUILD SUCCESSFUL` on
 empty input, so a green log is not evidence on its own.
 

@@ -22,7 +22,7 @@
 
 > **This fork first.** Everything below is Apache Cassandra's own contribution guide and applies to
 > work you intend to send upstream. Changes to *this* fork are pushed to
-> `dev.kopens.io/common/cassandra-timeseries` (and mirrored to GitHub); see
+> `dev.kopens.io/common/aster-tsdb` (and mirrored to GitHub); see
 > [CLAUDE.md](CLAUDE.md) and [AGENTS.md](AGENTS.md) for the build, test and git workflow, and read
 > the section immediately below before writing a commit message.
 

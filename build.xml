@@ -34,6 +34,13 @@
 
     <!-- default version and SCM information -->
     <property name="base.version" value="6.0.0"/>
+
+    <!-- ~~ PLANTPULSE FORK CHANGE ~~ Aster TSDB 정체성.
+         파일 이름은 상류와 같게 두고(드롭인) 정체성은 MANIFEST 로 말한다. -->
+    <property name="aster.product" value="Aster Timeseries Database"/>
+    <property name="aster.upstream.ref" value="apache/cassandra cassandra-6.0"/>
+    <!-- 상류 병합 때 함께 올린다. 지금 값은 merge-base HEAD upstream/cassandra-6.0 실측이다. -->
+    <property name="aster.upstream.sha" value="35d6f8c81666df465ac3ea7e63bb8d186a6e0495"/>
     <property name="scm.connection" value="scm:https://gitbox.apache.org/repos/asf/cassandra.git"/>
     <property name="scm.developerConnection" value="scm:https://gitbox.apache.org/repos/asf/cassandra.git"/>
     <property name="scm.url" value="https://gitbox.apache.org/repos/asf?p=cassandra.git"/>
@@ -978,11 +985,26 @@
         <manifest>
         <!-- <section name="org/apache/cassandra/infrastructure"> -->
           <attribute name="Multi-Release" value="true"/>
-          <attribute name="Implementation-Title" value="Cassandra"/>
+          <!-- ~~ PLANTPULSE FORK CHANGE ~~
+               이 jar 은 파일 이름이 상류와 «같다» (완전 드롭인). 그래서 「이게 스톡 카산드라냐
+               Aster TSDB 냐」에 답하는 것은 파일 이름이 아니라 여기뿐이다. 바꾸기 전에는 우리
+               포크가 자기를 Implementation-Vendor: Apache 라고 말하고 있었다 — 사실이 아니다.
+
+               Implementation-Version 은 «상류 버전 그대로» 둔다. 드롭인이 목적이고, nodetool
+               version / ReleaseVersion 은 어차피 src/resources/.../version.properties 에서
+               오므로(FBUtilities.getReleaseVersionString) 여기를 바꿔도 런타임 보고는 안 바뀐다.
+               MANIFEST 의 Implementation-* 를 읽는 소스는 이 트리에 «없다» (실측 2026-09-16). -->
+          <attribute name="Implementation-Title" value="Aster TSDB"/>
           <attribute name="Implementation-Version" value="${version}"/>
-          <attribute name="Implementation-Vendor" value="Apache"/>
+          <attribute name="Implementation-Vendor" value="KOPENS"/>
           <attribute name="Implementation-Git-SHA" value="${git.sha}"/>
           <attribute name="Implementation-Build-Date" value="${build.date}"/>
+          <!-- 상류가 쓰지 않는 키라 병합 충돌도, 스톡과의 혼동도 없다.
+               Aster-Upstream-SHA 는 «선언» 이다 — 계산식으로 두면 upstream 리모트를 받아 오지
+               않는 CI 에서 Unknown 이 되어 쓸모가 없다. 상류를 병합할 때 이 값을 함께 올린다. -->
+          <attribute name="Aster-Product" value="${aster.product}"/>
+          <attribute name="Aster-Upstream" value="${aster.upstream.ref}"/>
+          <attribute name="Aster-Upstream-SHA" value="${aster.upstream.sha}"/>
         <!-- </section> -->
         </manifest>
       </jar>

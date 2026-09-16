@@ -21,11 +21,11 @@ are what keeps the ~19,000 of them out. Refactors, test-only changes and docs ge
 
 **Versioning rule:** the build must produce `build/apache-cassandra-6.0.0.jar` — keep `base.version` in [build.xml](build.xml) at `6.0.0` (do not let upstream merges reset it to alpha/beta/snapshot versions). Build with **Java 21** (CI image `eclipse-temurin:21-jdk`; despite AGENTS.md's upstream text naming Java 11 as default). Releases: pushing a tag (e.g. `v6.0.0`) publishes a GitLab Release with the jar; branch `6.0.0` mirrors `main`.
 
-**GitLab rule:** this project lives on GitLab at `dev.kopens.io/common/cassandra-timeseries` (remote `origin`). Do every GitLab-side operation through the **`glab` CLI**, which is installed and already authenticated here (`glab auth status` → `dev.kopens.io` as `lsb`) — pipelines (`glab ci list`, `glab ci status`, `glab ci trace`), merge requests (`glab mr ...`), issues (`glab issue ...`), releases (`glab release ...`), and repo/branch queries (`glab repo ...`, `glab api ...`). Do not reach for the web UI, raw `curl` against `/api/v4`, or a hand-rolled token: `glab` already holds the credentials, so anything else means re-authenticating and usually means a token in a command line. Plain `git push`/`git fetch` against `origin` stays plain git — the rule is about GitLab's own surfaces, not the git protocol.
+**GitLab rule:** this project lives on GitLab at `dev.kopens.io/common/aster-tsdb` (remote `origin`). Do every GitLab-side operation through the **`glab` CLI**, which is installed and already authenticated here (`glab auth status` → `dev.kopens.io` as `lsb`) — pipelines (`glab ci list`, `glab ci status`, `glab ci trace`), merge requests (`glab mr ...`), issues (`glab issue ...`), releases (`glab release ...`), and repo/branch queries (`glab repo ...`, `glab api ...`). Do not reach for the web UI, raw `curl` against `/api/v4`, or a hand-rolled token: `glab` already holds the credentials, so anything else means re-authenticating and usually means a token in a command line. Plain `git push`/`git fetch` against `origin` stays plain git — the rule is about GitLab's own surfaces, not the git protocol.
 
 **GitHub mirror rule:** every push of `main` (and of release tags) goes to BOTH remotes: `origin`
-(GitLab, the primary) and `github` = `git@github-cassandra-timeseries:kopens/cassandra-timeseries.git`
-(the public mirror at github.com/kopens/cassandra-timeseries — the ssh alias uses the deploy key
+(GitLab, the primary) and `github` = `git@github-cassandra-timeseries:kopens/aster-tsdb.git`
+(the public mirror at github.com/kopens/aster-tsdb — the ssh alias uses the deploy key
 `~/.ssh/id_ed25519_cassandra_timeseries`). The mirror must never be left behind: after pushing
 origin, push github in the same breath (`git push github main` / `git push github <tag>`; a moved
 release tag is replaced with a delete-then-push). GitHub renders `README.md`, which is the English
@@ -61,8 +61,8 @@ constraints in [doc/timeseries/production-rollout.md](doc/timeseries/production-
   (kopens-234) has been online since 2026-08-26 and jobs really execute (verified 2026-09-05).
   So a red pipeline is now a statement about the code — pipeline #53500's `timeseries-tests`
   failure was a real one, a test left behind by 417e5d2336. Check with
-  `glab api projects/common%2Fcassandra-timeseries/runners` and read the job trace
-  (`glab api projects/common%2Fcassandra-timeseries/jobs/<id>/trace`; `glab ci get -p <id>`
+  `glab api projects/common%2Faster-tsdb/runners` and read the job trace
+  (`glab api projects/common%2Faster-tsdb/jobs/<id>/trace`; `glab ci get -p <id>`
   lists the jobs). `.build/sh/ci-local` is still the fuller gate — say which runs you actually did.
 - **Test runs must be serial.** `ci-test` starts with a `realclean`, so a second concurrent run
   deletes the first's `build/lib/jars` and the victim fails with hundreds of `package org.slf4j does

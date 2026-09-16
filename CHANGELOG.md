@@ -91,4 +91,4 @@ Each entry below is a summary; `CHANGES.txt` carries the full text, and the desi
   expensive stretch is stepped over after finitely many halvings instead of stalling new-tag
   discovery permanently.
 
-[v6.0.0]: https://dev.kopens.io/common/cassandra-timeseries/-/releases/v6.0.0
+[v6.0.0]: https://dev.kopens.io/common/aster-tsdb/-/releases/v6.0.0

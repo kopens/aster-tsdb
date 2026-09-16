@@ -21,11 +21,11 @@
 # (org.apache.cassandra.distributed.test.timeseries.*), which cover the same invariants in-JVM and
 # run in CI on every pipeline. This script is the release-gate counterpart: same image, real cluster.
 #
-#   ./docker/cluster-test.sh [image]              # default: cassandra-timeseries:6.0.0
+#   ./docker/cluster-test.sh [image]              # default: aster-tsdb:6.0.0
 #   CONTAINER_RUNTIME=podman ./docker/cluster-test.sh
 #
 # Build the image first:
-#   docker build -t cassandra-timeseries:6.0.0 -f docker/Dockerfile .
+#   docker build -t aster-tsdb:6.0.0 -f docker/Dockerfile .
 #
 # The containers are LEFT RUNNING at the end, with the removal command printed -- the data is worth
 # keeping around after a failure. Re-running the script removes them first.
@@ -33,7 +33,7 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMAGE="${1:-cassandra-timeseries:6.0.0}"
+IMAGE="${1:-aster-tsdb:6.0.0}"
 RUNTIME="${CONTAINER_RUNTIME:-}"
 NET="${CLUSTER_NET:-ts-cluster-net}"
 NET_SUBNET="${CLUSTER_NET_SUBNET:-172.32.0.0/16}"
@@ -301,7 +301,7 @@ HTML
     } > "$REPORT"
 
     {
-        printf '# cassandra-timeseries 3-node cluster test\n\n'
+        printf '# aster-tsdb 3-node cluster test\n\n'
         printf 'image `%s` · runtime `%s` · RF=3 · %s\n\n' "$IMAGE" "$RUNTIME" "$(date -u '+%Y-%m-%d %H:%M UTC')"
         printf '**%s passed, %s failed** — assertions run against three containers on one docker network.\n' \
             "$PASS" "$FAIL"
