@@ -1,14 +1,55 @@
 [English](README.md) · [한국어](README.ko.md)
 
-# aster-tsdb
+# Aster Timeseries Database
 
-**Apache Cassandra for industrial time-series workloads** — a distributed time-series database for sensor and tag data from factories and plants.
+**A drop-in Apache Cassandra 6.0 with industrial time-series built in.** `aster-tsdb` is KOPENS' fork of
+[apache/cassandra](https://github.com/apache/cassandra) (`cassandra-6.0` branch) for sensor and tag data from
+factories and plants.
 
 Time-series data from industrial sites has a few properties of its own: every tag (series) accumulates endlessly at second resolution, years of it must be retained for compliance, edge devices that lost connectivity push days of backlog in one go (late backfill), and queries are almost always "this tag, this period". Stock Cassandra handles this workload, but compression, retention and aggregation all stay the application's problem.
 
 This fork moves that part **into the database** — time-series computation finishes on the server (21 CQL functions plus gap-fill), old data is compressed and expired automatically (tiered storage plus a time-series compaction strategy), and **CQL does not change**. Compressed history reads back through an ordinary `SELECT` (transparent reads). The application never has to know whether the data is compressed.
 
-It is a fork of [apache/cassandra](https://github.com/apache/cassandra) (`cassandra-6.0` branch). The on-disk format and CQL grammar are upstream's, so it **reads existing 6.0 data as-is** — every new feature is opt-in. Spark integration comes from the companion fork [cassandra-spark-connector](https://dev.kopens.io/common/cassandra-spark-connector) (Spark 4.1.2).
+## It is a drop-in, on purpose
+
+The build produces **`apache-cassandra-6.0.0.jar`** — the upstream file name, not a renamed one. The on-disk
+format and the CQL grammar are upstream's, so it **reads existing 6.0 data as-is** and every new feature is
+opt-in. Swapping the jar into an existing 6.0.0 installation is the whole installation procedure; nothing that
+reads a version string sees a different answer, including `nodetool version`, which still reports `6.0.0`
+because the release version *is* upstream's.
+
+That is the point — and it raises the obvious question: **so how do you tell an Aster jar from a stock one?**
+The identity is in the jar manifest, which upstream leaves empty:
+
+```bash
+unzip -p apache-cassandra-6.0.0.jar META-INF/MANIFEST.MF | grep -E 'Implementation-|Aster-'
+```
+
+```
+Implementation-Title:   Aster TSDB
+Implementation-Version: 6.0.0                      <- upstream's release version, unchanged
+Implementation-Vendor:  KOPENS
+Aster-Product:          Aster Timeseries Database
+Aster-Upstream:         apache/cassandra cassandra-6.0
+Aster-Upstream-SHA:     35d6f8c81666df465ac3ea7e63bb8d186a6e0495
+```
+
+A stock Apache jar has none of the `Aster-*` attributes. `Aster-Upstream-SHA` names the exact upstream commit
+this build was merged with, so "which Cassandra is underneath?" has an answer you can `git log`, not a claim.
+CI fails the build if any of those attributes is missing, so the identity cannot quietly fall off.
+
+**Upstream is followed, not frozen.** `main` is kept merged with apache/cassandra's `cassandra-6.0`; when
+upstream releases, we move with it and `Aster-Upstream-SHA` moves in the same commit. See
+[Branches and upstream policy](#branches-and-upstream-policy).
+
+Spark integration comes from the companion fork [cassandra-spark-connector](https://dev.kopens.io/common/cassandra-spark-connector) (Spark 4.1.2).
+
+### Licence and attribution
+
+Apache License 2.0, upstream's — `LICENSE`, `NOTICE` and the per-file copyright headers are kept intact, and
+our own changes are marked `~~ PLANTPULSE FORK CHANGE ~~` in the source. Apache Cassandra is a trademark of the
+Apache Software Foundation; this is an independent fork and is **not affiliated with or endorsed by the ASF**.
+The product name in the manifest exists precisely so the two cannot be mistaken for each other.
 
 > Deep-dive documents under [doc/timeseries/](doc/timeseries/) are currently written in Korean; [examples.md](doc/timeseries/examples.md) is in English.
 
@@ -737,11 +778,12 @@ Where the scale test measures the execution time of one analytical query, throug
 - Jar from the latest master build: *CI/CD → Pipelines → the `build-jar` artifact*.
 - Pushing a tag (e.g. `v6.0.0`) publishes a [Release](../../-/releases) with a jar download link.
 
-> **Check what CI is actually telling you.** The project's runners have been offline since 2026-08-07, so pipelines fail at `stuck_pending_no_matching_runners` without starting a job — a red pipeline in that period is not a statement about the code. `glab ci list` and `glab ci get -p <id>` show the reason. Until runners are restored, `.build/sh/ci-local` and `docker/cluster-test.sh` are the verification. See [production-rollout.md §6](doc/timeseries/production-rollout.md).
+> **On red pipelines, check what CI is actually telling you.** The project's runner was offline from 2026-08-07, and pipelines from that period failed at `stuck_pending_no_matching_runners` without starting a job — those reds are not statements about the code. The runner is back (measured 2026-09-16; pipelines have been green since 2026-09-06), but the habit is worth keeping: `glab ci list` and `glab ci get -p <id>` show the reason before you go looking for a bug. `.build/sh/ci-local` and `docker/cluster-test.sh` reproduce the verification locally. See [production-rollout.md §6](doc/timeseries/production-rollout.md).
 
 ## Branches and upstream policy
 
-- `master` (= the `6.0.0` branch): the release line. It must be **kept merged** with the latest upstream `cassandra-6.0` branch of apache/cassandra (remote `upstream`).
+- `main` is the release line and the default branch. It must be **kept merged** with the latest upstream `cassandra-6.0` branch of apache/cassandra (remote `upstream`), and `aster.upstream.sha` in `build.xml` moves in the same commit — it must equal `git merge-base main upstream/cassandra-6.0`.
+- `6.0.0` is the old name of that line, left behind at 2026-08-30. It is **not** maintained; do not branch from it.
 - Recurring conflict points: `CHANGES.txt`, `debian/changelog`, the `modules/accord` submodule pointer, `cql3/statements/SelectStatement.java` (the gap-fill wiring).
 
 ## Development
