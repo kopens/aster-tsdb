@@ -1,3 +1,5 @@
+<p align="center"><img src="doc/brand/banner.png" alt="Aster TSDB - Aster Timeseries Database" width="900"></p>
+
 [English](README.md) · [한국어](README.ko.md)
 
 # Aster Timeseries Database
