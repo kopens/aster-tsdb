@@ -22,7 +22,7 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMAGE="${1:-cassandra-timeseries:6.0.0}"
+IMAGE="${1:-aster-tsdb:6.0.0}"
 ROWS="${SCALE_ROWS:-20000000}"
 SERIES="${SCALE_SERIES:-500}"
 LOADERS="${SCALE_LOADERS:-12}"

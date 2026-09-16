@@ -1,15 +1,54 @@
+<p align="center"><img src="doc/brand/banner.png" alt="Aster TSDB - Aster Timeseries Database" width="900"></p>
+
 [English](README.md) · [한국어](README.ko.md)
 
-# cassandra-timeseries
+# Aster Timeseries Database
 
-**Apache Cassandra for Industrial Timeseries Workload**
-— 산업 현장의 센서·태그 데이터를 위한 분산 시계열 데이터베이스.
+**산업 시계열을 데이터베이스 안에 넣은, 드롭인 Apache Cassandra 6.0.** `aster-tsdb` 는 공장·플랜트의
+센서·태그 데이터를 위한 KOPENS 의 [apache/cassandra](https://github.com/apache/cassandra)(`cassandra-6.0` 브랜치) 포크입니다.
 
 공장·플랜트의 시계열 데이터는 몇 가지 고유한 성질을 가집니다: 태그(시리즈)마다 초 단위로 끝없이 쌓이고, 몇 년치를 규정상 보관해야 하며, 엣지 장비가 통신 두절 뒤 며칠치를 한꺼번에 밀어 넣고(지각 백필), 조회는 거의 항상 "이 태그의 이 기간"입니다. 범용 Cassandra는 이 워크로드를 감당하지만, 압축·보존·집계는 전부 애플리케이션 몫으로 남습니다.
 
 이 포크는 그 부분을 **데이터베이스 안으로 가져옵니다** — 시계열 연산을 서버에서 끝내고(21종 CQL 함수 + gap-fill), 오래된 데이터를 자동으로 압축·보존하며(계층형 저장 + 시계열 전용 컴팩션), 그러면서도 **CQL은 그대로**입니다. 압축된 과거 데이터도 평범한 `SELECT`로 읽힙니다(투명 읽기). 애플리케이션은 데이터가 압축돼 있는지 알 필요가 없습니다.
 
-[apache/cassandra](https://github.com/apache/cassandra)(`cassandra-6.0` 브랜치)의 포크이며, 온디스크 포맷·CQL 문법은 업스트림 그대로라 **기존 6.0 데이터를 그대로 읽습니다**(새 기능은 전부 옵트인). Spark 연동은 짝이 되는 포크 [cassandra-spark-connector](https://dev.kopens.io/common/cassandra-spark-connector)(Spark 4.1.2)로 제공됩니다.
+## 드롭인이다 — 의도한 것입니다
+
+빌드 산출물은 **`apache-cassandra-6.0.0.jar`** 입니다. 개명한 이름이 아니라 **상류와 같은 파일 이름**입니다.
+온디스크 포맷과 CQL 문법이 업스트림 그대로라 **기존 6.0 데이터를 그대로 읽고**, 새 기능은 전부 옵트인입니다.
+기존 6.0.0 설치에 jar 를 바꿔 넣는 것이 설치 절차의 전부이며, 버전 문자열을 읽는 어떤 것도 다른 답을 보지
+않습니다 — `nodetool version` 도 여전히 `6.0.0` 입니다. 릴리즈 버전 자체가 업스트림 것이기 때문입니다.
+
+바로 그게 목적이고, 그래서 당연한 질문이 따라옵니다 — **그러면 이게 진짜 Cassandra 인지 Aster TSDB 인지
+어떻게 아나?** 정체성은 업스트림이 비워 두는 jar 매니페스트에 적혀 있습니다:
+
+```bash
+unzip -p apache-cassandra-6.0.0.jar META-INF/MANIFEST.MF | grep -E 'Implementation-|Aster-'
+```
+
+```
+Implementation-Title:   Aster TSDB
+Implementation-Version: 6.0.0                      <- 상류 릴리즈 버전 그대로
+Implementation-Vendor:  KOPENS
+Aster-Product:          Aster Timeseries Database
+Aster-Upstream:         apache/cassandra cassandra-6.0
+Aster-Upstream-SHA:     35d6f8c81666df465ac3ea7e63bb8d186a6e0495
+```
+
+순정 Apache jar 에는 `Aster-*` 속성이 하나도 없습니다. `Aster-Upstream-SHA` 는 이 빌드가 병합한 업스트림
+커밋을 그대로 가리키므로, "밑에 깔린 Cassandra 가 무엇이냐" 는 주장이 아니라 `git log` 로 확인되는 사실입니다.
+그 속성 중 하나라도 빠지면 CI 가 빌드를 실패시킵니다 — 정체성이 조용히 떨어져 나가지 못합니다.
+
+**업스트림은 고정이 아니라 추적합니다.** `main` 은 apache/cassandra 의 `cassandra-6.0` 과 계속 머지된
+상태로 유지하며, 업스트림이 릴리즈하면 따라 올리고 `Aster-Upstream-SHA` 도 같은 커밋에서 함께 움직입니다.
+
+Spark 연동은 짝이 되는 포크 [cassandra-spark-connector](https://dev.kopens.io/common/cassandra-spark-connector)(Spark 4.1.2)로 제공됩니다.
+
+### 라이선스와 귀속
+
+업스트림과 같은 Apache License 2.0 입니다 — `LICENSE`·`NOTICE`·파일별 저작권 헤더를 그대로 유지하고,
+우리 변경은 소스에 `~~ PLANTPULSE FORK CHANGE ~~` 로 표시합니다. Apache Cassandra 는 Apache Software
+Foundation 의 상표이며, 이 프로젝트는 독립 포크로서 **ASF 와 제휴 관계가 없고 승인받지도 않았습니다.**
+매니페스트의 제품명은 바로 그 둘이 혼동되지 않게 하려고 있는 것입니다.
 
 ## 🎯 핵심 — 무엇이 좋아지나 (업스트림 Cassandra 6.0.0 대비)
 
@@ -689,8 +728,8 @@ ALTER TABLE pp.tm_tag_point WITH extensions = {};
 유닛 테스트는 함수를 프로세스 안에서 검증하지만, [docker/integration-test.sh](docker/integration-test.sh)는 **실제 이미지를 띄워** 스키마 생성부터 읽기 경로·집계·네이티브 프로토콜까지 통과하는 시계열 CQL 결과를 손으로 계산한 값과 대조합니다(93개 검증, 프로세스 재시작 포함).
 
 ```bash
-docker build -t cassandra-timeseries:6.0.0 -f docker/Dockerfile .
-./docker/integration-test.sh cassandra-timeseries:6.0.0     # CONTAINER_RUNTIME=podman 도 지원
+docker build -t aster-tsdb:6.0.0 -f docker/Dockerfile .
+./docker/integration-test.sh aster-tsdb:6.0.0     # CONTAINER_RUNTIME=podman 도 지원
 ```
 
 실행하면 항목·CQL·결과가 그대로 출력되고, `build/timeseries-it-report.html`(+ 같은 내용의 `.md`)에 보고서가 생성됩니다. **실행 결과 예시: [통합 테스트 보고서](doc/timeseries/integration-test-report.md)** — 각 검증의 CQL·응답·소요 시간이 그대로 들어 있습니다.
@@ -702,7 +741,7 @@ CI에서는 태그를 밀면 `docker-image → docker-integration-test → docke
 [docker/cluster-test.sh](docker/cluster-test.sh)는 도커 네트워크 위에 실제 컨테이너 3개를 RF=3으로 띄워 49개를 검증합니다 — 단일 노드가 닿지 못하는 것들입니다: 코디네이터 3개 각각을 통한 집계·gap-fill, 레플리카마다 독립적으로 일어나는 TSCS 동결 수렴, OS 프로세스 간 실제 repair 스트리밍, 레플리카를 정말 정지시킨 상태의 QUORUM.
 
 ```bash
-./docker/cluster-test.sh cassandra-timeseries:6.0.0
+./docker/cluster-test.sh aster-tsdb:6.0.0
 ```
 
 CI에서는 수동입니다(2G JVM 3개가 공용 러너에 안 들어갈 수 있음). 컴팩션·스트리밍·repair·계층화를 건드린 릴리스라면 손으로 한 번 돌리십시오.
@@ -724,7 +763,7 @@ CI에서는 수동입니다(2G JVM 3개가 공용 러너에 안 들어갈 수 �
 
 ```bash
 SCALE_ROWS=100000000 SCALE_SERIES=1000 SCALE_LOADERS=16 SCALE_HEAP=16G \
-  ./docker/scale-test.sh cassandra-timeseries:6.0.0
+  ./docker/scale-test.sh aster-tsdb:6.0.0
 # 적재된 데이터를 재사용해 쿼리만 다시 재기: SCALE_SKIP_LOAD=1
 ```
 
@@ -741,14 +780,15 @@ GC를 바꿔 비교할 수도 있습니다 — `SCALE_GC=g1`(기본은 `zgc`, `c
 ## CI 및 릴리스
 
 - 푸시할 때마다 jar를 빌드하고 시계열 테스트 스위트를 실행합니다(`.gitlab-ci.yml`).
-- 최신 master 빌드의 jar: *CI/CD → Pipelines → build-jar 아티팩트*.
+- 최신 `main` 빌드의 jar: *CI/CD → Pipelines → build-jar 아티팩트*.
 - 태그 푸시(예: `v6.0.0`) 시 jar 다운로드 링크가 포함된 [Release](../../-/releases)가 발행됩니다.
 
-> **CI가 지금 무엇을 말하고 있는지 먼저 확인하십시오.** 2026-08-07 이후 프로젝트 러너가 전부 offline이라 파이프라인이 잡을 시작조차 못 하고 `stuck_pending_no_matching_runners`로 실패합니다 — 그 기간의 빨간 파이프라인은 코드에 대한 진술이 아닙니다. `glab ci list`, `glab ci get -p <id>`로 사유가 보입니다. 러너가 복구될 때까지 검증은 `.build/sh/ci-local`과 `docker/cluster-test.sh`입니다. [production-rollout.md §6](doc/timeseries/production-rollout.md) 참고.
+> **빨간 파이프라인을 만나면 CI가 무엇을 말하는지부터 확인하십시오.** 2026-08-07 부터 프로젝트 러너가 offline 이었고, 그 기간의 파이프라인은 잡을 시작조차 못 한 채 `stuck_pending_no_matching_runners` 로 실패했습니다 — 그 빨강은 코드에 대한 진술이 아닙니다. 러너는 복구됐습니다(2026-09-16 실측, 2026-09-06 이후 초록). 그래도 습관은 유지할 값어치가 있습니다 — 버그를 찾으러 가기 전에 `glab ci list`, `glab ci get -p <id>` 로 사유를 먼저 보십시오. 로컬 재현은 `.build/sh/ci-local` 과 `docker/cluster-test.sh` 입니다. [production-rollout.md §6](doc/timeseries/production-rollout.md) 참고.
 
 ## 브랜치 및 업스트림 정책
 
-- `master`(= `6.0.0` 브랜치): 릴리스 라인. apache/cassandra의 최신 업스트림 `cassandra-6.0` 브랜치(리모트 `upstream`)와 **항상 머지된 상태로 유지**해야 합니다.
+- `main` 이 릴리스 라인이자 기본 브랜치입니다. apache/cassandra의 최신 업스트림 `cassandra-6.0` 브랜치(리모트 `upstream`)와 **항상 머지된 상태로 유지**해야 하며, `build.xml` 의 `aster.upstream.sha` 도 같은 커밋에서 함께 올립니다 — 그 값은 `git merge-base main upstream/cassandra-6.0` 과 같아야 합니다.
+- `6.0.0` 은 그 라인의 옛 이름이고 2026-08-30 에서 멈춰 있습니다. 유지보수하지 **않으며**, 여기서 브랜치를 따지 마십시오.
 - 자주 충돌하는 지점: `CHANGES.txt`, `debian/changelog`, `modules/accord` 서브모듈 포인터, `cql3/statements/SelectStatement.java`(gap-fill 연결부).
 
 ## 개발

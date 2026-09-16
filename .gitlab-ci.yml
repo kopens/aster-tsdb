@@ -1,4 +1,4 @@
-# CI for cassandra-timeseries: Apache Cassandra 6.0.0 + time-series functions.
+# CI for aster-tsdb (Aster Timeseries Database): Apache Cassandra 6.0.0 fork + time-series functions.
 # Builds apache-cassandra-6.0.0.jar with Ant, runs the time-series unit tests, then boots the
 # Docker image and runs the time-series CQL integration test before anything is released.
 #
@@ -44,20 +44,31 @@ build-jar:
     # Fail loudly if the jar was built without a resolvable commit: an unstamped jar cannot be
     # traced back from a deployed node, and _get-git-sha fails silently by design.
     - python3 .build/sh/check-jar-git-sha.py build/apache-cassandra-6.0.0.jar "$CI_COMMIT_SHA"
-    # Release artifacts carry the fork's name and the tag's version (build.xml stays at
-    # base.version 6.0.0 per the versioning rule - only the published copies are renamed).
-    - cp build/apache-cassandra-6.0.0.jar "build/apache-cassandra-timeseries-${CI_COMMIT_TAG:-dev}.jar"
+    # 🔴 DROP-IN: the artifacts keep UPSTREAM'S names. They used to be copied to
+    # apache-cassandra-timeseries-<tag>.*, which meant the jar could not be dropped into a stock
+    # Cassandra install without renaming, and the fork name was the only thing distinguishing it.
+    # Identity now lives in the MANIFEST instead (Implementation-Title: Aster TSDB,
+    # Implementation-Vendor: KOPENS, Aster-Product / Aster-Upstream / Aster-Upstream-SHA), which is
+    # a stronger signal than a filename: it survives a rename and it is what the consuming side
+    # already reads (UPSTREAM-LOCK.md says "파일 이름이 아니라 도는 프로세스가 그렇게 답한다").
+    # Implementation-Version stays at the upstream version so nodetool version keeps reporting it.
     # Full binary distribution (bin/, conf/, lib/, tools/ ...) as a tar.gz with a versioned top dir.
     - ant _artifacts-init -Dant.gen-doc.skip=true -Drat.skip=true
-    - cp -al build/dist "build/apache-cassandra-timeseries-${CI_COMMIT_TAG:-dev}"
-    - tar -C build -czf "build/apache-cassandra-timeseries-${CI_COMMIT_TAG:-dev}-bin.tar.gz" "apache-cassandra-timeseries-${CI_COMMIT_TAG:-dev}"
-    - ls -l build/apache-cassandra-timeseries-*
+    - cp -al build/dist "build/apache-cassandra-6.0.0"
+    - tar -C build -czf "build/apache-cassandra-6.0.0-bin.tar.gz" "apache-cassandra-6.0.0"
+    - ls -l build/apache-cassandra-6.0.0*
+    # The identity must actually be in the jar - a silently missing attribute would leave a fork
+    # that claims to be stock Apache, which is exactly what this change set out to fix.
+    # The jar is published under upstream's own name, so the file name cannot say which product
+    # this is - the MANIFEST does. Python, not `unzip | grep`: this image has no unzip (measured,
+    # pipeline 67103 died on it), and a manifest wraps at 72 bytes, which a line-anchored grep
+    # reads truncated and passes anyway. Mutation-proven 11/11 against real jars.
+    - python3 .build/sh/check-jar-identity.py build/apache-cassandra-6.0.0.jar 6.0.0
   artifacts:
-    name: "apache-cassandra-timeseries"
+    name: "aster-tsdb"
     paths:
       - build/apache-cassandra-6.0.0.jar
-      - build/apache-cassandra-timeseries-*.jar
-      - build/apache-cassandra-timeseries-*-bin.tar.gz
+      - build/apache-cassandra-6.0.0-bin.tar.gz
     expire_in: 1 month
 
 # Targeted tests only — the full Cassandra suite takes hours (see AGENTS.md).
@@ -143,7 +154,7 @@ timeseries-heap-soak:
 #   curl -sH "PRIVATE-TOKEN: <token>" \
 #     "$CI_API_V4_URL/projects/<id>/packages/generic/cassandra-timeseries-docker/<version>/cassandra-timeseries-6.0.0-docker.tar" \
 #     | podman load   # or: docker load
-#   ./gradlew integrationTest -Pcassandra.image=cassandra-timeseries:6.0.0
+#   ./gradlew integrationTest -Pcassandra.image=aster-tsdb:6.0.0
 docker-image:
   stage: image
   timeout: 90m
@@ -164,7 +175,7 @@ docker-image:
       --dockerfile "$CI_PROJECT_DIR/docker/Dockerfile"
       --no-push
       --tar-path "$CI_PROJECT_DIR/cassandra-timeseries-6.0.0-docker.tar"
-      --destination "cassandra-timeseries:6.0.0"
+      --destination "aster-tsdb:6.0.0"
   artifacts:
     name: "cassandra-timeseries-6.0.0-docker"
     paths:
@@ -206,7 +217,7 @@ docker-integration-test:
       allow_failure: true
   script:
     - docker load -i cassandra-timeseries-6.0.0-docker.tar
-    - ./docker/integration-test.sh cassandra-timeseries:6.0.0
+    - ./docker/integration-test.sh aster-tsdb:6.0.0
   artifacts:
     name: "timeseries-integration-test-report"
     when: always
@@ -250,7 +261,7 @@ docker-cluster-test:
       allow_failure: true
   script:
     - docker load -i cassandra-timeseries-6.0.0-docker.tar
-    - ./docker/cluster-test.sh cassandra-timeseries:6.0.0
+    - ./docker/cluster-test.sh aster-tsdb:6.0.0
   after_script:
     - docker rm -f cassandra-ts-cluster-1 cassandra-ts-cluster-2 cassandra-ts-cluster-3 || true
   artifacts:
@@ -373,8 +384,10 @@ release:
       artifacts: true
   script:
     - |
-      PKG="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/cassandra-timeseries/$CI_COMMIT_TAG"
-      for f in "apache-cassandra-timeseries-${CI_COMMIT_TAG}.jar" "apache-cassandra-timeseries-${CI_COMMIT_TAG}-bin.tar.gz"; do
+      # 파일 이름은 «상류 그대로» 다(드롭인). 패키지 «경로» 만 aster-tsdb 로 구분한다 -
+      # 정체성은 MANIFEST 가 들고, 이름은 스톡 자리에 그대로 들어가는 것이 목적이다.
+      PKG="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/aster-tsdb/$CI_COMMIT_TAG"
+      for f in "apache-cassandra-6.0.0.jar" "apache-cassandra-6.0.0-bin.tar.gz"; do
         echo "uploading $f"
         curl --fail --silent --show-error --header "JOB-TOKEN: $CI_JOB_TOKEN" \
              --upload-file "build/$f" "$PKG/$f"
@@ -393,7 +406,62 @@ release:
         # session only, ignore PRIVATE-TOKEN, and serve the login page with HTTP 200 -- so
         # `curl -o release.jar` writes an 11 KB HTML file named .jar and nothing fails until it is
         # in lib/ and the node will not start. The package route accepts a token and a session alike.
-        - name: "apache-cassandra-timeseries-${CI_COMMIT_TAG}-bin.tar.gz"
-          url: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/cassandra-timeseries/$CI_COMMIT_TAG/apache-cassandra-timeseries-${CI_COMMIT_TAG}-bin.tar.gz"
-        - name: "apache-cassandra-timeseries-${CI_COMMIT_TAG}.jar"
-          url: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/cassandra-timeseries/$CI_COMMIT_TAG/apache-cassandra-timeseries-${CI_COMMIT_TAG}.jar"
+        - name: "apache-cassandra-6.0.0-bin.tar.gz (Aster TSDB)"
+          url: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/aster-tsdb/$CI_COMMIT_TAG/apache-cassandra-6.0.0-bin.tar.gz"
+        - name: "apache-cassandra-6.0.0.jar (Aster TSDB)"
+          url: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/aster-tsdb/$CI_COMMIT_TAG/apache-cassandra-6.0.0.jar"
+
+#---------------------------------------------------------------------------------------------------
+# mirror:github - publish main to github.com/kopens/aster-tsdb, but only bytes that passed.
+#
+# WHY A JOB AND NOT GitLab's BUILT-IN PUSH MIRROR
+# A push mirror fires the moment main moves, with no idea whether the pipeline went green - a red
+# main would be on the public landing page within seconds. This job runs after the two jobs that
+# actually gate main, so what reaches GitHub is what built and tested.
+#
+# WHY needs: [build-jar, timeseries-tests] AND NOT the docker jobs
+# Measured, not assumed: on $CI_DEFAULT_BRANCH every docker-* job is `when: manual` with
+# `allow_failure: true`. `needs:` on a manual job is not skipped - it waits for a human forever,
+# which would turn this mirror into a button nobody presses. build-jar and timeseries-tests carry
+# no rules, so they run on every ref and are the real gate for main.
+#
+# CREDENTIAL: project CI variable GITHUB_PUSH_TOKEN (masked, protected) - a fine-grained GitHub PAT
+# with contents:write on kopens/aster-tsdb and nothing else. Absent is a HARD FAILURE, not a skip:
+# a mirror that quietly does nothing is worse than one that is visibly broken.
+mirror:github:
+  stage: release
+  needs: ["build-jar", "timeseries-tests"]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  variables:
+    # A shallow clone cannot be pushed, and the submodule is not part of what GitHub needs.
+    GIT_DEPTH: "0"
+    GIT_SUBMODULE_STRATEGY: none
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates curl > /dev/null
+  script:
+    - |
+      set -e
+      [ -n "${GITHUB_PUSH_TOKEN:-}" ] || {
+        echo "[mirror] FAIL GITHUB_PUSH_TOKEN is not set - the GitHub mirror cannot run." >&2
+        echo "[mirror]      Add it as a masked+protected project variable (a fine-grained PAT with" >&2
+        echo "[mirror]      contents:write on kopens/aster-tsdb). Failing instead of skipping: a" >&2
+        echo "[mirror]      mirror that silently does nothing looks identical to a working one." >&2
+        exit 1
+      }
+      echo "[mirror] pushing $CI_COMMIT_SHA to github.com/kopens/aster-tsdb main"
+      git push "https://x-access-token:${GITHUB_PUSH_TOKEN}@github.com/kopens/aster-tsdb.git" \
+        "${CI_COMMIT_SHA}:refs/heads/main"
+    - |
+      set -e
+      # "git push exited 0" and "GitHub main is at that commit" are different statements. Ask GitHub.
+      got=$(curl -sS -H "Authorization: Bearer ${GITHUB_PUSH_TOKEN}" \
+                 -H "Accept: application/vnd.github+json" \
+                 "https://api.github.com/repos/kopens/aster-tsdb/git/ref/heads/main" \
+            | tr ',' '\n' | sed -n 's/.*"sha" *: *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)
+      echo "[mirror] github main = ${got:-<could not read>}"
+      [ "$got" = "$CI_COMMIT_SHA" ] || {
+        echo "[mirror] FAIL github main is '${got:-<unreadable>}', expected $CI_COMMIT_SHA" >&2
+        exit 1
+      }
+      echo "[mirror] OK   github main == $CI_COMMIT_SHA"

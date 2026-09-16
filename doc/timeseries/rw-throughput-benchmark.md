@@ -61,13 +61,13 @@ JMH 소스: [test/microbench/.../Chunk\*Bench.java](../../test/microbench/org/ap
 ## 재현
 
 ```bash
-docker build -t cassandra-timeseries:6.0.0 -f docker/Dockerfile .
+docker build -t aster-tsdb:6.0.0 -f docker/Dockerfile .
 
 # 쓰기(운영 형태): 적재가 곧 측정 — rows/s를 출력. 쓰기 경로 벤치는 SCALE_WBENCH_ROWS.
-./docker/scale-test.sh cassandra-timeseries:6.0.0        # SCALE_ROWS/SCALE_SERIES/SCALE_LOADERS 조절
+./docker/scale-test.sh aster-tsdb:6.0.0        # SCALE_ROWS/SCALE_SERIES/SCALE_LOADERS 조절
 
 # 계층화·재인코딩(rows/s 포함): 같은 데이터에 이어서
-./docker/tiering-bench.sh cassandra-timeseries:6.0.0
+./docker/tiering-bench.sh aster-tsdb:6.0.0
 
 # 읽기 패턴별 ops/s (latest | point | range100):
 docker exec <container> python3 /tmp/rwbench-read.py \

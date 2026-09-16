@@ -1,7 +1,7 @@
 # 계층화 벤치마크 원자료 — 계층화 후 (chunk v4)
 
 **호스트 234** — Xeon Silver 4114T (Skylake-SP, 40 threads, 250 GB RAM) · **2026-08-04** ·
-도커 이미지 `cassandra-timeseries:6.0.0-v4wired` (CI와 동일 베이스, chunk format **v4**, master `5cbdf914fa`) ·
+도커 이미지 `aster-tsdb:6.0.0-v4wired` (CI와 동일 베이스, chunk format **v4**, master `5cbdf914fa`) ·
 하네스 [`docker/tiering-bench.sh`](../../docker/tiering-bench.sh) (`hot_window 1h` · `chunk_window 1h` — 전 구간 콜드, `nodetool retier` 후 측정) ·
 **20,000,000행 / 500태그** — [베이스라인](tiering-bench-baseline.md)과 같은 데이터·같은 CQL.
 
@@ -11,7 +11,7 @@
 
 # tm_tag_point scale test
 
-image `cassandra-timeseries:6.0.0-v4wired (tiered)` · table `scale.tm_tag_point` · single node in a container · 2026-08-03 20:04 UTC
+image `aster-tsdb:6.0.0-v4wired (tiered)` · table `scale.tm_tag_point` · single node in a container · 2026-08-03 20:04 UTC
 
 - **20,000,000** rows loaded
 - **500** tags (partitions), **40,000 rows per tag** = 11.1 h of history at 1 sample/1s
