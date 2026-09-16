@@ -59,24 +59,11 @@ build-jar:
     - ls -l build/apache-cassandra-6.0.0*
     # The identity must actually be in the jar - a silently missing attribute would leave a fork
     # that claims to be stock Apache, which is exactly what this change set out to fix.
-    - |
-      set -e
-      mf=$(unzip -p build/apache-cassandra-6.0.0.jar META-INF/MANIFEST.MF | tr -d '\r')
-      printf '%s\n' "$mf" | grep -q '^Implementation-Title: Aster TSDB$' \
-        || { echo "[identity] FAIL MANIFEST 의 Implementation-Title 이 'Aster TSDB' 가 아니다 - 스톡과 구분되지 않는다"; exit 1; }
-      printf '%s\n' "$mf" | grep -q '^Implementation-Vendor: KOPENS$' \
-        || { echo "[identity] FAIL MANIFEST 의 Implementation-Vendor 가 'KOPENS' 가 아니다"; exit 1; }
-      printf '%s\n' "$mf" | grep -q '^Aster-Product: ' \
-        || { echo "[identity] FAIL Aster-Product 가 없다"; exit 1; }
-      printf '%s\n' "$mf" | grep -q '^Aster-Upstream: ' \
-        || { echo "[identity] FAIL Aster-Upstream 이 없다 - 어느 상류 브랜치의 포크인지 못 읽는다"; exit 1; }
-      printf '%s\n' "$mf" | grep -q '^Aster-Upstream-SHA: [0-9a-f]\{40\}$' \
-        || { echo "[identity] FAIL Aster-Upstream-SHA 가 40자 SHA 가 아니다 - 상류 기준점을 못 읽는다"; exit 1; }
-      # Drop-in means the version the jar CLAIMS must be the version its file name promises.
-      # If these disagree, an operator who swapped the jar is running something other than 6.0.0.
-      printf '%s\n' "$mf" | grep -q '^Implementation-Version: 6\.0\.0$' \
-        || { echo "[identity] FAIL Implementation-Version 이 6.0.0 이 아니다 - 파일 이름이 약속한 버전과 다르다"; exit 1; }
-      echo "[identity] OK"; printf '%s\n' "$mf" | grep -E '^(Implementation|Aster)-'
+    # The jar is published under upstream's own name, so the file name cannot say which product
+    # this is - the MANIFEST does. Python, not `unzip | grep`: this image has no unzip (measured,
+    # pipeline 67103 died on it), and a manifest wraps at 72 bytes, which a line-anchored grep
+    # reads truncated and passes anyway. Mutation-proven 11/11 against real jars.
+    - python3 .build/sh/check-jar-identity.py build/apache-cassandra-6.0.0.jar 6.0.0
   artifacts:
     name: "aster-tsdb"
     paths:
