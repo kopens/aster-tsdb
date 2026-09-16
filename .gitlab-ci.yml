@@ -152,7 +152,7 @@ timeseries-heap-soak:
 #
 # Consumption (e.g. before the plantpulse-jdbc-cassandra-driver integration tests):
 #   curl -sH "PRIVATE-TOKEN: <token>" \
-#     "$CI_API_V4_URL/projects/<id>/packages/generic/cassandra-timeseries-docker/<version>/cassandra-timeseries-6.0.0-docker.tar" \
+#     "$CI_API_V4_URL/projects/<id>/packages/generic/aster-tsdb-docker/<version>/aster-tsdb-6.0.0-docker.tar" \
 #     | podman load   # or: docker load
 #   ./gradlew integrationTest -Pcassandra.image=aster-tsdb:6.0.0
 docker-image:
@@ -174,12 +174,12 @@ docker-image:
       --context "$CI_PROJECT_DIR"
       --dockerfile "$CI_PROJECT_DIR/docker/Dockerfile"
       --no-push
-      --tar-path "$CI_PROJECT_DIR/cassandra-timeseries-6.0.0-docker.tar"
+      --tar-path "$CI_PROJECT_DIR/aster-tsdb-6.0.0-docker.tar"
       --destination "aster-tsdb:6.0.0"
   artifacts:
-    name: "cassandra-timeseries-6.0.0-docker"
+    name: "aster-tsdb-6.0.0-docker"
     paths:
-      - cassandra-timeseries-6.0.0-docker.tar
+      - aster-tsdb-6.0.0-docker.tar
     expire_in: 3 days
 
 # Release gate: boot the image that is about to be published and run the time-series CQL
@@ -216,7 +216,7 @@ docker-integration-test:
       when: manual
       allow_failure: true
   script:
-    - docker load -i cassandra-timeseries-6.0.0-docker.tar
+    - docker load -i aster-tsdb-6.0.0-docker.tar
     - ./docker/integration-test.sh aster-tsdb:6.0.0
   artifacts:
     name: "timeseries-integration-test-report"
@@ -260,7 +260,7 @@ docker-cluster-test:
       when: manual
       allow_failure: true
   script:
-    - docker load -i cassandra-timeseries-6.0.0-docker.tar
+    - docker load -i aster-tsdb-6.0.0-docker.tar
     - ./docker/cluster-test.sh aster-tsdb:6.0.0
   after_script:
     - docker rm -f cassandra-ts-cluster-1 cassandra-ts-cluster-2 cassandra-ts-cluster-3 || true
@@ -298,8 +298,8 @@ docker-image-publish:
     # Folded block scalar: a plain scalar cannot contain ": " (the JOB-TOKEN header), which broke the pipeline.
     - >-
       curl --fail --silent --show-error -H "JOB-TOKEN: $CI_JOB_TOKEN"
-      --upload-file cassandra-timeseries-6.0.0-docker.tar
-      "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/cassandra-timeseries-docker/${CI_COMMIT_TAG:-6.0.0}/cassandra-timeseries-6.0.0-docker.tar"
+      --upload-file aster-tsdb-6.0.0-docker.tar
+      "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/aster-tsdb-docker/${CI_COMMIT_TAG:-6.0.0}/aster-tsdb-6.0.0-docker.tar"
 
 # On tag pushes (e.g. 6.0.0-r1), publish a GitLab Release pointing at the built jar.
 changelog:
