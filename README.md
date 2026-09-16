@@ -5,15 +5,13 @@
 # Aster Timeseries Database
 
 **A database tuned for the time-series workloads of industrial sites.** 21 CQL functions, gap-fill,
-and tiered storage that compresses itself — **7.1× smaller on disk and 3–6× faster to query**, with
-the CQL unchanged and the cluster still a Cassandra cluster.
+and tiered storage that compresses itself — **7.1× smaller on disk and 3–6× faster to query**.
 
-It is a fork of [apache/cassandra](https://github.com/apache/cassandra) (`cassandra-6.0`) and it
-ships under upstream's own file name, `apache-cassandra-6.0.0.jar`. Swapping that jar into an
-existing 6.0.0 installation is the whole installation: it reads existing data as-is, the CQL grammar
-does not change, and every new feature is opt-in.
+**Apache Cassandra compatible.** The same CQL, the same drivers, the same operational tooling, and
+the same on-disk format: it reads an existing 6.0 dataset as it stands. Installing it on a running
+cluster is one jar, and every new feature is opt-in.
 
-| Measured against upstream 6.0.0 | Upstream | Aster TSDB |
+| Measured against stock Cassandra 6.0.0 | Stock | Aster TSDB |
 | --- | --- | --- |
 | 20M rows on disk | 237.8 MB | **33.3 MB** — 7.1× smaller |
 | `count(*)`, 40k-row partition | 303 ms | **50 ms** — 6.1× faster |
@@ -30,7 +28,7 @@ does not change, and every new feature is opt-in.
 
 | | TimescaleDB | InfluxDB 3 Core (OSS) | **Aster TSDB** |
 | --- | --- | --- | --- |
-| Base | PostgreSQL extension | purpose-built engine | Apache Cassandra 6.0 fork |
+| Base | PostgreSQL extension | purpose-built engine | Cassandra-compatible engine |
 | Query language | SQL | SQL / InfluxQL | CQL |
 | Bucketing | `time_bucket` | `date_bin_gapfill` | `time_bucket` / `time_bucket_gapfill` |
 | Gap-fill (`locf` / `interpolate`) | yes | yes | yes |
@@ -63,14 +61,14 @@ Industrial sites make a particular shape of data: every tag accumulates endlessl
 resolution, years of it must be retained for compliance, edge devices that lost connectivity push
 days of backlog in one go, and queries are almost always "this tag, this period". Stock Cassandra
 carries that load — but bucketing, compression, retention and aggregation all stay the application's
-problem. This fork moves them **into the database**: computation finishes server-side, old windows
+problem. Aster moves them **into the database**: computation finishes server-side, old windows
 compress and expire by themselves, and compressed history still reads back through an ordinary
 `SELECT`.
 
-Spark integration comes from the companion fork
+Spark integration comes from the companion project
 [cassandra-spark-connector](https://dev.kopens.io/common/cassandra-spark-connector) (Spark 4.1.2).
 
-## ✨ What this fork adds
+## ✨ What it adds
 
 | Feature | Summary | Detail |
 | --- | --- | --- |
@@ -83,7 +81,7 @@ Spark integration comes from the companion fork
 | **Test infrastructure** | 93 docker integration assertions (the release gate), a 49-assertion three-node cluster test, a 100-million-row scale harness, jvm-dtests, a JMH performance regression gate, and a GC comparison (ZGC vs G1) | [Reports](doc/timeseries/) |
 | **Packaging / CI** | Testcontainers-compatible docker image, GitLab CI (build → test → image → integration gate → release), automated tag releases | [.gitlab-ci.yml](.gitlab-ci.yml) |
 
-## 🎯 What it buys you (against upstream Cassandra 6.0.0)
+## 🎯 What it buys you (against stock Cassandra 6.0.0)
 
 **1. Time-series computation that finishes on the server.** Bucketing, aggregation, interpolation and regression in one line of CQL. The round trip where the application pulls raw rows and computes them itself disappears.
 
@@ -131,25 +129,6 @@ cp apache-cassandra-6.0.0.jar $CASSANDRA_HOME/lib/
 # 2. that is the installation. Existing data, existing CQL, existing tooling.
 #    nodetool version still reports 6.0.0 - the release version is upstream's.
 ```
-
-Because the file name and the version are upstream's, the jar cannot tell you which one it is by its
-name. The manifest can — upstream leaves these attributes empty:
-
-```bash
-unzip -p apache-cassandra-6.0.0.jar META-INF/MANIFEST.MF | grep -E 'Implementation-|Aster-'
-```
-
-```
-Implementation-Title:   Aster TSDB
-Implementation-Vendor:  KOPENS
-Aster-Product:          Aster Timeseries Database
-Aster-Upstream:         apache/cassandra cassandra-6.0
-Aster-Upstream-SHA:     35d6f8c81666df465ac3ea7e63bb8d186a6e0495
-```
-
-`Aster-Upstream-SHA` names the exact upstream commit this build was merged with, so "which Cassandra
-is underneath?" has an answer you can `git log`. CI fails the build if any of these is missing.
-`main` is kept merged with apache/cassandra's `cassandra-6.0`, and that SHA moves in the same commit.
 
 ## 📖 Documentation
 
@@ -213,7 +192,7 @@ These are native functions — no separate installation, no UDF registration. Ev
 
 ## 1. Schema and sample data
 
-Every example below runs on `tm_tag_point`, a real industrial tag table — one partition per tag, clustered by time, **newest first** (`DESC`). Compaction uses this fork's time-series strategy, `TimeSeriesCompactionStrategy` (TSCS): SSTables are ordered into time windows, closed windows freeze to one SSTable each, and windows past their retention are dropped whole without compacting. Compaction choices *inside* the current window are delegated to the UCS controller, so UCS's write-optimised behaviour is preserved.
+Every example below runs on `tm_tag_point`, a real industrial tag table — one partition per tag, clustered by time, **newest first** (`DESC`). Compaction uses Aster's time-series strategy, `TimeSeriesCompactionStrategy` (TSCS): SSTables are ordered into time windows, closed windows freeze to one SSTable each, and windows past their retention are dropped whole without compacting. Compaction choices *inside* the current window are delegated to the UCS controller, so UCS's write-optimised behaviour is preserved.
 
 ```sql
 CREATE KEYSPACE IF NOT EXISTS pp
@@ -670,7 +649,7 @@ ALTER TABLE pp.tm_tag_point WITH extensions = {
 SELECT * FROM system_views.timeseries_tiering;
 ```
 
-> `extensions` is a blob map in the schema, but this fork **stores a plain string as its UTF-8 bytes**. Only a value beginning with `0x` is read as a hex blob, so existing hex notation (`0x7b22...`) still works.
+> `extensions` is a blob map in the schema, but Aster **stores a plain string as its UTF-8 bytes**. Only a value beginning with `0x` is read as a hex blob, so existing hex notation (`0x7b22...`) still works.
 
 After that the 60-second sweeper compresses on the `interval` schedule. **To see it immediately**, run one cycle by hand:
 
@@ -757,7 +736,7 @@ The build artifact is always `apache-cassandra-6.0.0.jar` (`base.version` is pin
 
 ## Verification
 
-`.build/sh/ci-local` walks the release gate's stages locally in the same order: jar and checkstyle → the fork's test classes → the docker image → the integration test.
+`.build/sh/ci-local` walks the release gate's stages locally in the same order: jar and checkstyle → Aster's test classes → the docker image → the integration test.
 
 ```bash
 .build/sh/ci-local                  # add --with-cluster for the three-node test
@@ -840,4 +819,5 @@ Build, test and code-style rules are in [CLAUDE.md](CLAUDE.md) and [AGENTS.md](A
 ## License
 
 Apache License 2.0, the same as upstream — `LICENSE` and `NOTICE` are kept as they are.
-Apache Cassandra is a trademark of the Apache Software Foundation; this is an independent fork.
+Apache Cassandra is a trademark of the Apache Software Foundation. Aster TSDB is an independent
+product and is not affiliated with or endorsed by the ASF.

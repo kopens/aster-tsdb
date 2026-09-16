@@ -5,14 +5,13 @@
 # Aster Timeseries Database
 
 **산업 현장의 시계열 워크로드에 최적화된 데이터베이스.** CQL 함수 21종, gap-fill, 스스로 압축하는
-계층형 저장 — **디스크 7.1× 절감, 질의 3~6× 가속**. CQL 은 그대로고, 클러스터는 여전히 Cassandra
-클러스터입니다.
+계층형 저장 — **디스크 7.1× 절감, 질의 3~6× 가속**.
 
-[apache/cassandra](https://github.com/apache/cassandra)(`cassandra-6.0`)의 포크이며 상류와 같은
-파일 이름인 `apache-cassandra-6.0.0.jar` 로 나갑니다. 기존 6.0.0 설치에 그 jar 을 바꿔 넣는 것이
-설치의 전부입니다 — 기존 데이터를 그대로 읽고, CQL 문법은 바뀌지 않으며, 새 기능은 전부 옵트인입니다.
+**Apache Cassandra 호환.** 같은 CQL, 같은 드라이버, 같은 운영 도구, 같은 온디스크 포맷입니다 —
+기존 6.0 데이터를 그대로 읽습니다. 돌고 있는 클러스터에 설치하는 것은 jar 하나이고, 새 기능은
+전부 옵트인입니다.
 
-| 업스트림 6.0.0 대비 실측 | 업스트림 | Aster TSDB |
+| 일반 Cassandra 6.0.0 대비 실측 | 일반 Cassandra | Aster TSDB |
 | --- | --- | --- |
 | 2천만 행 저장 용량 | 237.8 MB | **33.3 MB** — 7.1× 작다 |
 | `count(*)` (4만 행 파티션) | 303 ms | **50 ms** — 6.1× 빠르다 |
@@ -29,7 +28,7 @@
 
 | | TimescaleDB | InfluxDB 3 Core (OSS) | **Aster TSDB** |
 | --- | --- | --- | --- |
-| 기반 | PostgreSQL 확장 | 전용 엔진 | Apache Cassandra 6.0 포크 |
+| 기반 | PostgreSQL 확장 | 전용 엔진 | Cassandra 호환 엔진 |
 | 질의 언어 | SQL | SQL / InfluxQL | CQL |
 | 버킷팅 | `time_bucket` | `date_bin_gapfill` | `time_bucket` / `time_bucket_gapfill` |
 | Gap-fill (`locf`/`interpolate`) | 있음 | 있음 | 있음 |
@@ -61,14 +60,14 @@ InfluxDB 3 Core 는 단일 노드이고 클러스터링·HA·읽기 복제는 �
 산업 현장의 데이터는 모양이 정해져 있습니다: 태그마다 초 단위로 끝없이 쌓이고, 규정상 몇 년치를
 보관해야 하며, 통신이 끊겼던 엣지 장비가 며칠치를 한꺼번에 밀어 넣고, 조회는 거의 항상
 "이 태그의 이 기간"입니다. 범용 Cassandra 도 이 부하를 감당합니다 — 다만 버킷팅·압축·보존·집계가
-전부 애플리케이션 몫으로 남습니다. 이 포크는 그것을 **데이터베이스 안으로** 가져옵니다.
+전부 애플리케이션 몫으로 남습니다. Aster 는 그것을 **데이터베이스 안으로** 가져옵니다.
 연산은 서버에서 끝나고, 오래된 윈도우는 스스로 압축·만료되며, 압축된 과거 데이터도 평범한
 `SELECT` 로 그대로 읽힙니다.
 
-Spark 연동은 짝이 되는 포크
+Spark 연동은 짝이 되는 프로젝트
 [cassandra-spark-connector](https://dev.kopens.io/common/cassandra-spark-connector)(Spark 4.1.2)로 제공됩니다.
 
-## ✨ 구현 기능 (업스트림 대비 이 포크의 델타)
+## ✨ 구현 기능
 
 | 기능 | 내용 | 상세 |
 | --- | --- | --- |
@@ -81,7 +80,7 @@ Spark 연동은 짝이 되는 포크
 | **테스트 인프라** | 도커 통합 테스트 93건(릴리스 게이트), 3노드 클러스터 테스트 49건, 1억 건 스케일 하네스, jvm-dtest, JMH 성능 회귀 게이트, GC 비교(ZGC vs G1) | [보고서들](doc/timeseries/) |
 | **배포/CI** | Testcontainers 호환 도커 이미지, GitLab CI(빌드→테스트→이미지→통합 게이트→릴리스), 태그 릴리스 자동화 | [.gitlab-ci.yml](.gitlab-ci.yml) |
 
-## 🎯 핵심 — 무엇이 좋아지나 (업스트림 Cassandra 6.0.0 대비)
+## 🎯 핵심 — 무엇이 좋아지나 (일반 Cassandra 6.0.0 대비)
 
 **1. 서버에서 끝나는 시계열 연산.** 버킷팅·집계·보간·회귀를 CQL 한 줄로 처리합니다. 애플리케이션이 원시 데이터를 끌어와 계산하던 왕복이 사라집니다.
 
@@ -137,26 +136,6 @@ cp apache-cassandra-6.0.0.jar $CASSANDRA_HOME/lib/
 # 2. 이게 설치의 전부다. 기존 데이터, 기존 CQL, 기존 운영 도구 그대로.
 #    nodetool version 도 여전히 6.0.0 이다 — 릴리즈 버전 자체가 상류 것이다.
 ```
-
-파일 이름도 버전도 상류 것이라, jar 은 자기 이름으로 무엇인지 말해 주지 못합니다. 매니페스트가
-말합니다 — 상류는 이 속성들을 비워 둡니다:
-
-```bash
-unzip -p apache-cassandra-6.0.0.jar META-INF/MANIFEST.MF | grep -E 'Implementation-|Aster-'
-```
-
-```
-Implementation-Title:   Aster TSDB
-Implementation-Vendor:  KOPENS
-Aster-Product:          Aster Timeseries Database
-Aster-Upstream:         apache/cassandra cassandra-6.0
-Aster-Upstream-SHA:     35d6f8c81666df465ac3ea7e63bb8d186a6e0495
-```
-
-`Aster-Upstream-SHA` 는 이 빌드가 병합한 상류 커밋을 그대로 가리키므로 "밑에 깔린 Cassandra 가
-무엇이냐" 는 `git log` 로 확인되는 사실입니다. 그중 하나라도 빠지면 CI 가 빌드를 실패시킵니다.
-`main` 은 apache/cassandra 의 `cassandra-6.0` 과 계속 머지된 상태로 유지하며, 그 SHA 도 같은
-커밋에서 함께 움직입니다.
 
 ## 📖 문서
 
@@ -220,7 +199,7 @@ Aster-Upstream-SHA:     35d6f8c81666df465ac3ea7e63bb8d186a6e0495
 
 ## 1. 스키마와 샘플 데이터
 
-아래 예제는 모두 산업 현장의 실제 태그 테이블 `tm_tag_point` 위에서 돕니다 — 태그당 파티션 하나, 시간으로 클러스터링, **최신 데이터가 앞**(`DESC`). 컴팩션은 이 포크의 시계열 전용 전략 `TimeSeriesCompactionStrategy`(TSCS)를 씁니다 — SSTable을 시간 창으로 정렬하고, 닫힌 창은 창당 1 SSTable로 동결하며, 보존기간이 지난 창은 컴팩션 없이 통째 삭제합니다. 현재 창 내부의 컴팩션 선택은 UCS 컨트롤러에 위임되므로 UCS의 쓰기 최적 특성은 그대로 유지됩니다.
+아래 예제는 모두 산업 현장의 실제 태그 테이블 `tm_tag_point` 위에서 돕니다 — 태그당 파티션 하나, 시간으로 클러스터링, **최신 데이터가 앞**(`DESC`). 컴팩션은 Aster 의 시계열 전용 전략 `TimeSeriesCompactionStrategy`(TSCS)를 씁니다 — SSTable을 시간 창으로 정렬하고, 닫힌 창은 창당 1 SSTable로 동결하며, 보존기간이 지난 창은 컴팩션 없이 통째 삭제합니다. 현재 창 내부의 컴팩션 선택은 UCS 컨트롤러에 위임되므로 UCS의 쓰기 최적 특성은 그대로 유지됩니다.
 
 ```sql
 CREATE KEYSPACE IF NOT EXISTS pp
@@ -677,7 +656,7 @@ ALTER TABLE pp.tm_tag_point WITH extensions = {
 SELECT * FROM system_views.timeseries_tiering;
 ```
 
-> `extensions`는 스키마상 blob 맵이지만, 이 포크는 **평문 문자열을 UTF-8 바이트로 저장**합니다.
+> `extensions`는 스키마상 blob 맵이지만, Aster 는 **평문 문자열을 UTF-8 바이트로 저장**합니다.
 > `0x`로 시작하는 값만 hex 블롭으로 해석하므로 기존 hex 표기(`0x7b22...`)도 그대로 동작합니다.
 
 적용 후에는 60초 스위퍼가 `interval` 주기로 알아서 압축합니다. **바로 확인하고 싶으면** 수동으로 한 사이클 실행:
@@ -764,7 +743,7 @@ ALTER TABLE pp.tm_tag_point WITH extensions = {};
 
 ## 검증
 
-`.build/sh/ci-local`이 릴리스 게이트의 스테이지를 같은 순서로 로컬에서 돕니다 — jar+checkstyle → 포크 테스트 클래스 → 도커 이미지 → 통합 테스트.
+`.build/sh/ci-local`이 릴리스 게이트의 스테이지를 같은 순서로 로컬에서 돕니다 — jar+checkstyle → Aster 테스트 클래스 → 도커 이미지 → 통합 테스트.
 
 ```bash
 .build/sh/ci-local                  # 3노드 클러스터 테스트까지 포함하려면 --with-cluster
@@ -847,4 +826,5 @@ GC를 바꿔 비교할 수도 있습니다 — `SCALE_GC=g1`(기본은 `zgc`, `c
 ## 라이선스
 
 Apache License 2.0, 업스트림과 같습니다 — `LICENSE`·`NOTICE` 는 그대로 둡니다.
-Apache Cassandra 는 Apache Software Foundation 의 상표이며, 이 프로젝트는 독립 포크입니다.
+Apache Cassandra 는 Apache Software Foundation 의 상표입니다. Aster TSDB 는 독립 제품이며
+ASF 와 제휴 관계가 없습니다.
