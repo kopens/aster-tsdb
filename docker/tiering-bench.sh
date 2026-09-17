@@ -35,7 +35,7 @@ NET="${SCALE_NET:-ts-scale-net}"
 NET_SUBNET="${SCALE_NET_SUBNET:-172.30.0.0/16}"
 NODE_IP="${SCALE_NODE_IP:-172.30.0.10}"
 
-echo "== cassandra-timeseries tiering benchmark =="
+echo "== aster-tsdb tiering benchmark =="
 echo "   image=$IMAGE rows=$ROWS series=$SERIES data(copy)=$DATA report=$REPORT"
 
 if [ ! -d "$DATA/data" ] && [ ! -d "$DATA/scale" ]; then

@@ -42,7 +42,7 @@ NET="${SCALE_NET:-ts-scale-net}"
 NET_SUBNET="${SCALE_NET_SUBNET:-172.30.0.0/16}"
 NODE_IP="${SCALE_NODE_IP:-172.30.0.10}"
 
-echo "== cassandra-timeseries scale test =="
+echo "== aster-tsdb scale test =="
 echo "   image=$IMAGE rows=$ROWS series=$SERIES loaders=$LOADERS heap=$HEAP gc=$GC passes=$PASSES"
 echo "   data=$DATA report=$REPORT"
 

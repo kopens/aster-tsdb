@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Three-container cluster test for cassandra-timeseries.
+# Three-container cluster test for aster-tsdb.
 #
 # docker/integration-test.sh proves the time-series features work on ONE node. This proves they work
 # on a real cluster: three separate JVMs, three separate data directories, RF=3, gossip and internode
@@ -57,7 +57,7 @@ fi
 N1="$NAME-1"; N2="$NAME-2"; N3="$NAME-3"
 IP1="${IP_PREFIX}1"; IP2="${IP_PREFIX}2"; IP3="${IP_PREFIX}3"
 
-echo "== cassandra-timeseries 3-node cluster test =="
+echo "== aster-tsdb 3-node cluster test =="
 echo "   runtime: $RUNTIME   image: $IMAGE   heap: $HEAP/node"
 echo "   network: $NET ($NET_SUBNET)   nodes: $IP1 $IP2 $IP3"
 
@@ -251,7 +251,7 @@ write_report() {
         cat <<HTML
 <!doctype html>
 <meta charset="utf-8">
-<title>cassandra-timeseries · 3-node cluster test</title>
+<title>aster-tsdb · 3-node cluster test</title>
 <style>
   :root { color-scheme: light dark; --bg:#fff; --fg:#1a1a1a; --muted:#666; --line:#e3e3e3;
           --pass:#0a7d33; --fail:#c62828; --code:#f6f7f9; }

@@ -2,7 +2,7 @@
 #
 # Docker integration test for the time-series CQL functions.
 #
-# Boots the cassandra-timeseries image, loads a deterministic data set and asserts the
+# Boots the aster-tsdb image, loads a deterministic data set and asserts the
 # result of every time-series function family against hand-computed values. This is the
 # release gate: the unit tests exercise the functions in-process, this exercises them
 # through a real node (schema, read path, aggregation, native protocol, cqlsh output).
@@ -30,7 +30,7 @@ fi
 cleanup() { $RUNTIME rm -f "$CONTAINER" > /dev/null 2>&1; }
 trap cleanup EXIT
 
-echo "== cassandra-timeseries time-series CQL integration test =="
+echo "== aster-tsdb time-series CQL integration test =="
 echo "   runtime: $RUNTIME   image: $IMAGE"
 
 $RUNTIME run -d --name "$CONTAINER" "$IMAGE" > /dev/null || { echo "FATAL: container did not start"; exit 2; }
@@ -188,7 +188,7 @@ write_report() {
         cat <<HTML
 <!doctype html>
 <meta charset="utf-8">
-<title>cassandra-timeseries · time-series CQL integration test</title>
+<title>aster-tsdb · time-series CQL integration test</title>
 <style>
   :root { color-scheme: light dark; --bg:#fff; --fg:#1a1a1a; --muted:#666; --line:#e3e3e3;
           --pass:#0a7d33; --fail:#c62828; --code:#f6f7f9; }

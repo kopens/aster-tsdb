@@ -55,7 +55,7 @@ with hundreds of `package org.slf4j does not exist` errors that read as a broken
 ## 2. The cluster test — required before a release, not optional
 
 ```bash
-./docker/cluster-test.sh cassandra-timeseries:<tag>     # or ci-local --with-cluster
+./docker/cluster-test.sh aster-tsdb:<tag>     # or ci-local --with-cluster
 ```
 
 `.gitlab-ci.yml` marks `docker-cluster-test` manual and explicitly not a release gate, on the
