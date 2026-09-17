@@ -1,6 +1,6 @@
 # Changelog
 
-Notable changes to **cassandra-timeseries**, the industrial time-series fork of Apache Cassandra.
+Notable changes to **Aster TSDB**, the industrial time-series fork of Apache Cassandra.
 
 This file covers the *fork's* changes only. Upstream Apache Cassandra's own entries live in
 [`CHANGES.txt`](CHANGES.txt), which follows the ASF convention and gains a batch of entries every

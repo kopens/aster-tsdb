@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Loader + timed query workload for the cassandra-timeseries scale / tiering benchmark.
+"""Loader + timed query workload for the aster-tsdb scale / tiering benchmark.
 
 Models the *production* table shape (`tm_tag_point`): one wide row per sample with static
 per-tag metadata, several columns that are constant in practice, one column that is entirely
@@ -520,7 +520,7 @@ def emit_html(a, results, rows_per_series):
     w = sys.stdout.write
     w("""<!doctype html>
 <meta charset="utf-8">
-<title>cassandra-timeseries · tm_tag_point scale test</title>
+<title>aster-tsdb · tm_tag_point scale test</title>
 <style>
   :root { color-scheme: light dark; --bg:#fff; --fg:#1a1a1a; --muted:#666; --line:#e3e3e3;
           --accent:#0a6cbd; --warn:#c62828; --code:#f6f7f9; }

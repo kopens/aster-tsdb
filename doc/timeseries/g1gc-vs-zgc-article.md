@@ -2,7 +2,7 @@
 
 **Apache Cassandra 6.0.0 기반 시계열 DB에 1억 건을 넣고, 두 가비지 컬렉터로 같은 쿼리를 돌려 비교한 기록**
 
-작성일: 2026-07-30 · 대상: [cassandra-timeseries](https://dev.kopens.io/common/aster-tsdb) (Apache Cassandra 6.0.0 + 네이티브 시계열 CQL 함수)
+작성일: 2026-07-30 · 대상: [aster-tsdb](https://dev.kopens.io/common/aster-tsdb) (Apache Cassandra 6.0.0 + 네이티브 시계열 CQL 함수)
 
 > 측정 환경: 구형 24코어 컨테이너(X5670급), v3 청크 시절. GC 간 **상대 비교**와 결론
 > (Generational ZGC 채택 — 현행 설정)은 유효하나, 절대 수치는 현재 기준이 아니다.
