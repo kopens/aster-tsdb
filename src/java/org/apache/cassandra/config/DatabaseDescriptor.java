@@ -664,6 +664,9 @@ public class DatabaseDescriptor
             }
         }
 
+        if (conf.accord.durability_flush_interval == null)
+            conf.accord.durability_flush_interval = conf.accord.shard_durability_cycle;
+
         /* evaluate the DiskAccessMode Config directive, which also affects indexAccessMode selection */
         if (conf.disk_access_mode == DiskAccessMode.auto || conf.disk_access_mode == DiskAccessMode.mmap_index_only)
         {
@@ -730,18 +733,7 @@ public class DatabaseDescriptor
         if (conf.file_cache_round_up == null)
             conf.file_cache_round_up = conf.disk_optimization_strategy == Config.DiskOptimizationStrategy.spinning;
 
-        if (conf.memtable_offheap_space == null)
-            conf.memtable_offheap_space = new DataStorageSpec.IntMebibytesBound((int) (Runtime.getRuntime().maxMemory() / (4 * 1048576)));
-        // for the moment, we default to twice as much on-heap space as off-heap, as heap overhead is very large
-        if (conf.memtable_heap_space == null)
-            conf.memtable_heap_space = new DataStorageSpec.IntMebibytesBound((int) (Runtime.getRuntime().maxMemory() / (4 * 1048576)));
-        if (conf.memtable_heap_space.toMebibytes() == 0)
-            throw new ConfigurationException("memtable_heap_space must be positive, but was " + conf.memtable_heap_space, false);
-        logger.info("Global memtable on-heap threshold is enabled at {}", conf.memtable_heap_space);
-        if (conf.memtable_offheap_space.toMebibytes() == 0)
-            logger.info("Global memtable off-heap threshold is disabled, HeapAllocator will be used instead");
-        else
-            logger.info("Global memtable off-heap threshold is enabled at {}", conf.memtable_offheap_space);
+        applyMemtableSpace(conf);
 
         if (conf.repair_session_max_tree_depth != null)
         {
@@ -1310,6 +1302,36 @@ public class DatabaseDescriptor
     }
 
     @VisibleForTesting
+    static void applyMemtableSpace(Config conf)
+    {
+        if (conf.memtable_offheap_space == null)
+            conf.memtable_offheap_space = new DataStorageSpec.IntMebibytesBound((int) (Runtime.getRuntime().maxMemory() / (4 * 1048576)));
+        // for the moment, we default to twice as much on-heap space as off-heap, as heap overhead is very large
+        if (conf.memtable_heap_space == null)
+            conf.memtable_heap_space = new DataStorageSpec.IntMebibytesBound((int) (Runtime.getRuntime().maxMemory() / (4 * 1048576)));
+        if (conf.memtable_heap_space.toMebibytes() == 0)
+            throw new ConfigurationException("memtable_heap_space must be positive, but was " + conf.memtable_heap_space, false);
+        logger.info("Global memtable on-heap threshold is enabled at {}", conf.memtable_heap_space);
+
+        if (conf.memtable_offheap_space.toMebibytes() != 0)
+        {
+            logger.info("Global memtable off-heap threshold is enabled at {}", conf.memtable_offheap_space);
+        }
+        else
+        {
+            // offheap_buffers and offheap_objects with a limit of 0 would leave that usage unbounded
+            if (conf.memtable_allocation_type == Config.MemtableAllocationType.offheap_buffers
+                    || conf.memtable_allocation_type == Config.MemtableAllocationType.offheap_objects)
+                throw new ConfigurationException("memtable_offheap_space must be positive when memtable_allocation_type is "
+                                                 + conf.memtable_allocation_type
+                                                 + ", otherwise off-heap memtable memory is not limited", false);
+
+            logger.info("Global memtable off-heap threshold is 0; memtable_allocation_type {} does not allocate off-heap",
+                        conf.memtable_allocation_type);
+        }
+    }
+
+    @VisibleForTesting
     static void applyConcurrentValidations(Config config)
     {
         if (config.concurrent_validations < 1)
@@ -1390,6 +1412,7 @@ public class DatabaseDescriptor
         }
     }
 
+    // TODO (expected): move all of the Accord config setup and accessors into AccordConfig
     private static void applyAccord()
     {
         try
@@ -2937,6 +2960,11 @@ public class DatabaseDescriptor
         conf.concurrent_materialized_view_writes = concurrent_materialized_view_writes;
     }
 
+    public static int getAccordConcurrentMigrationOps()
+    {
+        return conf.accord.migration_concurrency.or(2 * FBUtilities.getAvailableProcessors());
+    }
+
     public static int getAccordConcurrentOps()
     {
         return conf.accord.queue_thread_count.or(2 * FBUtilities.getAvailableProcessors());
@@ -2949,6 +2977,15 @@ public class DatabaseDescriptor
             throw new IllegalArgumentException("Concurrent accord operations must be non-negative");
         }
         conf.accord.queue_thread_count = new OptionaldPositiveInt(concurrent_operations);
+    }
+
+    public static void setConcurrentAccordMigrationOps(int concurrent_operations)
+    {
+        if (concurrent_operations < 0)
+        {
+            throw new IllegalArgumentException("Concurrent accord operations must be non-negative");
+        }
+        conf.accord.migration_concurrency = new OptionaldPositiveInt(concurrent_operations);
     }
 
     public static int getFlushWriters()
@@ -5841,6 +5878,11 @@ public class DatabaseDescriptor
     public static long getAccordShardDurabilityCycle(TimeUnit unit)
     {
         return conf.accord.shard_durability_cycle.to(unit);
+    }
+
+    public static long getAccordDurabilityFlushInterval(TimeUnit unit)
+    {
+        return conf.accord.durability_flush_interval.to(unit);
     }
 
     public static boolean getAccordStateCacheListenerJFREnabled()
