@@ -35,6 +35,10 @@ variables:
 
 default:
   image: eclipse-temurin:21-jdk
+  # Every job needs a docker executor (image: + apt-get). Untagged, they were also picked up by the
+  # group shell runner common-70-build (RHEL, no apt-get/ant), which failed MR !8's build-jar in 17s.
+  # Runner 77 (kopens-234) carries `docker`; the shell runner does not.
+  tags: [docker]
   before_script:
     # git: the temurin image ships without it, and build.xml's _get-git-sha then silently
     # falls back, stamping Implementation-Git-SHA: Unknown into the jar. That attribute is
