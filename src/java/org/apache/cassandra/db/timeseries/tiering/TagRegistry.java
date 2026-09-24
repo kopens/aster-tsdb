@@ -42,7 +42,6 @@ import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.utils.Clock;
 import org.apache.cassandra.utils.NoSpamLogger;
 
 import static java.lang.String.format;
@@ -67,7 +66,8 @@ import static java.lang.String.format;
  *     writes are a hash lookup against {@link #seenTags}), so a tag created after this feature
  *     shipped is in the registry from its first write onward;</li>
  *     <li>the incremental walk, {@code TieredStorageService.advanceIncrementalScan}: a few pages of
- *     {@code token(pk) > cursor} per cycle, covering the ring over hours.</li>
+ *     {@code token(pk) > cursor} per cycle, covering the ring over hours. It registers through
+ *     {@link #registerDiscovered}, which -- unlike the write path -- ignores the cache ceiling.</li>
  * </ul>
  * The walk is not redundant with the write path, and losing it would be a data-tiering bug rather
  * than a lost optimisation: a tag whose rows predate this feature has no registry entry and may
@@ -79,8 +79,9 @@ import static java.lang.String.format;
  * place, because on the table this registry exists for that scan cannot complete -- so the "backstop"
  * was a branch that could never run, sitting under a comment claiming it would. Whatever the walk
  * does not reach is not reached. That puts the weight on the walk never stalling, which is why a
- * page that fails does not advance the cursor <em>and</em> why the retry shrinks its page
- * ({@link #consecutiveScanFailures}) instead of repeating a request that just proved too expensive.
+ * page that fails does not advance the cursor <em>and</em> why the retry halves the token span it
+ * walks ({@link #consecutiveScanFailures}) instead of repeating a request that just proved too
+ * expensive.
  *
  * <p><b>Failure is always toward doing more work, never less.</b> A registry read that fails or
  * comes back empty falls through to a base-table scan. A registry write that fails is logged and
@@ -96,37 +97,24 @@ public final class TagRegistry
     static final String SCOPE = "tags";
 
     /**
-     * How long the registry is trusted on its own before the base table is scanned again to catch
-     * tags the write path never saw (see the class javadoc). Deliberately much longer than a cycle's
-     * {@code interval} -- the whole point is that the expensive scan stops being per-cycle -- but far
-     * shorter than any window in which not tiering a tag would matter.
-     */
-    private static final long RECONCILE_INTERVAL_MINUTES = 60;
-
-    /**
      * Per-table set of tags this node has already registered, so the write path pays a hash lookup
-     * rather than a write per mutation. Bounded: past {@value #MAX_CACHED_TAGS_PER_TABLE} entries it
+     * rather than a write per mutation. Bounded: past {@link #maxCachedTagsPerTable} entries it
      * stops growing and later tags simply re-register on every write, which is slower but still
      * correct -- an unbounded cache on a table with unbounded cardinality would be a heap leak, and
      * a heap leak is worse than a redundant write.
      */
     private static final ConcurrentHashMap<TableId, Set<List<ByteBuffer>>> seenTags = new ConcurrentHashMap<>();
-    private static final int MAX_CACHED_TAGS_PER_TABLE = 1_000_000;
+    private static volatile int maxCachedTagsPerTable = 1_000_000;
 
-    /**
-     * {@link TableId} -> epoch millis of the last reconcile <b>attempt</b> against the base table,
-     * whether or not the scan completed.
-     * <p>
-     * Attempts, not successes. Gating on success is the same mistake that made a failing table's
-     * sweep ignore its own interval (see {@code TieredStorageService.lastAttemptAtMillisByTable}),
-     * and it reappeared here with the same shape: on the table this registry exists for, the base
-     * scan is exactly the thing that does not reliably finish, so a success-gated timer never
-     * advances and <em>every</em> cycle re-runs a multi-minute failing full-table scan instead of one
-     * per hour. Observed in production at 19-minute intervals against a 60-minute setting. Throttling
-     * failed attempts costs nothing: an incomplete scan's results are already unioned with the
-     * registry, and the write path keeps the registry current between reconciles.
-     */
-    private static final ConcurrentHashMap<TableId, Long> lastReconcileAttemptMillis = new ConcurrentHashMap<>();
+    /** Test-only: {@return the previous ceiling}. */
+    @VisibleForTesting
+    static int setMaxCachedTagsPerTableForTesting(int ceiling)
+    {
+        int previous = maxCachedTagsPerTable;
+        maxCachedTagsPerTable = ceiling;
+        return previous;
+    }
+
 
     /**
      * {@link TableId} -> the token the incremental base-table scan should resume <em>after</em>;
@@ -192,32 +180,10 @@ public final class TagRegistry
         consecutiveScanFailures.remove(base.id);
     }
 
-    /**
-     * @return {@code true} if {@code base}'s registry should be rebuilt from the base table on this
-     * cycle -- because it has never been reconciled on this node, or because
-     * {@value #RECONCILE_INTERVAL_MINUTES} minutes have passed since it last was.
-     */
-    static boolean dueForReconcile(TableMetadata base)
-    {
-        Long last = lastReconcileAttemptMillis.get(base.id);
-        return last == null
-               || Clock.Global.currentTimeMillis() - last >= TimeUnit.MINUTES.toMillis(RECONCILE_INTERVAL_MINUTES);
-    }
-
-    /**
-     * Records that {@code base}'s registry reconcile was attempted -- called on every attempt, not
-     * only the ones that finished. See {@link #lastReconcileAttemptMillis} for why.
-     */
-    static void reconcileAttempted(TableMetadata base)
-    {
-        lastReconcileAttemptMillis.put(base.id, Clock.Global.currentTimeMillis());
-    }
-
     @VisibleForTesting
     static void resetForTesting()
     {
         seenTags.clear();
-        lastReconcileAttemptMillis.clear();
         scanCursor.clear();
         consecutiveScanFailures.clear();
     }
@@ -262,57 +228,70 @@ public final class TagRegistry
 
     /**
      * Writes {@code tags} into {@code base}'s registry, skipping any this node has already written.
-     * Used by the reconcile path to persist what the base-table scan found.
+     * Used to persist what the fallback base-table scan found; see {@link #registerDiscovered}.
      */
     static void putAll(TableMetadata base, ConsistencyLevel cl, List<List<ByteBuffer>> tags)
     {
         for (List<ByteBuffer> tag : tags)
-            noteTag(base, cl, tag);
+            registerDiscovered(base, cl, tag);
     }
 
     /**
-     * Registers one tag, if this node has not already registered it.
+     * Registers one tag seen on the write path, if this node has not already registered it.
      * <p>
-     * Best-effort by construction: a failure here is logged (rate-limited) and swallowed, because the
-     * callers are the write path -- where failing a client's write to maintain a re-encoder's index
-     * would be indefensible -- and the reconcile, which will simply try again. The cost of a lost
-     * registration is one delayed tag, bounded by {@value #RECONCILE_INTERVAL_MINUTES} minutes.
+     * Best-effort by construction: a failure here is logged (rate-limited) and swallowed, because
+     * failing a client's write to maintain a re-encoder's index would be indefensible. A lost
+     * registration costs one delayed tag -- the walk registers it when it next passes that token.
      */
     static void noteTag(TableMetadata base, ConsistencyLevel cl, List<ByteBuffer> tag)
+    {
+        register(base, cl, tag, false);
+    }
+
+    /**
+     * Registers one tag found by discovery -- the incremental walk or the fallback base-table scan --
+     * if this node has not already registered it. Unlike {@link #noteTag} this is not subject to the
+     * cache ceiling: discovery is what covers the tags the write path stops registering past it.
+     */
+    static void registerDiscovered(TableMetadata base, ConsistencyLevel cl, List<ByteBuffer> tag)
+    {
+        register(base, cl, tag, true);
+    }
+
+    private static void register(TableMetadata base, ConsistencyLevel cl, List<ByteBuffer> tag, boolean discovered)
     {
         Set<List<ByteBuffer>> seen = seenTags.computeIfAbsent(base.id, ignored -> ConcurrentHashMap.newKeySet());
         if (seen.contains(tag))
             return;
 
-        // Past the cache's ceiling, stop registering from the write path altogether rather than
+        TableMetadata registry = Schema.instance.getTableMetadata(base.keyspace, ChunkTables.tagsTableName(base.name));
+        if (registry == null)
+            return; // not ensured yet; the first cycle creates it, and its discovery registers into it
+
+        // Past the cache's ceiling, the write path stops registering altogether rather than
         // registering without caching. The latter is what "bounded cache, unbounded correctness"
         // naively suggests, and it is the worse failure by far: every single mutation to the table
         // would issue its own distributed INSERT, forever -- at this node's write rate that converts
-        // a heap concern into a write-amplification outage. The hourly reconcile scan is the backstop
-        // that makes stopping safe: it is authoritative, and it is what covers every tag the write
-        // path never registered (see the class javadoc).
-        if (seen.size() >= MAX_CACHED_TAGS_PER_TABLE)
+        // a heap concern into a write-amplification outage. Discovery is what makes stopping safe, so
+        // discovery keeps registering, uncached: its rate is bounded by the walk's page budget, not
+        // by the write rate. (It once went through this same cap, and past the ceiling a newly
+        // discovered tag was dropped as well -- never registered, never encoded, silently.)
+        if (seen.size() >= maxCachedTagsPerTable)
         {
-            NoSpamLogger.log(logger, NoSpamLogger.Level.WARN, base.keyspace + '.' + base.name + ":tag-cache-full",
-                             1, TimeUnit.HOURS,
-                             "Tiered storage: {}.{} has more than {} distinct tags on this node; the write path has " +
-                             "stopped registering new ones and they will be picked up by the reconcile scan instead. " +
-                             "Enumeration for this table is back to costing a full base-table scan every {} minutes",
-                             base.keyspace, base.name, MAX_CACHED_TAGS_PER_TABLE, RECONCILE_INTERVAL_MINUTES);
+            if (!discovered)
+            {
+                NoSpamLogger.log(logger, NoSpamLogger.Level.WARN, base.keyspace + '.' + base.name + ":tag-cache-full",
+                                 1, TimeUnit.HOURS,
+                                 "Tiered storage: {}.{} has more than {} distinct tags on this node; the write path " +
+                                 "has stopped registering new ones. They are registered when the incremental tag " +
+                                 "walk reaches them instead, so a new tag may wait up to one pass of the walk before " +
+                                 "it is tiered", base.keyspace, base.name, maxCachedTagsPerTable);
+                return;
+            }
+            write(base, cl, registry, tag);
             return;
         }
 
-        TableMetadata registry = Schema.instance.getTableMetadata(base.keyspace, ChunkTables.tagsTableName(base.name));
-        if (registry == null)
-            return; // not ensured yet; the first cycle creates it and reconciles into it
-
-        List<ColumnMetadata> tagColumns = base.partitionKeyColumns();
-        String query = format("INSERT INTO %s (%s, %s) VALUES (?%s)",
-                              quotedRef(registry), ChunkTables.tagsScopeColumn(base), columnList(tagColumns),
-                              bindMarkers(tagColumns.size()));
-        List<ByteBuffer> values = new ArrayList<>(tag.size() + 1);
-        values.add(scopeValue());
-        values.addAll(tag);
         // Claim the tag BEFORE issuing the write, not after. Every concurrent write to a
         // newly-seen tag reaches this point, and marking it seen only on success meant all of them
         // issued their own INSERT -- a burst of identical registrations proportional to the write
@@ -325,18 +304,33 @@ public final class TagRegistry
         // unconditionally would have let every racer through, which is the burst this exists to stop.
         if (!seen.add(tag))
             return;
+        if (!write(base, cl, registry, tag))
+            seen.remove(tag);
+    }
+
+    /** @return whether the registry INSERT succeeded; a failure is logged (rate-limited) and swallowed. */
+    private static boolean write(TableMetadata base, ConsistencyLevel cl, TableMetadata registry, List<ByteBuffer> tag)
+    {
+        List<ColumnMetadata> tagColumns = base.partitionKeyColumns();
+        String query = format("INSERT INTO %s (%s, %s) VALUES (?%s)",
+                              quotedRef(registry), ChunkTables.tagsScopeColumn(base), columnList(tagColumns),
+                              bindMarkers(tagColumns.size()));
+        List<ByteBuffer> values = new ArrayList<>(tag.size() + 1);
+        values.add(scopeValue());
+        values.addAll(tag);
         try
         {
             QueryProcessor.process(query, cl, values);
+            return true;
         }
         catch (RuntimeException e)
         {
-            seen.remove(tag);
             NoSpamLogger.log(logger, NoSpamLogger.Level.WARN, base.keyspace + '.' + base.name + ":tag-registry-write",
                              5, TimeUnit.MINUTES,
-                             "Tiered storage: could not register a tag of {}.{}; it will be picked up by the next " +
-                             "reconcile against the base table ({})",
+                             "Tiered storage: could not register a tag of {}.{}; it will be registered when the " +
+                             "incremental tag walk next reaches it ({})",
                              base.keyspace, base.name, e.toString());
+            return false;
         }
     }
 
