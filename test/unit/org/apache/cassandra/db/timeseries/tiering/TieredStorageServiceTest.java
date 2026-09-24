@@ -25,6 +25,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -808,6 +809,91 @@ public class TieredStorageServiceTest extends CQLTester
     }
 
     @Test
+    public void shutdownDuringTheBaseTableTagScanIsNotReportedAsAnError() throws Throwable
+    {
+        // The same shutdown failure mode as above, one layer down. The fallback base-table scan
+        // (taken while the registry is still empty) catches each token range's failure and logs it
+        // as an ERROR with a stack trace, so a shutdown that lands mid-scan produced one incident per
+        // remaining range -- and kept scanning ranges the query path could no longer serve.
+        TagRegistry.resetForTesting();
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
+        insertRow("tag0", 0L, 1.0, 1);
+
+        Logger serviceLogger = (Logger) LoggerFactory.getLogger(TieredStorageService.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        serviceLogger.addAppender(appender);
+
+        // No walk pages: the registry stays empty, so enumeration falls through to scanTags. The
+        // first range scan is where shutdown arrives -- drain has begun, and the query fails.
+        TieredStorageService service = new TieredStorageService();
+        int previousBudget = service.setScanPagesPerCycleForTesting(0);
+        AtomicInteger rangeScans = new AtomicInteger();
+        boolean previous = TieredStorageService.setSweepStoppingForTesting(false);
+        TieredStorageService.tagRangeScanHookForTesting = range ->
+        {
+            rangeScans.incrementAndGet();
+            TieredStorageService.setSweepStoppingForTesting(true);
+            throw new RuntimeException("injected: query path dismantled by drain");
+        };
+        TierRunStats stats;
+        try
+        {
+            stats = service.runOnce(KEYSPACE, currentTable(), 5 * HOUR);
+        }
+        finally
+        {
+            TieredStorageService.tagRangeScanHookForTesting = null;
+            TieredStorageService.setSweepStoppingForTesting(previous);
+            service.setScanPagesPerCycleForTesting(previousBudget);
+            serviceLogger.detachAppender(appender);
+        }
+
+        assertFalse("a range scan failing because tiering is shutting down is not an error",
+                    appender.list.stream().anyMatch(e -> e.getLevel() == Level.ERROR));
+        assertTrue("the scan should say it stopped because tiering is shutting down",
+                   appender.list.stream().anyMatch(e -> e.getFormattedMessage().contains("shutting down")));
+        assertEquals("no further range may be scanned once shutdown is seen", 1, rangeScans.get());
+        // Still counted: the cycle did not enumerate everything, and must not report that it did.
+        assertTrue(stats.tagsSkipped > 0);
+        assertEquals(0, stats.windowsEncoded);
+        assertEquals(1, raw("SELECT * FROM %s WHERE tag = ?", "tag0").size());
+    }
+
+    @Test
+    public void tagsTheWalkDiscoversAreRegisteredPastTheWritePathCacheCeiling() throws Throwable
+    {
+        // Past MAX_CACHED_TAGS_PER_TABLE the write path stops registering tags -- deliberately, since
+        // registering uncached from there would cost a distributed INSERT per mutation. The walk is
+        // what makes that safe, but it registered through the same capped call, so on a table past
+        // the ceiling a newly discovered tag was dropped too: never registered, never enumerated,
+        // never encoded, and nothing said so. The walk's own rate is bounded (scanPagesPerCycle pages
+        // per cycle), so it must register what it finds whether or not the cache has room.
+        TagRegistry.resetForTesting();
+        int previousCeiling = TagRegistry.setMaxCachedTagsPerTableForTesting(2);
+        try
+        {
+            createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+            setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
+
+            long wt = 1;
+            for (int t = 0; t < 6; t++)
+                insertRow("tag" + t, 0L, t, wt++);
+
+            new TieredStorageService().runOnce(KEYSPACE, currentTable(), 5 * HOUR);
+
+            assertEquals("every tag the walk found must be registered, cache ceiling or not", 6, registeredTagCount());
+            for (int t = 0; t < 6; t++)
+                assertEquals("tag" + t + " should have been chunked", 1, execute(chunkSelectQuery(), "tag" + t, new Date(0L)).size());
+        }
+        finally
+        {
+            TagRegistry.setMaxCachedTagsPerTableForTesting(previousCeiling);
+        }
+    }
+
+    @Test
     public void incrementalScanCoversTheRingAcrossCyclesInsteadOfTimingOut() throws Throwable
     {
         // The registry made enumeration cheap for tags the write path has seen, but the backlog -- tags
@@ -936,7 +1022,7 @@ public class TieredStorageServiceTest extends CQLTester
             registeredTags.add(row.getString("tag"));
         assertEquals(new HashSet<>(Arrays.asList(tags)), registeredTags);
 
-        // Second cycle: the reconcile interval has not elapsed, so enumeration comes from the
+        // Second cycle: the registry is populated, so enumeration comes from the
         // registry. New closed windows for the same tags must still be found and encoded.
         for (String tag : tags)
             for (int r = 0; r < 4; r++)

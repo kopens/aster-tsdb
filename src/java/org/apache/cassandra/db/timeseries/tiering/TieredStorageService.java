@@ -34,6 +34,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -256,6 +257,14 @@ public class TieredStorageService implements TieredStorageServiceMBean
      */
     @VisibleForTesting
     volatile BiConsumer<String, String> preRunHookForTesting;
+
+    /**
+     * Test-only seam, called with the range's description just before each base-table range scan in
+     * {@link #scanTags}; throwing from it fails that range's scan. A single-node test cluster cannot
+     * otherwise make a range scan fail, which is the path shutdown and timeouts take.
+     */
+    @VisibleForTesting
+    static volatile Consumer<String> tagRangeScanHookForTesting;
 
     /**
      * Hard cap on the rows a single (tag, window) may accumulate in one cycle, pre-checked while
@@ -1076,6 +1085,9 @@ public class TieredStorageService implements TieredStorageServiceMBean
                     catch (RuntimeException e)
                     {
                         stats.tagsSkipped++;
+                        if (stopRequested())
+                            break; // not a fault: see the encode loop's catch. The loop head logs nothing
+                                   // more; expiry is simply resumed on the next cycle after startup
                         logger.error("Tiered storage runOnce: {}.{} failed while expiring cold chunks of tag {} -- " +
                                      "skipping to the next tag; retried next cycle", keyspace, table,
                                      describeTag(tagColumns, tag), e);
@@ -1333,7 +1345,7 @@ public class TieredStorageService implements TieredStorageServiceMBean
                 List<ByteBuffer> tag = new ArrayList<>(tagRawNames.size());
                 for (String name : tagRawNames)
                     tag.add(row.getBytes(name));
-                TagRegistry.noteTag(base, cl, tag);
+                TagRegistry.registerDiscovered(base, cl, tag);
             }
 
             TagRegistry.clearScanFailures(base);
@@ -1360,10 +1372,8 @@ public class TieredStorageService implements TieredStorageServiceMBean
             }
 
             // A short UNBOUNDED page means the ring is exhausted: a full pass is done. Rewind so the
-            // next pass picks up tags created since, and record the pass so the reconcile interval
-            // is honoured.
+            // next pass picks up tags created since.
             TagRegistry.rewindScanCursor(base);
-            TagRegistry.reconcileAttempted(base);
             return;
         }
     }
@@ -1432,18 +1442,12 @@ public class TieredStorageService implements TieredStorageServiceMBean
         List<List<ByteBuffer>> scanned = scanTags(base, tagCqlList, tagRawNames, baseRef, cl, stats);
         boolean complete = stats.tagsSkipped == skippedBefore;
 
-        // Only a scan that covered every range may stand in for the base table. A partial one would
-        // write a registry that omits the tags whose range failed, and the next cycles would read it
-        // back as complete -- turning one cycle's transient read timeout into tags that are never
-        // encoded again until the reconcile interval elapses.
         if (!registryBacked)
             return scanned;
 
-        // Every attempt resets the reconcile timer, complete or not -- otherwise a scan that never
-        // finishes is retried by every cycle rather than once an interval. See
-        // TagRegistry.lastReconcileAttemptMillis.
-        TagRegistry.reconcileAttempted(base);
-
+        // Only a scan that covered every range is persisted. A partial one would write a registry
+        // that omits the tags whose range failed, and the next cycles -- which read the registry and
+        // no longer fall back here -- would treat it as complete, leaving those tags to the walk alone.
         if (complete)
         {
             TagRegistry.putAll(base, cl, scanned);
@@ -1451,12 +1455,9 @@ public class TieredStorageService implements TieredStorageServiceMBean
         }
 
         // The scan did not finish. Union what it did find with the registry rather than returning the
-        // partial result alone: on a table whose partitions are big enough that a DISTINCT scan cannot
-        // reliably complete -- which is precisely the table the registry exists for -- the scan never
-        // succeeds, so `reconciled` is never recorded, so this branch is taken on every single cycle.
-        // Returning only the partial scan there would mean the write path's registrations are never
-        // consulted at all, and the tags in whichever range keeps failing are never encoded. The
-        // registry cannot invent a tag that does not exist, so a union is only ever more complete.
+        // partial result alone: the registry was empty when this cycle read it, but the write path may
+        // have registered tags while the scan ran -- including tags in whichever range just failed.
+        // The registry cannot invent a tag that does not exist, so a union is only ever more complete.
         List<List<ByteBuffer>> registered = TagRegistry.read(base, cl);
         if (registered.isEmpty())
             return scanned;
@@ -1527,6 +1528,14 @@ public class TieredStorageService implements TieredStorageServiceMBean
         {
             for (Range<Token> sub : range.unwrap())
             {
+                if (stopRequested())
+                {
+                    // Counted like any unfinished range: the enumeration is incomplete, and the cycle
+                    // must not report that it did everything. Logged once, by collectTagsIsolated or
+                    // by the cycle that sees the stop next -- not once per range.
+                    stats.tagsSkipped++;
+                    return new ArrayList<>(tags);
+                }
                 List<ByteBuffer> values = new ArrayList<>(2);
                 String query = tagRangeQuery(tagCqlList, baseRef, sub, tokenType, values);
                 collectTagsIsolated(tags, query, tagRawNames, cl, values, base, sub.toString(), stats);
@@ -1557,11 +1566,23 @@ public class TieredStorageService implements TieredStorageServiceMBean
     {
         try
         {
+            Consumer<String> hook = tagRangeScanHookForTesting;
+            if (hook != null)
+                hook.accept(rangeDescription);
             collectTags(out, query, tagRawNames, cl, values);
         }
         catch (RuntimeException e)
         {
             stats.tagsSkipped++;
+            if (stopRequested())
+            {
+                // Not a fault worth a stack trace: drain has taken the query path apart, and scanTags
+                // stops at the next range instead of failing each of them in turn.
+                logger.info("Tiered storage: {}.{} stopped enumerating tags at token range {} because tiering is " +
+                            "shutting down; the remaining ranges are enumerated on the next cycle after startup",
+                            base.keyspace, base.name, rangeDescription);
+                return;
+            }
             logger.error("Tiered storage: {}.{} failed to enumerate tags over token range {} -- the tags in that " +
                          "range are not re-encoded this cycle; continuing with the remaining ranges and retrying " +
                          "next cycle", base.keyspace, base.name, rangeDescription, e);
