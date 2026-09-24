@@ -99,7 +99,10 @@ import org.apache.cassandra.utils.NoSpamLogger;
  *
  * <p>Whole-window retention drops stay safe because a deletion always lands in a window at least as
  * new as everything it shadows, and drops proceed oldest-first: by the time a deletion's window is
- * dropped, every window it could still shadow is already gone.
+ * dropped, every window it could still shadow is already gone. That holds for what this iterator
+ * routes; it does not hold for a window-spanning sstable (a UCS-delegate output, or a parked
+ * split-refreeze), which is filed under the window of its <em>max</em> timestamp -- rows in it can be
+ * older than a deletion's window and outlive it (see TimeSeriesCompactionController).
  *
  * <p>Each bucket preserves the original clustering order (it is a subsequence of a sorted stream).
  */
