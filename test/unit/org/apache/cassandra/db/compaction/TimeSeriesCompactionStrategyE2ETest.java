@@ -531,7 +531,9 @@ public class TimeSeriesCompactionStrategyE2ETest extends SchemaLoader
         TimeSeriesCompactionStrategy tscs = (TimeSeriesCompactionStrategy)
             cfs.getCompactionStrategyManager().getCompactionStrategyFor(cfs.getLiveSSTables().iterator().next());
 
-        AbstractCompactionTask freeze = Iterables.getOnlyElement(tscs.getNextBackgroundTasks(nowInSeconds()), null);
+        // gcBefore must honour gc_grace: passing "now" would make the tombstone purgeable as soon as the clock
+        // ticks past the second it was written in, and the refreeze would then (correctly) drop everything.
+        AbstractCompactionTask freeze = Iterables.getOnlyElement(tscs.getNextBackgroundTasks(cfs.gcBefore(nowInSeconds())), null);
         assertTrue(freeze instanceof FreezeCompactionTask);
         freeze.execute(ActiveCompactionsTracker.NOOP);
         assertEquals(1, cfs.getLiveSSTables().size());
@@ -543,13 +545,85 @@ public class TimeSeriesCompactionStrategyE2ETest extends SchemaLoader
         Util.flush(cfs);
         assertEquals("the tombstone lands beside the frozen sstable", 2, cfs.getLiveSSTables().size());
 
-        AbstractCompactionTask refreeze = Iterables.getOnlyElement(tscs.getNextBackgroundTasks(nowInSeconds()), null);
+        AbstractCompactionTask refreeze = Iterables.getOnlyElement(tscs.getNextBackgroundTasks(cfs.gcBefore(nowInSeconds())), null);
         assertTrue("a frozen window that gains a tombstone sstable must be refrozen", refreeze instanceof FreezeCompactionTask);
         refreeze.execute(ActiveCompactionsTracker.NOOP);
 
         SSTableReader refrozen = Iterables.getOnlyElement(cfs.getLiveSSTables());
         assertEquals("the refreeze must drop the rows the tombstone shadows", 0, rowsIn(refrozen));
         assertTrue("the tombstone itself is kept until gc_grace", rangeTombstoneMarkersIn(refrozen) > 0);
+    }
+
+    /**
+     * Active windows are compacted by the UCS delegate, and every sstable it produces must still sit in one
+     * window. The delegate is window-blind: handed the sstables of several active windows at once, it merged
+     * across them into a spanning sstable, filed under its newest window. Fed by later compactions of that
+     * window, such an sstable keeps its max timestamp recent, so it never leaves the active set, is never
+     * frozen and never split -- and the rows in it from older windows never meet the deletions routed into
+     * those windows. In production that left ~17M rows the tiering re-encoder had already deleted on disk,
+     * and a count over one tag's recent day timed out.
+     */
+    @Test
+    public void delegateCompactionNeverProducesAWindowSpanningSSTable()
+    {
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        cfs.truncateBlocking();
+        cfs.disableAutoCompaction();
+
+        ByteBuffer value = ByteBuffer.wrap(new byte[100]);
+        long windowSizeMillis = 60_000L;
+        // Two adjacent, closed but still ACTIVE windows (freeze_after 1h): both belong to the delegate.
+        long older = ((System.currentTimeMillis() - TimeUnit.MINUTES.toMillis(10)) / windowSizeMillis) * windowSizeMillis;
+        long newer = older + windowSizeMillis;
+        for (int i = 0; i < 8; i++)
+        {
+            for (long window : new long[]{ older, newer })
+            {
+                new RowUpdateBuilder(cfs.metadata(), window + 1000 + i, Util.dk("tag").getKey())
+                    .clustering("c" + window + '-' + i)
+                    .add("val", value).build().applyUnsafe();
+                Util.flush(cfs);
+            }
+        }
+        cfs.setCompactionParameters(ImmutableMap.of("class", "TimeSeriesCompactionStrategy",
+                                                    "timestamp_resolution", "MILLISECONDS",
+                                                    "window_size", "1m",
+                                                    "freeze_after", "1h",
+                                                    "scaling_parameters", "T4"));
+        assertTrue("every flushed sstable starts window-contained", allContained(cfs, windowSizeMillis));
+
+        TimeSeriesCompactionStrategy tscs = (TimeSeriesCompactionStrategy)
+            cfs.getCompactionStrategyManager().getCompactionStrategyFor(cfs.getLiveSSTables().iterator().next());
+        int rounds = 0;
+        for (Collection<AbstractCompactionTask> tasks = tscs.getNextBackgroundTasks(cfs.gcBefore(nowInSeconds()));
+             !tasks.isEmpty() && rounds < 20;
+             tasks = tscs.getNextBackgroundTasks(cfs.gcBefore(nowInSeconds())), rounds++)
+        {
+            for (AbstractCompactionTask task : tasks)
+                task.execute(ActiveCompactionsTracker.NOOP);
+        }
+        assertTrue("the delegate must have compacted something for this test to mean anything", rounds > 0);
+        assertTrue("delegate outputs must stay inside one window: " + describeSpans(cfs, windowSizeMillis),
+                   allContained(cfs, windowSizeMillis));
+        assertEquals(16, cfs.getLiveSSTables().stream().mapToInt(TimeSeriesCompactionStrategyE2ETest::rowsIn).sum());
+    }
+
+    private static boolean allContained(ColumnFamilyStore cfs, long windowSizeMillis)
+    {
+        for (SSTableReader sstable : cfs.getLiveSSTables())
+            if (sstable.getMinTimestamp() / windowSizeMillis != sstable.getMaxTimestamp() / windowSizeMillis)
+                return false;
+        return true;
+    }
+
+    private static String describeSpans(ColumnFamilyStore cfs, long windowSizeMillis)
+    {
+        StringBuilder sb = new StringBuilder();
+        for (SSTableReader sstable : cfs.getLiveSSTables())
+            sb.append('[').append(sstable.getMinTimestamp() / windowSizeMillis).append("..")
+              .append(sstable.getMaxTimestamp() / windowSizeMillis).append("] ");
+        return sb.toString();
     }
 
     private static int rowsIn(SSTableReader sstable)
