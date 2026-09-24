@@ -45,7 +45,9 @@ import org.apache.cassandra.db.compaction.timeseries.WindowFrozenListener;
 import org.apache.cassandra.db.compaction.timeseries.WindowFrozenListeners;
 import org.apache.cassandra.db.compaction.timeseries.WindowRoutingIterator;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.exceptions.ConfigurationException;
+import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableMetadata;
@@ -494,6 +496,94 @@ public class TimeSeriesCompactionStrategyE2ETest extends SchemaLoader
         {
             WindowFrozenListeners.unsafeClearListeners();
         }
+    }
+
+    /**
+     * The tiering re-encoder deletes the rows it has chunked with a range tombstone timestamped at their own
+     * max writetime, so the tombstone routes into the same window as the rows -- which by then is often
+     * already FROZEN. The tombstone's sstable must turn the window back to FREEZING, and the refreeze (a real
+     * CompactionController merge) must drop the shadowed rows: gc_grace only protects the tombstone, not what
+     * it shadows. Until that rewrite, every read over the range merges the dead rows too -- measured at 7-13x
+     * slower on tiered aggregates -- so this is the property that bounds how long that lasts.
+     */
+    @Test
+    public void rangeTombstoneIntoAFrozenWindowRefreezesAndDropsTheShadowedRows()
+    {
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);   // default gc_grace: tombstone kept
+        cfs.truncateBlocking();
+        cfs.disableAutoCompaction();
+
+        ByteBuffer value = ByteBuffer.wrap(new byte[100]);
+        long windowSizeMillis = 60_000L;
+        long base = ((System.currentTimeMillis() - TimeUnit.HOURS.toMillis(1)) / windowSizeMillis) * windowSizeMillis;
+        for (int i = 0; i < 3; i++)
+        {
+            new RowUpdateBuilder(cfs.metadata(), base + 1000 + i, Util.dk("tag").getKey())
+                .clustering("c" + i)
+                .add("val", value).build().applyUnsafe();
+            Util.flush(cfs);
+        }
+        cfs.setCompactionParameters(ImmutableMap.of("class", "TimeSeriesCompactionStrategy",
+                                                    "timestamp_resolution", "MILLISECONDS",
+                                                    "window_size", "1m",
+                                                    "freeze_after", "1m"));
+        TimeSeriesCompactionStrategy tscs = (TimeSeriesCompactionStrategy)
+            cfs.getCompactionStrategyManager().getCompactionStrategyFor(cfs.getLiveSSTables().iterator().next());
+
+        AbstractCompactionTask freeze = Iterables.getOnlyElement(tscs.getNextBackgroundTasks(nowInSeconds()), null);
+        assertTrue(freeze instanceof FreezeCompactionTask);
+        freeze.execute(ActiveCompactionsTracker.NOOP);
+        assertEquals(1, cfs.getLiveSSTables().size());
+        assertEquals(3, rowsIn(Iterables.getOnlyElement(cfs.getLiveSSTables())));
+
+        // The re-encoder's delete: covers every row, stamped just after the newest of them -- inside the window.
+        new RowUpdateBuilder(cfs.metadata(), base + 1003, Util.dk("tag").getKey())
+            .addRangeTombstone("c0", "c9").build().applyUnsafe();
+        Util.flush(cfs);
+        assertEquals("the tombstone lands beside the frozen sstable", 2, cfs.getLiveSSTables().size());
+
+        AbstractCompactionTask refreeze = Iterables.getOnlyElement(tscs.getNextBackgroundTasks(nowInSeconds()), null);
+        assertTrue("a frozen window that gains a tombstone sstable must be refrozen", refreeze instanceof FreezeCompactionTask);
+        refreeze.execute(ActiveCompactionsTracker.NOOP);
+
+        SSTableReader refrozen = Iterables.getOnlyElement(cfs.getLiveSSTables());
+        assertEquals("the refreeze must drop the rows the tombstone shadows", 0, rowsIn(refrozen));
+        assertTrue("the tombstone itself is kept until gc_grace", rangeTombstoneMarkersIn(refrozen) > 0);
+    }
+
+    private static int rowsIn(SSTableReader sstable)
+    {
+        int rows = 0;
+        try (ISSTableScanner scanner = sstable.getScanner())
+        {
+            while (scanner.hasNext())
+            {
+                try (UnfilteredRowIterator partition = scanner.next())
+                {
+                    while (partition.hasNext())
+                        rows += partition.next().isRow() ? 1 : 0;
+                }
+            }
+        }
+        return rows;
+    }
+
+    private static int rangeTombstoneMarkersIn(SSTableReader sstable)
+    {
+        int markers = 0;
+        try (ISSTableScanner scanner = sstable.getScanner())
+        {
+            while (scanner.hasNext())
+            {
+                try (UnfilteredRowIterator partition = scanner.next())
+                {
+                    while (partition.hasNext())
+                        markers += partition.next().isRangeTombstoneMarker() ? 1 : 0;
+                }
+            }
+        }
+        return markers;
     }
 
     /**

@@ -47,9 +47,11 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
  *       newer/mixed-window sstable permanently resurrects that row - the tombstone is gone, the row it was
  *       covering is not, and no future compaction will re-encounter both together.</li>
  * </ul>
- * Exact per-row retention and safe tombstone handling in the presence of mixed-age sstables require flush-time
- * window-splitting - so a flushed sstable's data never crosses a window boundary in the first place (design
- * spec section 4 invariant) - which arrives in increment T3, not this one.
+ * Exact per-row retention and safe tombstone handling in the presence of mixed-age sstables require that an
+ * sstable's data never crosses a window boundary (design spec section 4 invariant). T3's flush-time window
+ * splitting makes that true of flushes, but not of every sstable: the UCS delegate compacts across all active
+ * windows and can emit a window-spanning sstable, and a split-refreeze that overflows its budget is parked
+ * with the spanning sstable intact. For those, both cases above still apply.
  */
 public class TimeSeriesCompactionController extends CompactionController
 {

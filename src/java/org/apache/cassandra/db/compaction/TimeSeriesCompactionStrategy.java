@@ -854,9 +854,11 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
      * {@link #nextFreezeCandidate(Round)} and {@link #nextSplitRefreezeCandidate(Round)}, so it drops out of
      * {@code freezeBacklog}/{@code splitBacklog} and out of {@link #getEstimatedRemainingTasks()} - it
      * looks exactly like a table with nothing to do. It is not: a parked window never reaches FROZEN,
-     * so {@link org.apache.cassandra.db.compaction.timeseries.WindowFrozenListener} never fires for it
-     * and everything downstream of the freeze (tiered-storage compression included) stops for that
-     * window. Without this, the only signal is a single WARN at the moment of parking.
+     * so nothing that only a rewrite of the window does happens for it -- in particular, rows shadowed by
+     * a later deletion routed into the same window (the tiering re-encoder's range deletes, above all)
+     * stay on disk and are read and merged by every query over that range until the window changes
+     * shape or leaves retention. (The tiering re-encoder itself runs on its own scheduler and does not
+     * wait for a freeze.) Without this, the only signal is a single WARN at the moment of parking.
      * <p>
      * Refreshed on every background round; empty is the healthy state. Un-parking is automatic on any
      * change to the window - see {@link #recordCompletedRewrite}.
