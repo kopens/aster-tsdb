@@ -72,6 +72,7 @@ TESTS=(
   "testsome|org.apache.cassandra.db.memtable.TimeSeriesMemtableOffheapReadPathTest"
   "testsome|org.apache.cassandra.db.memtable.TimeSeriesMemtableStreamingReadTest"
   "testsome|org.apache.cassandra.db.timeseries.tiering.ColdWindowChunkFlushTest"
+  "testsome|org.apache.cassandra.db.timeseries.tiering.ChunkWindowEncoderTest"
 )
 
 # Guard: a class deleted from the tree stays in TESTS above and then fails every run as a

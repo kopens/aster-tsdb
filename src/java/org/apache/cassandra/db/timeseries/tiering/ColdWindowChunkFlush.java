@@ -27,7 +27,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.LongConsumer;
@@ -47,10 +46,7 @@ import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Slice;
 import org.apache.cassandra.db.commitlog.CommitLog;
-import org.apache.cassandra.db.marshal.ByteType;
 import org.apache.cassandra.db.marshal.CompositeType;
-import org.apache.cassandra.db.marshal.Int32Type;
-import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.marshal.TimestampType;
 import org.apache.cassandra.db.memtable.Memtable;
 import org.apache.cassandra.db.partitions.Partition;
@@ -59,10 +55,7 @@ import org.apache.cassandra.db.rows.ColumnData;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
-import org.apache.cassandra.db.timeseries.ChunkV4Codec;
 import org.apache.cassandra.db.timeseries.ColumnarChunkCodec;
-import org.apache.cassandra.db.timeseries.ColumnarCursor;
-import org.apache.cassandra.db.timeseries.StatOrder;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.ColumnMetadata;
@@ -393,12 +386,10 @@ public final class ColdWindowChunkFlush
         private final TieringPolicy policy;
         private final ConsistencyLevel cl;
         private final List<ColumnMetadata> tagColumns;
-        private final List<ColumnMetadata> valueColumns;
+        /** Shared with the re-encoder, so both write byte-identical chunks for identical content. */
+        private final ChunkWindowEncoder windowEncoder;
+        /** Regular column -> its slot in {@link #windowEncoder}'s order. */
         private final Map<ColumnMetadata, Integer> valueIndex = new HashMap<>();
-        private final String[] valueRawNames;
-        private final int[] valueTypeCodes;
-        /** Paired with {@link #valueTypeCodes} -- see the identical pairing in TieredStorageService. */
-        private final StatOrder[] valueStatOrders;
         private final String existingChunkQuery;
         private final String insertChunkQuery;
         private final long cutoff;
@@ -419,20 +410,9 @@ public final class ColdWindowChunkFlush
             this.policy = policy;
             this.cl = policy.consistency;
             this.tagColumns = metadata.partitionKeyColumns();
-            this.valueColumns = new ArrayList<>();
-            for (ColumnMetadata column : metadata.regularColumns())
-                valueColumns.add(column);
-            int valueCount = valueColumns.size();
-            this.valueRawNames = new String[valueCount];
-            this.valueTypeCodes = new int[valueCount];
-            this.valueStatOrders = new StatOrder[valueCount];
-            for (int c = 0; c < valueCount; c++)
-            {
-                valueIndex.put(valueColumns.get(c), c);
-                valueRawNames[c] = valueColumns.get(c).name.toString();
-                valueTypeCodes[c] = ChunkColumnTypes.typeCodeFor(valueColumns.get(c).type);
-                valueStatOrders[c] = ChunkColumnTypes.statOrderFor(valueColumns.get(c).type);
-            }
+            this.windowEncoder = new ChunkWindowEncoder(metadata);
+            for (int c = 0; c < windowEncoder.valueCount(); c++)
+                valueIndex.put(metadata.getColumn(ColumnIdentifier.getInterned(windowEncoder.valueRawName(c), true)), c);
 
             // The same statements the re-encoder issues, against the same chunk table, at the policy's
             // consistency level -- so what a cold flush writes is indistinguishable from what a
@@ -454,11 +434,8 @@ public final class ColdWindowChunkFlush
                 tagPredicate.append(column.name.toCQLString()).append(" = ?");
                 bindMarkers.append('?');
             }
-            this.existingChunkQuery = format("SELECT payload, max_row_writetime, WRITETIME(payload) AS chunk_wt " +
-                                             "FROM %s WHERE %s AND window_start = ?", chunkRef, tagPredicate);
-            this.insertChunkQuery = format("INSERT INTO %s (%s, window_start, codec, samples, max_row_writetime, " +
-                                           "payload) VALUES (%s, ?, ?, ?, ?, ?) USING TIMESTAMP ?",
-                                           chunkRef, tagCqlList, bindMarkers);
+            this.existingChunkQuery = ChunkWindowEncoder.existingChunkQuery(chunkRef, tagPredicate.toString());
+            this.insertChunkQuery = ChunkWindowEncoder.insertChunkQuery(chunkRef, tagCqlList.toString(), bindMarkers.toString());
 
             // The exact cutoff the re-encoder computes: the hot boundary, floored to a window start.
             this.cutoff = policy.windowStartFor(ColdBoundary.hotBoundaryMs(policy));
@@ -573,7 +550,7 @@ public final class ColdWindowChunkFlush
                 bucket.unchunkable = true;
                 return;
             }
-            ByteBuffer[] values = new ByteBuffer[valueColumns.size()];
+            ByteBuffer[] values = new ByteBuffer[windowEncoder.valueCount()];
             if (!collectCells(row, values, bucket))
             {
                 bucket.unchunkable = true;
@@ -624,61 +601,24 @@ public final class ColdWindowChunkFlush
                     boundTo(tag, TimestampType.instance.fromTimeInMillis(window)));
             UntypedResultSet.Row existingRow = (existingRs == null || existingRs.isEmpty()) ? null : existingRs.one();
 
-            int valueCount = valueColumns.size();
-            TreeMap<Long, ByteBuffer[]> merged = new TreeMap<>();
-            long maxWt = Long.MIN_VALUE;
-            long existingChunkWt = Long.MIN_VALUE;
-            ByteBuffer existingPayload = null;
-            boolean haveWritetime = false;
-            if (existingRow != null)
-            {
-                maxWt = existingRow.getLong("max_row_writetime");
-                // A memtable cell at or below the chunk's max writetime would have been shadowed by
-                // the re-encoder's range tombstone; encoding it could replace newer chunk content
-                // with older data. Leave the window to the row flush and the re-encoder's own merge.
-                if (bucket.anyCellWt && bucket.minCellWt <= maxWt)
-                    return false;
-                existingPayload = existingRow.getBytes("payload");
-                ColumnarCursor cursor = ColumnarChunkCodec.cursor(existingPayload, null);
-                while (cursor.advance())
-                {
-                    ByteBuffer[] values = new ByteBuffer[valueCount];
-                    for (int c = 0; c < valueCount; c++)
-                        values[c] = cursor.getBytes(valueRawNames[c]);
-                    merged.put(cursor.timestamp(), values);
-                }
-                existingChunkWt = existingRow.getLong("chunk_wt");
-                haveWritetime = true;
-            }
-
-            // Per-column merge, not row-level replace -- the same rule the re-encoder applies: a live
-            // cell wins over what the chunk held, a null slot leaves the chunk's value in place.
-            for (Map.Entry<Long, ByteBuffer[]> sample : bucket.samples.entrySet())
-            {
-                ByteBuffer[] values = merged.get(sample.getKey());
-                if (values == null)
-                {
-                    values = new ByteBuffer[valueCount];
-                    merged.put(sample.getKey(), values);
-                }
-                ByteBuffer[] fresh = sample.getValue();
-                for (int c = 0; c < valueCount; c++)
-                {
-                    if (fresh[c] != null)
-                        values[c] = fresh[c];
-                }
-            }
-            if (bucket.anyCellWt)
-            {
-                maxWt = Math.max(maxWt, bucket.maxCellWt);
-                haveWritetime = true;
-            }
-            // No cell writetime anywhere and no prior chunk to inherit one from: mirroring the
-            // re-encoder, the window is left completely untouched.
-            if (!haveWritetime)
+            // A memtable cell at or below the chunk's max writetime would have been shadowed by the
+            // re-encoder's range tombstone; encoding it could replace newer chunk content with older
+            // data. Leave the window to the row flush and the re-encoder's own merge. Checked before
+            // decoding the existing chunk, which is the expensive part of open().
+            if (existingRow != null && bucket.anyCellWt && bucket.minCellWt <= existingRow.getLong("max_row_writetime"))
                 return false;
 
-            int count = merged.size();
+            ChunkWindowEncoder.Window encoding = windowEncoder.open(existingRow);
+            for (Map.Entry<Long, ByteBuffer[]> sample : bucket.samples.entrySet())
+                encoding.mergeSample(sample.getKey(), sample.getValue());
+            if (bucket.anyCellWt)
+                encoding.noteWritetime(bucket.maxCellWt);
+            // No cell writetime anywhere and no prior chunk to inherit one from: mirroring the
+            // re-encoder, the window is left completely untouched.
+            if (!encoding.haveWritetime())
+                return false;
+
+            int count = encoding.sampleCount();
             if (count > maxSamples)
             {
                 logger.error("Cold-window chunk flush for {}.{}: window [{}, {}) merges to {} samples, over the " +
@@ -688,48 +628,13 @@ public final class ColdWindowChunkFlush
                 return false;
             }
 
-            long[] timestamps = new long[count];
-            ByteBuffer[][] columnValues = new ByteBuffer[valueCount][count];
-            int idx = 0;
-            for (Map.Entry<Long, ByteBuffer[]> sample : merged.entrySet())
-            {
-                timestamps[idx] = sample.getKey();
-                ByteBuffer[] values = sample.getValue();
-                for (int c = 0; c < valueCount; c++)
-                    columnValues[c][idx] = values[c];
-                idx++;
-            }
-            SortedMap<String, ChunkV4Codec.ColumnInput> columns = new TreeMap<>();
-            for (int c = 0; c < valueCount; c++)
-                columns.put(valueRawNames[c],
-                            new ChunkV4Codec.ColumnInput(valueTypeCodes[c], valueStatOrders[c], columnValues[c]));
-
-            ByteBuffer payload = ColumnarChunkCodec.encode(timestamps, count, columns);
-            byte codecByte = payload.get(payload.position());
-
-            // Identical content at an identical max writetime encodes to identical bytes (the codec is
-            // deterministic); re-writing it -- a replayed flush, or a replica repeating another
-            // replica's encode -- would only bump the chunk row's own write timestamp.
-            boolean chunkUnchanged = existingPayload != null
-                                     && maxWt == existingRow.getLong("max_row_writetime")
-                                     && payload.equals(existingPayload);
-            if (!chunkUnchanged)
+            ChunkWindowEncoder.Encoded encoded = encoding.encode();
+            if (!encoded.unchanged)
             {
                 LongConsumer hook = beforeChunkInsertForTesting;
                 if (hook != null)
                     hook.accept(window);
-
-                // Strictly after both the rows encoded and any chunk row being replaced -- the same
-                // deterministic timestamp rule as the re-encoder, which is what makes concurrent
-                // encodes of the same content converge instead of tearing.
-                long insertTs = Math.max(maxWt + 1, existingChunkWt + 1);
-                QueryProcessor.process(insertChunkQuery, cl, boundTo(tag,
-                        TimestampType.instance.fromTimeInMillis(window),
-                        ByteType.instance.decompose(codecByte),
-                        Int32Type.instance.decompose(count),
-                        LongType.instance.decompose(maxWt),
-                        payload,
-                        LongType.instance.decompose(insertTs)));
+                QueryProcessor.process(insertChunkQuery, cl, encoded.insertValues(tag, window));
             }
             return true;
         }
