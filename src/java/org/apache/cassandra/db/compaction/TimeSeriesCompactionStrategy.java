@@ -23,6 +23,8 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -30,6 +32,7 @@ import java.util.NavigableMap;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongFunction;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -57,7 +60,8 @@ import org.apache.cassandra.utils.TimeUUID;
 /**
  * Time-series compaction: SSTables are classified into fixed time windows by max timestamp.
  * Active windows (current, or closed less than freeze_after ago) delegate their compaction to an
- * internal {@link UnifiedCompactionStrategy}; windows past the configured retention are dropped
+ * internal {@link UnifiedCompactionStrategy} - one instance per window, so no delegate compaction ever
+ * mixes windows (see {@link #delegates}); windows past the configured retention are dropped
  * whole via {@link TimeSeriesCompactionTask}/{@link TimeSeriesCompactionController}
  * (see {@link TimeSeriesCompactionStrategyOptions#isExpiredWindow}). Closed windows are frozen to a
  * single sstable per window (per strategy-instance slice) by
@@ -81,7 +85,21 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
     private static final Logger logger = LoggerFactory.getLogger(TimeSeriesCompactionStrategy.class);
 
     private final TimeSeriesCompactionStrategyOptions tsOptions;
-    private final UnifiedCompactionStrategy delegate;
+    /**
+     * One UCS instance per ACTIVE window, created on demand and dropped when its window leaves the active
+     * set. Never one instance for all of them: UCS is window-blind, and handed several active windows' sstables
+     * at once it merges across them into a spanning sstable filed under its newest window. Fed by that window's
+     * later compactions, such an sstable keeps a recent max timestamp, so it stays active forever - never frozen,
+     * never split - and the rows in it from older windows never meet deletions routed into those windows. Kept
+     * per window, every input of a delegate compaction is contained in one window (flushes are window-split), so
+     * every output is too.
+     */
+    private final LongFunction<UnifiedCompactionStrategy> delegateFactory;
+    private final TreeMap<Long, UnifiedCompactionStrategy> delegates = new TreeMap<>();
+    /** What was handed to each window's delegate, tracked here rather than read back from the delegate. */
+    private final Map<Long, Set<SSTableReader>> delegated = new HashMap<>();
+    /** {@link #distinctDelegates()} as of the last sync, for the lock-free {@link #getEstimatedRemainingTasks()}. */
+    private volatile List<UnifiedCompactionStrategy> delegateSnapshot = List.of();
     private final Set<SSTableReader> sstables = new HashSet<>();
     // the set of expired-window sstables selected on the most recent background round, so
     // getEstimatedRemainingTasks() can report the pending whole-window drop without recomputing it.
@@ -165,21 +183,34 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
     // @VisibleForTesting ctor below), rather than each ctor building its own TimeSeriesCompactionStrategyOptions.
     private TimeSeriesCompactionStrategy(ColumnFamilyStore cfs, Map<String, String> options, TimeSeriesCompactionStrategyOptions tsOptions)
     {
-        this(cfs, options, tsOptions, new UnifiedCompactionStrategy(cfs, tsOptions.delegateOptions(options)));
+        this(cfs, options, tsOptions, window -> new UnifiedCompactionStrategy(cfs, tsOptions.delegateOptions(options)));
     }
 
+    /** Test-only: every window's delegate is {@code delegate}, so one mock observes all of them. */
     @VisibleForTesting
     TimeSeriesCompactionStrategy(ColumnFamilyStore cfs, Map<String, String> options, UnifiedCompactionStrategy delegate)
     {
-        this(cfs, options, new TimeSeriesCompactionStrategyOptions(options), delegate);
+        this(cfs, options, new TimeSeriesCompactionStrategyOptions(options), window -> delegate);
     }
 
     private TimeSeriesCompactionStrategy(ColumnFamilyStore cfs, Map<String, String> options,
-                                         TimeSeriesCompactionStrategyOptions tsOptions, UnifiedCompactionStrategy delegate)
+                                         TimeSeriesCompactionStrategyOptions tsOptions,
+                                         LongFunction<UnifiedCompactionStrategy> delegateFactory)
     {
         super(cfs, options);
         this.tsOptions = tsOptions;
-        this.delegate = delegate;
+        this.delegateFactory = delegateFactory;
+    }
+
+    /** The distinct delegate instances, oldest window first (a test factory may hand out one for all). */
+    private Collection<UnifiedCompactionStrategy> distinctDelegates()
+    {
+        Set<UnifiedCompactionStrategy> distinct = Collections.newSetFromMap(new IdentityHashMap<>());
+        List<UnifiedCompactionStrategy> ordered = new ArrayList<>();
+        for (UnifiedCompactionStrategy d : delegates.values())
+            if (distinct.add(d))
+                ordered.add(d);
+        return ordered;
     }
 
     @Override
@@ -305,9 +336,16 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
         }
         previousSplitCandidate = splitRefused;
 
-        // This refreshes the delegate's own estimatedRemainingTasks as a side effect, which is why the
-        // fall-through path needs no refreshDelegateBacklog call (and must not make one).
-        return delegate.getNextBackgroundTasks(gcBefore);
+        // Oldest active window first: it is the next to freeze, and the less a freeze has to merge the better.
+        // Asking a delegate refreshes its own estimatedRemainingTasks as a side effect; a delegate not reached
+        // this round keeps its previous term, exactly as the single delegate's did on early-return rounds.
+        for (UnifiedCompactionStrategy d : distinctDelegates())
+        {
+            Collection<AbstractCompactionTask> tasks = d.getNextBackgroundTasks(gcBefore);
+            if (!tasks.isEmpty())
+                return tasks;
+        }
+        return List.of();
     }
 
     /**
@@ -358,7 +396,8 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
      */
     private void refreshDelegateBacklog(long gcBefore)
     {
-        delegate.getNextCompactionPick(gcBefore);
+        for (UnifiedCompactionStrategy d : distinctDelegates())
+            d.getNextCompactionPick(gcBefore);
     }
 
     /**
@@ -509,15 +548,51 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
     {
         farFutureSSTables = round.farFuture;
 
-        Set<SSTableReader> inDelegate = new HashSet<>(delegate.getSSTables());
-        Set<SSTableReader> toRemove = new HashSet<>(inDelegate);
-        toRemove.removeAll(round.active);
-        Set<SSTableReader> toAdd = new HashSet<>(round.active);
-        toAdd.removeAll(inDelegate);
-        if (!toRemove.isEmpty())
-            delegate.removeSSTables(toRemove);
-        if (!toAdd.isEmpty())
-            delegate.addSSTables(toAdd);
+        Map<Long, Set<SSTableReader>> wanted = new HashMap<>();
+        // The current window always has a delegate, sstables or not: it is where every flush lands next, and
+        // it keeps "the delegate" a standing participant in every round, as the single delegate used to be.
+        wanted.put(tsOptions.windowStartFor(round.nowMillis), new HashSet<>());
+        for (SSTableReader sstable : round.active)
+            wanted.computeIfAbsent(tsOptions.windowStartFor(maxTimestampMillis(sstable)), w -> new HashSet<>()).add(sstable);
+
+        // Windows that left the active set: hand their sstables back and retire the delegate.
+        for (Iterator<Map.Entry<Long, Set<SSTableReader>>> it = delegated.entrySet().iterator(); it.hasNext(); )
+        {
+            Map.Entry<Long, Set<SSTableReader>> entry = it.next();
+            if (wanted.containsKey(entry.getKey()))
+                continue;
+            UnifiedCompactionStrategy retired = delegates.remove(entry.getKey());
+            if (!entry.getValue().isEmpty())
+                retired.removeSSTables(entry.getValue());
+            if (!delegates.containsValue(retired))
+                retired.shutdown();
+            it.remove();
+        }
+
+        for (Map.Entry<Long, Set<SSTableReader>> entry : wanted.entrySet())
+        {
+            long window = entry.getKey();
+            UnifiedCompactionStrategy d = delegates.get(window);
+            if (d == null)
+            {
+                d = delegateFactory.apply(window);
+                if (isActive)
+                    d.startup();
+                delegates.put(window, d);
+            }
+            Set<SSTableReader> have = delegated.computeIfAbsent(window, w -> new HashSet<>());
+            Set<SSTableReader> toRemove = new HashSet<>(have);
+            toRemove.removeAll(entry.getValue());
+            Set<SSTableReader> toAdd = new HashSet<>(entry.getValue());
+            toAdd.removeAll(have);
+            if (!toRemove.isEmpty())
+                d.removeSSTables(toRemove);
+            if (!toAdd.isEmpty())
+                d.addSSTables(toAdd);
+            have.removeAll(toRemove);
+            have.addAll(toAdd);
+        }
+        delegateSnapshot = List.copyOf(distinctDelegates());
     }
 
     long maxTimestampMillis(SSTableReader sstable)
@@ -888,9 +963,9 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
     }
 
     @VisibleForTesting
-    UnifiedCompactionStrategy delegate()
+    synchronized Map<Long, UnifiedCompactionStrategy> delegates()
     {
-        return delegate;
+        return new TreeMap<>(delegates);
     }
 
     @Override
@@ -903,7 +978,11 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
     public synchronized void removeSSTable(SSTableReader removed)
     {
         sstables.remove(removed);
-        delegate.removeSSTable(removed);
+        for (Map.Entry<Long, Set<SSTableReader>> entry : delegated.entrySet())
+        {
+            if (entry.getValue().remove(removed))
+                delegates.get(entry.getKey()).removeSSTable(removed);
+        }
     }
 
     @Override
@@ -954,7 +1033,7 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
     }
 
     /**
-     * Four volatile reads and nothing else. This is polled by the CompactionStrategyManager to rank
+     * A handful of volatile reads and nothing else. This is polled by the CompactionStrategyManager to rank
      * tables against one another, so it must not select work of its own; every term is refreshed by the
      * background round instead ({@link #refreshDelegateBacklog}, {@link #nextFreezeCandidate(Round)},
      * {@link #nextSplitRefreezeCandidate(Round)}), which is where the cost belongs.
@@ -962,7 +1041,10 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
     @Override
     public int getEstimatedRemainingTasks()
     {
-        return delegate.getEstimatedRemainingTasks()
+        int delegateBacklog = 0;
+        for (UnifiedCompactionStrategy d : delegateSnapshot)
+            delegateBacklog += d.getEstimatedRemainingTasks();
+        return delegateBacklog
                + (lastExpiredSelection.isEmpty() ? 0 : 1)
                + freezeBacklog
                + splitBacklog;
@@ -1012,14 +1094,22 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
     public void startup()
     {
         super.startup();
-        delegate.startup();
+        synchronized (this)
+        {
+            for (UnifiedCompactionStrategy d : distinctDelegates())
+                d.startup();
+        }
     }
 
     @Override
     public void shutdown()
     {
         super.shutdown();
-        delegate.shutdown();
+        synchronized (this)
+        {
+            for (UnifiedCompactionStrategy d : distinctDelegates())
+                d.shutdown();
+        }
     }
 
     public static Map<String, String> validateOptions(Map<String, String> options) throws ConfigurationException

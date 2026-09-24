@@ -184,10 +184,16 @@ public class TimeSeriesCompactionStrategyTest
 
         tscs.getNextBackgroundTasksAt(NOW, 0);                           // 테스트용 시각 주입 오버로드
 
-        verify(delegate).addSSTables(Mockito.argThat(iterable -> {
-            Set<SSTableReader> added = com.google.common.collect.Sets.newHashSet(iterable);
-            return added.contains(current) && added.contains(closing) && !added.contains(frozen);
-        }));
+        // One delegate per active window, so the adds arrive per window: check their union.
+        @SuppressWarnings("unchecked")
+        org.mockito.ArgumentCaptor<Iterable<SSTableReader>> captor = org.mockito.ArgumentCaptor.forClass(Iterable.class);
+        verify(delegate, Mockito.atLeastOnce()).addSSTables(captor.capture());
+        Set<SSTableReader> added = new java.util.HashSet<>();
+        for (Iterable<SSTableReader> batch : captor.getAllValues())
+            batch.forEach(added::add);
+        assertTrue(added.contains(current) && added.contains(closing) && !added.contains(frozen));
+        assertEquals("current and closing are different windows, so different delegates",
+                     2, tscs.delegates().size());
     }
 
     @Test
@@ -224,7 +230,9 @@ public class TimeSeriesCompactionStrategyTest
     {
         UnifiedCompactionStrategy delegate = mock(UnifiedCompactionStrategy.class);
         when(delegate.getEstimatedRemainingTasks()).thenReturn(3);
+        when(delegate.getNextBackgroundTasks(anyLong())).thenReturn(List.of());
         TimeSeriesCompactionStrategy tscs = strategy(delegate);
+        tscs.getNextBackgroundTasksAt(NOW, 0);                           // delegates exist from the first round on
         assertEquals(3, tscs.getEstimatedRemainingTasks());
     }
 
@@ -356,19 +364,20 @@ public class TimeSeriesCompactionStrategyTest
     }
 
     @Test
-    public void farFutureSSTablesArePrunedFromDelegateIfAlreadyThere()
+    public void farFutureSSTablesAreNeverHandedToADelegate()
     {
+        // Delegates are created fresh per window and only ever hold what syncDelegate handed them, so there is
+        // no "already in the delegate from before the guard" state left to prune: the guard is simply that a
+        // far-future sstable is never handed over in the first place.
         UnifiedCompactionStrategy delegate = mock(UnifiedCompactionStrategy.class);
         when(delegate.getNextBackgroundTasks(anyLong())).thenReturn(List.of());
         TimeSeriesCompactionStrategy tscs = strategy(delegate);
 
         SSTableReader farFuture = sstableAt(NOW + 3L * 24 * HOUR);
         tscs.addSSTable(farFuture);
-        when(delegate.getSSTables()).thenReturn(Set.of(farFuture));  // 가드 도입 전에 위임에 들어가 있던 상황
-
         tscs.getNextBackgroundTasksAt(NOW, 0);
 
-        verify(delegate).removeSSTables(Mockito.argThat(iterable ->
+        verify(delegate, Mockito.never()).addSSTables(Mockito.argThat(iterable ->
             com.google.common.collect.Sets.newHashSet(iterable).contains(farFuture)));
     }
 
