@@ -47,12 +47,15 @@ import org.apache.cassandra.db.compaction.timeseries.TimeWindowSplittingMultiWri
 import org.apache.cassandra.db.compaction.unified.Controller;
 import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.timeseries.tiering.ChunkCoverage;
+import org.apache.cassandra.db.timeseries.tiering.TieringPolicy;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.index.Index;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableMultiWriter;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.CompactionParams;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.Clock;
 import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.TimeUUID;
@@ -531,7 +534,7 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
                                  tsOptions.maxFutureWindowMillis, sstable, windowStart);
                 continue;
             }
-            if (tsOptions.isActiveWindow(windowStart, nowMillis))
+            if (isActive(windowStart, nowMillis))
                 active.add(sstable);
         }
         return new Round(nowMillis, windows, active, farFuture, expired, cfs.getTracker().getCompacting());
@@ -593,6 +596,55 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
             have.addAll(toAdd);
         }
         delegateSnapshot = List.copyOf(distinctDelegates());
+    }
+
+    /**
+     * Whether a window still belongs to the UCS delegate rather than to freezing. Normally that is "current,
+     * or closed less than freeze_after ago". On a tiered table (a {@code timeseries_tiering} policy) a closed
+     * window stops being active as soon as the chunk coverage ledger shows it fully re-encoded.
+     * <p>
+     * Why: the re-encoder deletes every row it chunks with a range tombstone in the rows' own window, and
+     * until a rewrite merges the two, every read over that range reads and merges the dead rows too -- 6x
+     * slower per row in the 2026-09-25 soak, and a timeout in production. Freezing is that rewrite. Once the
+     * window is fully encoded nothing but late data can reach it, so waiting out the rest of freeze_after
+     * (days, in production) buys nothing but that cost. It is the same single rewrite, only earlier.
+     * <p>
+     * The {@code gc_grace_seconds < freeze_after} advice exists so a freeze can purge TOMBSTONES; on a tiered
+     * table those are never purgeable anyway (every window of a tag overlaps its one partition), and what the
+     * early freeze purges is the shadowed ROWS, which needs no gc_grace. Coverage is read from cache only
+     * ({@link ChunkCoverage#peek}): unknown means "not covered", i.e. the normal freeze_after applies.
+     */
+    boolean isActive(long windowStartMillis, long nowMillis)
+    {
+        if (!tsOptions.isActiveWindow(windowStartMillis, nowMillis))
+            return false;
+        if (tsOptions.isCurrentWindow(windowStartMillis, nowMillis) || !tsOptions.tieringAwareFreeze)
+            return true;
+        return tieredThroughMillis() < windowStartMillis + tsOptions.windowSizeMillis;
+    }
+
+    /** Test-only override for {@link #tieredThroughMillis()}. */
+    @VisibleForTesting
+    volatile java.util.function.LongSupplier tieredThroughForTesting;
+
+    /** @return the exclusive end of chunk coverage for this table, or Long.MIN_VALUE when not tiered / not known. */
+    private long tieredThroughMillis()
+    {
+        java.util.function.LongSupplier override = tieredThroughForTesting;
+        if (override != null)
+            return override.getAsLong();
+        try
+        {
+            TableMetadata metadata = cfs.metadata();
+            if (TieringPolicy.fromTable(metadata) == null)
+                return Long.MIN_VALUE;
+            ChunkCoverage.Coverage coverage = ChunkCoverage.peek(metadata);
+            return coverage == null || !coverage.known() ? Long.MIN_VALUE : coverage.topExclusiveMs();
+        }
+        catch (RuntimeException e)
+        {
+            return Long.MIN_VALUE;                        // an invalid policy is the re-encoder's to report
+        }
     }
 
     long maxTimestampMillis(SSTableReader sstable)
@@ -701,7 +753,7 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
             return WindowState.EXPIRED;
         if (tsOptions.isCurrentWindow(windowStartMillis, nowMillis))
             return WindowState.CURRENT;
-        if (tsOptions.isActiveWindow(windowStartMillis, nowMillis))
+        if (isActive(windowStartMillis, nowMillis))
             return WindowState.CLOSING;
         if (windowSSTables.size() == 1)
         {

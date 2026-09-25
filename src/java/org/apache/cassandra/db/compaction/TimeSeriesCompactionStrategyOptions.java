@@ -39,6 +39,12 @@ public final class TimeSeriesCompactionStrategyOptions
     public static final String RETENTION = "retention";
     public static final String TIMESTAMP_RESOLUTION = "timestamp_resolution";
     public static final String MAX_FUTURE_WINDOW = "max_future_window";
+    /**
+     * On a table with a {@code timeseries_tiering} policy, freeze a closed window as soon as the chunk
+     * coverage ledger shows it fully re-encoded, instead of waiting out {@code freeze_after}. Default true.
+     * See {@link TimeSeriesCompactionStrategy#isActive}.
+     */
+    public static final String TIERING_AWARE_FREEZE = "tiering_aware_freeze";
 
     static final String DEFAULT_WINDOW_SIZE = "1h";
     static final String DEFAULT_FREEZE_AFTER = "2h";
@@ -53,6 +59,7 @@ public final class TimeSeriesCompactionStrategyOptions
     public final int windowSizeInUnits;
     public final TimeUnit timestampResolution;
     public final long maxFutureWindowMillis;
+    public final boolean tieringAwareFreeze;
 
     public TimeSeriesCompactionStrategyOptions(Map<String, String> options)
     {
@@ -75,6 +82,7 @@ public final class TimeSeriesCompactionStrategyOptions
         this.timestampResolution = TimeUnit.valueOf(options.getOrDefault(TIMESTAMP_RESOLUTION, "MICROSECONDS"));
         Pair<TimeUnit, Integer> future = parseDuration(MAX_FUTURE_WINDOW, options.getOrDefault(MAX_FUTURE_WINDOW, DEFAULT_MAX_FUTURE_WINDOW));
         this.maxFutureWindowMillis = TimeUnit.MILLISECONDS.convert(future.right, future.left);
+        this.tieringAwareFreeze = Boolean.parseBoolean(options.getOrDefault(TIERING_AWARE_FREEZE, "true"));
     }
 
     public long windowStartFor(long timestampMillis)
@@ -152,6 +160,7 @@ public final class TimeSeriesCompactionStrategyOptions
         copy.remove(RETENTION);
         copy.remove(TIMESTAMP_RESOLUTION);
         copy.remove(MAX_FUTURE_WINDOW);
+        copy.remove(TIERING_AWARE_FREEZE);
         return copy;
     }
 
@@ -184,12 +193,16 @@ public final class TimeSeriesCompactionStrategyOptions
             }
         }
         parseDuration(MAX_FUTURE_WINDOW, options.getOrDefault(MAX_FUTURE_WINDOW, DEFAULT_MAX_FUTURE_WINDOW));
+        String tieringAware = options.get(TIERING_AWARE_FREEZE);
+        if (tieringAware != null && !tieringAware.equalsIgnoreCase("true") && !tieringAware.equalsIgnoreCase("false"))
+            throw new ConfigurationException(TIERING_AWARE_FREEZE + " must be true or false, got " + tieringAware);
 
         uncheckedOptions.remove(WINDOW_SIZE);
         uncheckedOptions.remove(FREEZE_AFTER);
         uncheckedOptions.remove(RETENTION);
         uncheckedOptions.remove(TIMESTAMP_RESOLUTION);
         uncheckedOptions.remove(MAX_FUTURE_WINDOW);
+        uncheckedOptions.remove(TIERING_AWARE_FREEZE);
         return uncheckedOptions;
     }
 

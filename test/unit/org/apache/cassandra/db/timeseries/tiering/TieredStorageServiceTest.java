@@ -27,12 +27,19 @@ import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import com.google.common.collect.Iterables;
+
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.UntypedResultSet;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.compaction.AbstractCompactionTask;
+import org.apache.cassandra.db.compaction.ActiveCompactionsTracker;
+import org.apache.cassandra.db.compaction.FreezeCompactionTask;
+import org.apache.cassandra.db.compaction.TimeSeriesCompactionStrategy;
 import org.apache.cassandra.db.marshal.DoubleType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.timeseries.ChunkV4Codec;
@@ -45,9 +52,11 @@ import org.apache.cassandra.dht.ByteOrderedPartitioner;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
 
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
@@ -891,6 +900,47 @@ public class TieredStorageServiceTest extends CQLTester
         {
             TagRegistry.setMaxCachedTagsPerTableForTesting(previousCeiling);
         }
+    }
+
+    @Test
+    public void tscsFreezesAWindowAsSoonAsTieringHasEncodedItPurgingTheShadowedRows() throws Throwable
+    {
+        // End to end: the re-encoder chunks a closed window and range-deletes its rows in their own TSCS
+        // window. Until a rewrite merges the two, every read over that range reads the dead rows as well
+        // (6x slower per row in the 2026-09-25 soak). With freeze_after 1h that window would wait an hour;
+        // tiering-aware freeze must hand it to the freezer as soon as the coverage ledger reaches its end,
+        // and the freeze must leave no base rows behind.
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) " +
+                    "WITH compaction = {'class':'TimeSeriesCompactionStrategy', 'window_size':'1m', 'freeze_after':'1h'}");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        setPolicy("{\"hot_window\":\"2m\",\"chunk_window\":\"1m\"}");
+
+        long minute = 60_000L;
+        long window = (System.currentTimeMillis() - 5 * minute) / minute * minute;   // closed, inside freeze_after
+        for (int i = 0; i < 4; i++)
+            insertRow("tag", window + i * 1000, i, (window + i * 1000) * 1000);        // writetime in the window (micros)
+        flush();                                                                        // the rows' own sstable
+
+        TierRunStats stats = new TieredStorageService().runOnce(KEYSPACE, currentTable(), System.currentTimeMillis());
+        assertEquals(1, stats.windowsEncoded);
+        flush();                                                                        // the range tombstone's sstable
+        assertEquals(2, cfs.getLiveSSTables().size());
+        assertEquals(4, cfs.getLiveSSTables().stream().mapToLong(SSTableReader::getTotalRows).sum());
+
+        TimeSeriesCompactionStrategy tscs = (TimeSeriesCompactionStrategy)
+            cfs.getCompactionStrategyManager().getCompactionStrategyFor(cfs.getLiveSSTables().iterator().next());
+        long nowSec = FBUtilities.nowInSeconds();
+        AbstractCompactionTask task = Iterables.getOnlyElement(tscs.getNextBackgroundTasks(cfs.gcBefore(nowSec)), null);
+        assertTrue("a fully encoded window must go to the freezer, not wait out freeze_after: " + task,
+                   task instanceof FreezeCompactionTask);
+        task.execute(ActiveCompactionsTracker.NOOP);
+
+        assertEquals(1, cfs.getLiveSSTables().size());
+        assertEquals("the freeze must drop every row the re-encoder deleted",
+                     0, cfs.getLiveSSTables().stream().mapToLong(SSTableReader::getTotalRows).sum());
+        // And the data is still all there, from the chunk.
+        assertEquals(4, execute("SELECT * FROM %s WHERE tag = 'tag'").size());
     }
 
     @Test

@@ -335,6 +335,17 @@ public final class ChunkCoverage
         }
     }
 
+    /**
+     * The cached coverage for {@code base} if one is fresh, else {@code null} -- never reads the ledger.
+     * For callers that must not block on a quorum read, such as a compaction thread deciding whether a
+     * window is fully tiered: the re-encoder refreshes this every cycle, and a miss simply means "not
+     * known now", which such a caller must treat as "not covered".
+     */
+    public static Coverage peek(TableMetadata base)
+    {
+        return cached(base.id);
+    }
+
     /** @return the cached coverage for {@code id} if it has not expired, else {@code null}. */
     private static Coverage cached(TableId id)
     {
