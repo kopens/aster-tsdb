@@ -98,6 +98,26 @@ T+30일이 지나도 **디스크에 남습니다.**
 **`retention`을 목표 보존 기간으로 설정하십시오.** 만료된 창을 통째로 삭제하므로 TTL 회수보다
 효율적이기까지 합니다.
 
+## 4.5 창 상태를 한눈에 — `system_views.timeseries_windows`
+
+노드마다, TSCS 테이블의 창 하나당 한 행입니다.
+
+```sql
+SELECT window_start, state, parked, sstables, spanning_sstables, rows, bytes_on_disk, droppable_tombstone_ratio
+  FROM system_views.timeseries_windows WHERE keyspace_name = 'pp' AND table_name = 'tm_tag_point';
+```
+
+| 컬럼 | 보는 법 |
+| --- | --- |
+| `state` | `CURRENT` / `CLOSING`(freeze_after 이내) / `FREEZING` / `FROZEN` / `EXPIRED` / `FAR_FUTURE` |
+| `parked` | no-progress 가드가 파킹한 창(§5) |
+| `spanning_sstables` | **0 이어야 정상.** 0 이 아니면 창 걸침 SSTable — 그 안의 옛 창 행은 삭제와 만나지 못한다(§2) |
+| `rows` | 창이 들고 있는 행 수. 티어링 테이블에서 `CLOSING` 창의 행이 hot 구간보다 훨씬 많다면 재인코딩이 지웠지만 아직 병합되지 않은(가려진) 행이다 — 동결 때 사라진다 |
+| `droppable_tombstone_ratio` | SSTable 메타데이터의 추정치(행 가중 평균) |
+
+2026-09-24 노드 41 의 조회 타임아웃은 `spanning_sstables > 0` 과 과도한 `rows` 두 값으로 바로 보였을 것이다 —
+그날은 `sstablemetadata` 를 손으로 돌려 찾았다.
+
 ## 5. 파킹된 창 — 진척을 못 내는 창
 
 동결과 분할이 서로를 되돌리며 무한 반복하는 것을 막기 위해, 전략은 **연속으로 모양이 바뀌지 않는

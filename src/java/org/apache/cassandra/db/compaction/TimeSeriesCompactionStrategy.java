@@ -609,6 +609,75 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
     public enum WindowState { CURRENT, CLOSING, FREEZING, FROZEN, EXPIRED }
 
     /**
+     * What an operator needs to see about one window, and what nothing surfaced before: the 2026-09-24
+     * production timeout was a window-spanning sstable holding ~17M rows the tiering re-encoder had
+     * already deleted, found by hand with sstablemetadata. {@code spanning} and {@code rows} (next to what
+     * the window should hold) are the two numbers that would have shown it.
+     */
+    public static final class WindowReport
+    {
+        public final long windowStart;
+        /** A {@link WindowState} name, or {@code FAR_FUTURE} (excluded from every automatic path). */
+        public final String state;
+        public final boolean parked;
+        public final int sstables;
+        /** sstables whose min and max write timestamps fall in different windows. */
+        public final int spanning;
+        public final long bytesOnDisk;
+        public final long rows;
+        /** Row-weighted mean of the sstables' estimated droppable tombstone ratio, at the strategy's gcBefore. */
+        public final double droppableTombstoneRatio;
+
+        public WindowReport(long windowStart, String state, boolean parked, int sstables, int spanning,
+                            long bytesOnDisk, long rows, double droppableTombstoneRatio)
+        {
+            this.windowStart = windowStart;
+            this.state = state;
+            this.parked = parked;
+            this.sstables = sstables;
+            this.spanning = spanning;
+            this.bytesOnDisk = bytesOnDisk;
+            this.rows = rows;
+            this.droppableTombstoneRatio = droppableTombstoneRatio;
+        }
+    }
+
+    /**
+     * One report per window of this instance's sstable slice, oldest first. Reads only the sstables' own
+     * metadata (no I/O beyond what the reader already holds), so it is cheap enough for a virtual table.
+     */
+    public synchronized List<WindowReport> windowReports(long nowMillis, long gcBefore)
+    {
+        List<WindowReport> reports = new ArrayList<>();
+        for (Map.Entry<Long, Set<SSTableReader>> entry : windows().entrySet())
+        {
+            long windowStart = entry.getKey();
+            Set<SSTableReader> window = entry.getValue();
+            String state = tsOptions.isFarFutureWindow(windowStart, nowMillis)
+                           ? "FAR_FUTURE"
+                           : classify(windowStart, window, nowMillis).name();
+            int spanning = 0;
+            long bytes = 0, rows = 0;
+            double weightedDroppable = 0;
+            for (SSTableReader sstable : window)
+            {
+                if (tsOptions.windowStartFor(minTimestampMillis(sstable)) != tsOptions.windowStartFor(maxTimestampMillis(sstable)))
+                    spanning++;
+                bytes += sstable.bytesOnDisk();
+                long sstableRows = Math.max(0, sstable.getTotalRows());
+                rows += sstableRows;
+                weightedDroppable += sstable.getEstimatedDroppableTombstoneRatio(gcBefore) * Math.max(1, sstableRows);
+            }
+            long weight = 0;
+            for (SSTableReader sstable : window)
+                weight += Math.max(1, Math.max(0, sstable.getTotalRows()));
+            reports.add(new WindowReport(windowStart, state, isParked(windowStart, window), window.size(), spanning,
+                                         bytes, rows, weight == 0 ? 0 : weightedDroppable / weight));
+        }
+        return reports;
+    }
+
+    /**
      * Classifies one window of this instance's sstable slice. Stateless: nothing is persisted, the state is a
      * pure function of (window key, sstables, now) - restart-safe, and a FROZEN window that gains a late
      * sstable reverts to FREEZING simply because the derivation changes (design spec sections 3-4).
