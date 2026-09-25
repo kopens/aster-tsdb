@@ -3167,6 +3167,13 @@ public <T> T withAllSSTables(final OperationType operationType, Function<Lifecyc
         return compactionStrategyManager.getFarFutureTimeSeriesSSTables();
     }
 
+    /** Per-window state of a {@link org.apache.cassandra.db.compaction.TimeSeriesCompactionStrategy} table; empty otherwise. */
+    public List<org.apache.cassandra.db.compaction.TimeSeriesCompactionStrategy.WindowReport> getTimeSeriesWindowReports()
+    {
+        long nowMillis = org.apache.cassandra.utils.Clock.Global.currentTimeMillis();
+        return compactionStrategyManager.getTimeSeriesWindowReports(nowMillis, gcBefore(TimeUnit.MILLISECONDS.toSeconds(nowMillis)));
+    }
+
     @Override
     public int getLevelFanoutSize()
     {

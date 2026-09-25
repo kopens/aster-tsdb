@@ -41,6 +41,7 @@ public final class SystemViewsKeyspace extends VirtualKeyspace
                     .add(new SchemaSecurityLabelsTable(VIRTUAL_VIEWS))
                     .add(new SSTableTasksTable(VIRTUAL_VIEWS))
                     .add(new TimeseriesTieringTable(VIRTUAL_VIEWS))
+                    .add(new TimeseriesWindowsTable(VIRTUAL_VIEWS))
                     // Fully backward/forward compatible with the legace ThreadPoolsTable under the same "system_views.thread_pools" name.
                     .add(CollectionVirtualTableAdapter.create(VIRTUAL_VIEWS,
                                                               "thread_pools",

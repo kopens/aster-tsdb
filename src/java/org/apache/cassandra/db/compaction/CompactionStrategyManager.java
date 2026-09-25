@@ -912,6 +912,47 @@ public class CompactionStrategyManager implements INotificationConsumer
     }
 
     /**
+     * Aggregates {@link TimeSeriesCompactionStrategy#windowReports} over every strategy instance of this
+     * table (per repair status and per disk). Counts are summed per window; the state shown is the one
+     * most in need of attention across instances, and a window is parked if any instance parked it.
+     *
+     * @return window start (epoch millis) -&gt; merged report, oldest first; empty for a non-TSCS table
+     */
+    public List<TimeSeriesCompactionStrategy.WindowReport> getTimeSeriesWindowReports(long nowMillis, long gcBefore)
+    {
+        readLock.lock();
+        try
+        {
+            TreeMap<Long, TimeSeriesCompactionStrategy.WindowReport> merged = new TreeMap<>();
+            for (AbstractCompactionStrategy strategy : getAllStrategies())
+            {
+                if (!(strategy instanceof TimeSeriesCompactionStrategy))
+                    continue;
+                for (TimeSeriesCompactionStrategy.WindowReport r : ((TimeSeriesCompactionStrategy) strategy).windowReports(nowMillis, gcBefore))
+                    merged.merge(r.windowStart, r, CompactionStrategyManager::mergeWindowReports);
+            }
+            return new ArrayList<>(merged.values());
+        }
+        finally
+        {
+            readLock.unlock();
+        }
+    }
+
+    private static final List<String> WINDOW_STATE_ATTENTION = List.of("FAR_FUTURE", "FREEZING", "CLOSING", "CURRENT", "FROZEN", "EXPIRED");
+
+    private static TimeSeriesCompactionStrategy.WindowReport mergeWindowReports(TimeSeriesCompactionStrategy.WindowReport a,
+                                                                               TimeSeriesCompactionStrategy.WindowReport b)
+    {
+        String state = WINDOW_STATE_ATTENTION.indexOf(a.state) <= WINDOW_STATE_ATTENTION.indexOf(b.state) ? a.state : b.state;
+        long rows = a.rows + b.rows;
+        double droppable = rows == 0 ? 0 : (a.droppableTombstoneRatio * a.rows + b.droppableTombstoneRatio * b.rows) / rows;
+        return new TimeSeriesCompactionStrategy.WindowReport(a.windowStart, state, a.parked || b.parked,
+                                                             a.sstables + b.sstables, a.spanning + b.spanning,
+                                                             a.bytesOnDisk + b.bytesOnDisk, rows, droppable);
+    }
+
+    /**
      * @return the sstables {@link TimeSeriesCompactionStrategy} has excluded from every automatic path
      * because their window lies beyond {@code max_future_window}, across every strategy instance of
      * this table; empty when the table does not use it (or, healthily, when there are none).
