@@ -65,6 +65,15 @@ ALTER TABLE pp.tm_tag_point WITH compaction = {
   그 안의 옛 행은 자기 창으로 라우팅된 삭제(티어링 재인코더의 range tombstone 등)와 끝내 만나지
   못해, 2026-09-24 운영 노드 41에서 이미 청크로 옮겨진 base 행이 노드당 약 1,700만 개 남아
   최근 구간 조회가 타임아웃 났습니다.
+- **티어링 테이블은 더 일찍 동결합니다(`tiering_aware_freeze`, 기본 `true`).** `timeseries_tiering`
+  정책이 있는 테이블에서는 닫힌 창의 청크 커버리지(재인코딩 원장)가 그 창의 끝까지 닿는 즉시
+  `freeze_after`를 기다리지 않고 동결합니다. 재인코더는 청크로 옮긴 행을 **그 행들의 창**에 range
+  tombstone 으로 지우는데, 둘을 합치는 재작성(=동결)이 있을 때까지 그 구간의 모든 조회가 죽은 행까지
+  읽습니다 — 2026-09-25 부하 시험에서 행당 6배, 운영 41 에서는 타임아웃. 동결을 앞당길 뿐 재작성 횟수는
+  같습니다. `gc_grace_seconds < freeze_after` 권고는 동결이 **톰스톤**을 회수하라고 있는 것인데, 티어링
+  테이블의 톰스톤은 어차피 회수되지 않고(태그 파티션이 모든 창에 겹친다) 조기 동결이 회수하는 것은
+  **가려진 행**이라 gc_grace 와 무관합니다. 커버리지는 캐시만 읽고(`ChunkCoverage.peek`) 모르면 평소처럼
+  `freeze_after`를 따릅니다. 끄려면 `'tiering_aware_freeze':'false'`.
 - **동결(freeze)**: 닫힌 지 `freeze_after`가 지난 창은 SSTable 1개로 합쳐집니다. 읽기 증폭이 창당
   1개로 떨어지고, 그 뒤로는 다시 컴팩션되지 않습니다.
 - **만료**: `retention`보다 오래된 창은 `TimeSeriesCompactionTask`가 **파일째 삭제**합니다. 데이터를
