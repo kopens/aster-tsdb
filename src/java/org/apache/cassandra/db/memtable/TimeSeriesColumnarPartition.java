@@ -63,6 +63,7 @@ import org.apache.cassandra.db.rows.EncodingStats;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.db.rows.WrappingUnfilteredRowIterator;
 import org.apache.cassandra.index.transactions.UpdateTransaction;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
@@ -75,6 +76,7 @@ import org.apache.cassandra.utils.btree.BTree;
 import org.apache.cassandra.utils.btree.UpdateFunction;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 import org.apache.cassandra.utils.memory.Cloner;
+import org.apache.cassandra.utils.memory.EnsureOnHeap;
 import org.apache.cassandra.utils.memory.HeapCloner;
 import org.apache.cassandra.utils.memory.MemtableAllocator;
 
@@ -1203,13 +1205,13 @@ public final class TimeSeriesColumnarPartition implements TimeSeriesMemtable.Sha
     @Override
     public UnfilteredRowIterator unfilteredIterator()
     {
-        return allocator.ensureOnHeap().applyToPartition(readView().unfilteredIterator());
+        return onHeap(readView().unfilteredIterator());
     }
 
     @Override
     public UnfilteredRowIterator unfilteredIterator(ColumnFilter selection, Slices slices, boolean reversed)
     {
-        return allocator.ensureOnHeap().applyToPartition(streamOrRebuild(selection, slices, reversed));
+        return onHeap(streamOrRebuild(selection, slices, reversed));
     }
 
     /**
@@ -1237,7 +1239,57 @@ public final class TimeSeriesColumnarPartition implements TimeSeriesMemtable.Sha
     @Override
     public UnfilteredRowIterator unfilteredIterator(ColumnFilter selection, NavigableSet<Clustering<?>> clusteringsInQueryOrder, boolean reversed)
     {
-        return allocator.ensureOnHeap().applyToPartition(readView().unfilteredIterator(selection, clusteringsInQueryOrder, reversed));
+        return onHeap(readView().unfilteredIterator(selection, clusteringsInQueryOrder, reversed));
+    }
+
+    /**
+     * A read-path iterator with its rows, its static row <b>and its partition key</b> on heap.
+     *
+     * <p>{@code allocator.ensureOnHeap().applyToPartition} alone is not enough here. It clones rows,
+     * but the key a transformed iterator reports comes from its input ({@code BaseRows.partitionKey()}
+     * answers {@code input.partitionKey()}; {@code EnsureOnHeap.applyToPartitionKey} only rewrites a
+     * field nobody reads back). Upstream {@code AtomicBTreePartition} never notices because it builds
+     * its iterators from its own cloning {@code partitionKey()} accessor. The iterators this class
+     * builds carry {@link #key}, the memtable's stored key, which under {@code offheap_objects} is a
+     * {@code NativeDecoratedKey} whose length and bytes live in regions freed when the memtable is
+     * reclaimed. A consumer that keeps the key past the read's OpOrder group then reads freed memory.
+     * CASSANDRA-21354's in-memory local read response does exactly that; its later digest SIGSEGV'd
+     * node 41 on 2026-09-28.
+     *
+     * <p>The flush path must not come through here: {@link #flushView()} hands the writer the
+     * memtable's own key and rows on purpose (see {@link StreamingFlushView}).
+     */
+    private UnfilteredRowIterator onHeap(UnfilteredRowIterator iterator)
+    {
+        EnsureOnHeap ensureOnHeap = allocator.ensureOnHeap();
+        DecoratedKey onHeapKey = ensureOnHeap.applyToPartitionKey(key);
+        UnfilteredRowIterator keyed = onHeapKey == key ? iterator : new OnHeapKeyIterator(iterator, onHeapKey);
+        return ensureOnHeap.applyToPartition(keyed);
+    }
+
+    /** Reports an on-heap copy of the partition key in place of the wrapped iterator's own. */
+    private static final class OnHeapKeyIterator implements WrappingUnfilteredRowIterator
+    {
+        private final UnfilteredRowIterator wrapped;
+        private final DecoratedKey partitionKey;
+
+        OnHeapKeyIterator(UnfilteredRowIterator wrapped, DecoratedKey partitionKey)
+        {
+            this.wrapped = wrapped;
+            this.partitionKey = partitionKey;
+        }
+
+        @Override
+        public UnfilteredRowIterator wrapped()
+        {
+            return wrapped;
+        }
+
+        @Override
+        public DecoratedKey partitionKey()
+        {
+            return partitionKey;
+        }
     }
 
     /**
