@@ -1145,6 +1145,71 @@ public class TieredStorageServiceTest extends CQLTester
         service.retier(KEYSPACE, table);
     }
 
+    /**
+     * A column added while a cycle runs must not be destroyed by that cycle.
+     * <p>
+     * The cycle builds its encoder and its window query from the table metadata it read at the top,
+     * so it selects only the columns that existed then. The source delete, though, is a whole-row
+     * range delete at the window's maximum cell writetime. A cold row written after the ALTER, with a
+     * value in the new column, is therefore read without that value, encoded without it, and then
+     * deleted with it: the value is gone, and nothing reports it. The fix re-checks the schema
+     * before a window's chunk is written and its rows deleted, and leaves the table for the next
+     * cycle (which reads the new schema) when it has changed.
+     */
+    @Test
+    public void columnAddedDuringACycleIsNotDestroyedByIt() throws Throwable
+    {
+        TagRegistry.resetForTesting();
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
+        insertRow("t", 0L, 1.0, 100);
+        insertRow("t", 600_000L, 2.0, 101);
+
+        // The seam fires during tag enumeration: after the cycle has taken its metadata snapshot,
+        // before it reads the tag's first window. Registry walk off, so enumeration scans ranges.
+        TieredStorageService service = new TieredStorageService();
+        int previousBudget = service.setScanPagesPerCycleForTesting(0);
+        AtomicInteger altered = new AtomicInteger();
+        TieredStorageService.tagRangeScanHookForTesting = range ->
+        {
+            if (altered.getAndIncrement() > 0)
+                return;
+            try
+            {
+                alterTable("ALTER TABLE %s ADD extra int");
+                execute("INSERT INTO %s (tag, ts, value, extra) VALUES ('t', ?, 3.0, 42) USING TIMESTAMP 150",
+                        new Date(1_200_000L));
+            }
+            catch (Throwable t)
+            {
+                throw new RuntimeException(t);
+            }
+        };
+        TierRunStats stats;
+        try
+        {
+            stats = service.runOnce(KEYSPACE, currentTable(), 5 * HOUR);
+        }
+        finally
+        {
+            TieredStorageService.tagRangeScanHookForTesting = null;
+            service.setScanPagesPerCycleForTesting(previousBudget);
+        }
+        assertTrue("the seam must have run, or this test proves nothing", altered.get() > 0);
+
+        UntypedResultSet.Row added = execute("SELECT extra FROM %s WHERE tag = 't' AND ts = ?", new Date(1_200_000L)).one();
+        assertTrue("the value written to the new column was destroyed by the cycle", added.has("extra"));
+        assertEquals(42, added.getInt("extra"));
+        assertEquals("nothing may be encoded against a stale column list", 0, stats.windowsEncoded);
+        assertEquals(3, raw("SELECT * FROM %s WHERE tag = 't'").size());
+
+        // The next cycle reads the new schema and carries the new column into the chunk.
+        assertEquals(1, new TieredStorageService().runOnce(KEYSPACE, currentTable(), 5 * HOUR).windowsEncoded);
+        assertEquals(0, raw("SELECT * FROM %s WHERE tag = 't' AND ts < ?", new Date(HOUR)).size());
+        assertEquals(42, execute("SELECT extra FROM %s WHERE tag = 't' AND ts = ?", new Date(1_200_000L))
+                             .one().getInt("extra"));
+    }
+
     private void insertRow(String tag, long tsMillis, double value, long writetime) throws Throwable
     {
         execute("INSERT INTO %s (tag, ts, value) VALUES (?, ?, ?) USING TIMESTAMP ?",

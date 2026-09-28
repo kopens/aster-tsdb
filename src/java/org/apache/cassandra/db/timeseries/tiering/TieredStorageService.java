@@ -702,6 +702,8 @@ public class TieredStorageService implements TieredStorageServiceMBean
         // left untouched. Expected (a window holding only bare primary-key inserts) rather than
         // exceptional -- summarized once at the end of the run rather than logged per window.
         long[] windowsWithoutWritetime = { 0 };
+        // Set when the table's columns changed under this cycle; see regularColumnsChanged().
+        boolean schemaChanged = false;
 
         // Bounded, per-window queries -- see the class javadoc. "oldest"/"next" only ever return the
         // single row needed to locate the next window with work; the row scan itself is restricted to
@@ -864,6 +866,20 @@ public class TieredStorageService implements TieredStorageServiceMBean
                     // windowStart on BOTH ends, not `cutoff` for the top: the ledger's top feeds the
                     // write guard as well as the read path, and there over-claiming refuses tombstones
                     // on hot rows this cycle never encoded (see ChunkCoverage.claim).
+                    // The encoder, the window query and the delete below were all built from `base`,
+                    // the metadata read at the top of this cycle, so the read above selected only the
+                    // columns that existed then. The delete is a whole-row range delete at the window's
+                    // maximum cell writetime, so a column added since would be deleted without ever
+                    // having been encoded: a silent loss. Stop before touching anything and leave the
+                    // table to the next cycle, which reads the new schema. This narrows the race to
+                    // the few milliseconds between this check and the delete; closing it outright
+                    // would need the delete to name its columns.
+                    if (regularColumnsChanged(base))
+                    {
+                        schemaChanged = true;
+                        break;
+                    }
+
                     ChunkCoverage.claim(base, cl, windowStart, windowStart, policy.chunkWindowMillis);
 
                     ChunkWindowEncoder.Encoded encoded = window.encode();
@@ -938,6 +954,15 @@ public class TieredStorageService implements TieredStorageServiceMBean
                 logger.error("Tiered storage runOnce: {}.{} failed while re-encoding tag {} -- skipping to the " +
                              "next tag; this tag will be retried next cycle", keyspace, table,
                              describeTag(tagColumns, tag), e);
+            }
+
+            if (schemaChanged)
+            {
+                stats.tagsSkipped++;
+                logger.info("Tiered storage runOnce: {}.{} columns changed during the cycle; stopping at tag {} " +
+                            "before encoding against the old column list. Its rows are untouched; the next " +
+                            "cycle re-reads the schema", keyspace, table, describeTag(tagColumns, tag));
+                break;
             }
         }
 
@@ -1078,6 +1103,16 @@ public class TieredStorageService implements TieredStorageServiceMBean
         values.addAll(tag);
         Collections.addAll(values, rest);
         return values;
+    }
+
+    /**
+     * Whether {@code snapshot}'s table no longer has exactly the regular columns it had when the
+     * snapshot was taken (a column added, dropped or re-typed), or no longer exists.
+     */
+    private static boolean regularColumnsChanged(TableMetadata snapshot)
+    {
+        TableMetadata current = Schema.instance.getTableMetadata(snapshot.id);
+        return current == null || !current.regularColumns().equals(snapshot.regularColumns());
     }
 
     /** @return a human-readable rendering of one partition key's values, for log messages. */
