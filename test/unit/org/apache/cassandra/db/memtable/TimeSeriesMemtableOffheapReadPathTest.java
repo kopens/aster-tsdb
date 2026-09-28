@@ -19,6 +19,7 @@
 package org.apache.cassandra.db.memtable;
 
 import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -28,14 +29,27 @@ import com.datastax.driver.core.Row;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import org.apache.cassandra.Util;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ClusteringComparator;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DataRange;
+import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.NativeDecoratedKey;
+import org.apache.cassandra.db.ReadExecutionController;
+import org.apache.cassandra.db.ReadResponse;
+import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.db.Slice;
 import org.apache.cassandra.db.Slices;
+import org.apache.cassandra.db.filter.ColumnFilter;
+import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.memory.NativePool;
 
 import static org.junit.Assert.assertEquals;
@@ -182,6 +196,122 @@ public class TimeSeriesMemtableOffheapReadPathTest extends CQLTester
                                                                     false, false)));
         assertFalse(partition.mayContainRowsIn(Slices.NONE));
         assertTrue(partition.mayContainRowsIn(Slices.ALL));
+    }
+
+    /**
+     * Every read-path iterator of a columnar partition must hand out an on-heap partition key.
+     *
+     * <p>Under offheap_objects the partition key this memtable stores is a
+     * {@link NativeDecoratedKey}: its length and bytes live in the memtable's native regions, which
+     * are freed once the memtable is flushed and reclaimed. Rows already went through
+     * {@code allocator.ensureOnHeap()}, but the key did not: {@code EnsureOnHeap.applyToPartitionKey}
+     * only rewrites the transformation's cached field, and {@code BaseRows.partitionKey()} answers
+     * from its input, so every columnar read iterator reported the raw native key. Upstream
+     * {@code AtomicBTreePartition} is immune because it builds its iterators from its own
+     * (cloning) {@code partitionKey()} accessor; the columnar partition built them from the stored
+     * key. This is the unit-level pin of the 2026-09-28 SIGSEGV (see
+     * {@link #inMemoryLocalResponseOutlivesTheMemtableItWasReadFrom}).
+     */
+    @Test
+    public void readPathIteratorsNeverExposeTheNativePartitionKey() throws Throwable
+    {
+        createTable("CREATE TABLE %s (series text, ts timestamp, v double, PRIMARY KEY (series, ts)) " +
+                    "WITH compaction = " + TSCS + " AND memtable = 'timeseries'");
+        for (int i = 0; i < 20; i++)
+            execute("INSERT INTO %s (series, ts, v) VALUES (?, ?, ?) USING TIMESTAMP ?",
+                    "S1", BASE_MS + i * 1000L, i * 1.0, at(0) + i);
+        assertOffheapTimeSeriesMemtable();
+
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TimeSeriesMemtable memtable = (TimeSeriesMemtable) cfs.getCurrentMemtable();
+        TimeSeriesMemtable.ShardPartition partition = solePartition(memtable);
+        assertTrue("expected the columnar representation, got " + partition.getClass().getName(),
+                   partition instanceof TimeSeriesColumnarPartition);
+        assertTrue("the stored key must be native, or this test proves nothing",
+                   ((TimeSeriesColumnarPartition) partition).storedKey() instanceof NativeDecoratedKey);
+
+        DecoratedKey key = Util.dk("S1");
+        ColumnFilter all = ColumnFilter.all(cfs.metadata());
+        SSTableReadsListener noop = SSTableReadsListener.NOOP_LISTENER;
+
+        assertOnHeapKey("sliced read (streaming path)", key,
+                        memtable.rowIterator(key, Slices.ALL, all, false, noop));
+        assertOnHeapKey("reversed sliced read (streaming path)", key,
+                        memtable.rowIterator(key, Slices.ALL, all, true, noop));
+        assertOnHeapKey("whole-partition read (rebuild path)", key, memtable.rowIterator(key));
+        assertOnHeapKey("names read (rebuild path)", key,
+                        partition.unfilteredIterator(all,
+                                                     FBUtilities.singleton(Clustering.make(ByteBufferUtil.bytes(BASE_MS + 3000L)),
+                                                                           cfs.metadata().comparator),
+                                                     false));
+        try (UnfilteredPartitionIterator range = memtable.partitionIterator(all, DataRange.allData(cfs.getPartitioner()), noop))
+        {
+            assertTrue(range.hasNext());
+            assertOnHeapKey("range read", key, range.next());
+        }
+    }
+
+    /**
+     * The 2026-09-28 node-41 SIGSEGV, reproduced end to end. CASSANDRA-21354 (upstream, merged into
+     * this fork 2026-09-24) keeps a coordinator-local single-partition response as an in-memory
+     * partition instead of serializing it inside the read's {@code ReadExecutionController}. The
+     * response therefore outlives the read's OpOrder group, and with it the memtable's protection
+     * against reclaim. The coordinator digests it later, once the other replicas have answered; on
+     * node 41 that was after the memtable had been flushed and its native regions freed, so
+     * {@code NativeDecoratedKey.getKey()} read a garbage length out of freed memory and the digest's
+     * copy ran into a thread-stack guard page ({@code SEGV_ACCERR} in
+     * {@code jbyte_disjoint_arraycopy} under {@code Digest.update}).
+     *
+     * <p>The key's type is asserted first and before the flush, so the unfixed build fails here with
+     * an assertion instead of reading freed memory and taking the test JVM down with it.
+     */
+    @Test
+    public void inMemoryLocalResponseOutlivesTheMemtableItWasReadFrom() throws Throwable
+    {
+        createTable("CREATE TABLE %s (series text, ts timestamp, v double, PRIMARY KEY (series, ts)) " +
+                    "WITH compaction = " + TSCS + " AND memtable = 'timeseries'");
+        for (int i = 0; i < 20; i++)
+            execute("INSERT INTO %s (series, ts, v) VALUES (?, ?, ?) USING TIMESTAMP ?",
+                    "S1", BASE_MS + i * 1000L, i * 1.0, at(0) + i);
+        assertOffheapTimeSeriesMemtable();
+
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        SinglePartitionReadCommand command =
+            SinglePartitionReadCommand.fullPartitionRead(cfs.metadata(), FBUtilities.nowInSeconds(), Util.dk("S1"));
+        ReadResponse response;
+        try (ReadExecutionController controller = command.executionController();
+             UnfilteredPartitionIterator iterator = command.executeLocally(controller))
+        {
+            response = command.createLocalObjectResponse(iterator, controller.getRepairedDataInfo(), false);
+        }
+        assertEquals("the read must take the CASSANDRA-21354 in-memory path, or this test proves nothing",
+                     "InMemoryDataResponse", response.getClass().getSimpleName());
+
+        try (UnfilteredPartitionIterator retained = response.makeIterator(command))
+        {
+            assertTrue(retained.hasNext());
+            assertOnHeapKey("in-memory response", Util.dk("S1"), retained.next());
+        }
+
+        ByteBuffer before = response.digest(command);
+        flush();   // flushes, discards and reclaims the memtable the response was read from
+        assertTrue("the memtable must have been replaced", cfs.getCurrentMemtable().isClean());
+        assertEquals(before, response.digest(command));
+    }
+
+    private static void assertOnHeapKey(String what, DecoratedKey expected, UnfilteredRowIterator iterator)
+    {
+        assertTrue(what + ": no iterator", iterator != null);
+        try (UnfilteredRowIterator rows = iterator)
+        {
+            DecoratedKey key = rows.partitionKey();
+            assertFalse(what + ": partition key is the memtable's native key " + key.getClass().getName(),
+                        key instanceof NativeDecoratedKey);
+            assertFalse(what + ": partition key bytes are off heap", key.getKey().isDirect());
+            assertEquals(what, expected, key);
+            while (rows.hasNext())
+                rows.next();
+        }
     }
 
     private void assertOffheapTimeSeriesMemtable()
