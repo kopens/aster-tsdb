@@ -25,14 +25,22 @@ import java.util.Random;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import com.google.common.collect.Iterables;
+import com.google.common.util.concurrent.Uninterruptibles;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -55,6 +63,7 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.service.reads.thresholds.CoordinatorWarnings;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -1208,6 +1217,294 @@ public class TieredStorageServiceTest extends CQLTester
         assertEquals(0, raw("SELECT * FROM %s WHERE tag = 't' AND ts < ?", new Date(HOUR)).size());
         assertEquals(42, execute("SELECT extra FROM %s WHERE tag = 't' AND ts = ?", new Date(1_200_000L))
                              .one().getInt("extra"));
+    }
+
+    /**
+     * The first write to a tag on a node registers it in the tag registry. That INSERT ran
+     * synchronously on the client's own write path, so a slow registry replica added its latency to
+     * the client's write -- up to a full write timeout -- and after a restart every tag's first write
+     * paid it again. Registration is bookkeeping for the re-encoder; the client must not wait on it.
+     */
+    @Test
+    public void writePathDoesNotWaitForTheRegistryInsert() throws Throwable
+    {
+        TagRegistry.resetForTesting();
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
+        ChunkTables.ensureChunkTable(Schema.instance.getTableMetadata(KEYSPACE, currentTable()));
+
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger registrations = new AtomicInteger();
+        TagRegistry.writeHookForTesting = tag ->
+        {
+            registrations.incrementAndGet();
+            Uninterruptibles.awaitUninterruptibly(release, 30, TimeUnit.SECONDS);
+        };
+        ExecutorService client = Executors.newSingleThreadExecutor();
+        try
+        {
+            Future<?> write = client.submit(() ->
+            {
+                try
+                {
+                    insertRow("fresh", 4 * HOUR, 1.0, 1);
+                }
+                catch (Throwable t)
+                {
+                    throw new RuntimeException(t);
+                }
+            });
+            try
+            {
+                write.get(5, TimeUnit.SECONDS);
+            }
+            catch (TimeoutException e)
+            {
+                fail("a client write blocked behind the tag-registry INSERT");
+            }
+        }
+        finally
+        {
+            release.countDown();
+            TagRegistry.awaitPendingWritesForTesting();
+            TagRegistry.writeHookForTesting = null;
+            client.shutdownNow();
+        }
+        assertEquals("the tag must still be registered, just not on the client's time", 1, registrations.get());
+        assertEquals(1, registeredTagCount());
+    }
+
+    /**
+     * A failed registration released its claim so a later write would retry -- which meant EVERY
+     * later write to that tag retried, each one another distributed INSERT against a registry that
+     * had just proved it could not take one. A failure must back off, not multiply.
+     */
+    @Test
+    public void aFailedRegistrationBacksOffInsteadOfRetryingOnEveryWrite() throws Throwable
+    {
+        TagRegistry.resetForTesting();
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
+        ChunkTables.ensureChunkTable(Schema.instance.getTableMetadata(KEYSPACE, currentTable()));
+
+        AtomicInteger attempts = new AtomicInteger();
+        TagRegistry.writeHookForTesting = tag ->
+        {
+            attempts.incrementAndGet();
+            throw new RuntimeException("injected: registry replica unavailable");
+        };
+        try
+        {
+            for (int i = 0; i < 20; i++)
+            {
+                insertRow("flaky", 4 * HOUR + i, i, i + 1);
+                TagRegistry.awaitPendingWritesForTesting();
+            }
+        }
+        finally
+        {
+            TagRegistry.writeHookForTesting = null;
+        }
+        assertEquals("twenty writes after one failed registration must not issue twenty INSERTs", 1, attempts.get());
+    }
+
+    /**
+     * The re-encoder and the cold-window flush both read-modify-write the same chunk rows. The flush
+     * serializes itself per table ({@code ColdWindowChunkFlush.lockFor}), but the re-encoder never
+     * took that lock, so on one node the two could read the same old chunk, each merge their own
+     * rows into it, and write -- the later write dropping the earlier one's rows, whose base copies
+     * were already gone. The re-encoder must hold the same lock across its read-merge-write.
+     */
+    @Test
+    public void reencoderHoldsTheFlushLockWhileItRewritesAChunk() throws Throwable
+    {
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
+        insertRow("t", 0L, 1.0, 1);
+
+        AtomicInteger inserts = new AtomicInteger();
+        AtomicInteger unlocked = new AtomicInteger();
+        TieredStorageService.beforeChunkInsertForTesting = base ->
+        {
+            inserts.incrementAndGet();
+            if (!Thread.holdsLock(ColdWindowChunkFlush.lockFor(base.id)))
+                unlocked.incrementAndGet();
+        };
+        try
+        {
+            new TieredStorageService().runOnce(KEYSPACE, currentTable(), 5 * HOUR);
+        }
+        finally
+        {
+            TieredStorageService.beforeChunkInsertForTesting = null;
+        }
+        assertEquals("the seam must have seen the chunk write, or this test proves nothing", 1, inserts.get());
+        assertEquals("the chunk was rewritten without the lock the cold-window flush serializes on", 0, unlocked.get());
+    }
+
+    /**
+     * Review item: the oldest-row probe has no lower bound, so it walks every range tombstone the
+     * re-encoder has left in the tag's partition. This pins down why that is NOT a failure mode:
+     * tombstones past gc_grace_seconds are dropped before the read counts them
+     * ({@code ReadCommand.withoutPurgeableTombstones}), so the probe only ever counts the markers of
+     * windows encoded within the last gc_grace -- two per window. Production uses gc_grace 1 day and
+     * chunk_window 15m, i.e. at most 192 counted markers against a failure threshold of 1,000,000
+     * (warn 10,000). The second half shows the bound is real: markers younger than gc_grace do count.
+     */
+    @Test
+    public void oldestRowProbeOnlyCountsTombstonesYoungerThanGcGrace() throws Throwable
+    {
+        int previousThreshold = DatabaseDescriptor.getTombstoneFailureThreshold();
+        try
+        {
+            TierRunStats purgeable = encodeThirtyWindowsThenMergeALateRow(0);
+            assertEquals("purgeable tombstones must not stop the probe", 0, purgeable.tagsSkipped);
+            assertEquals(1, purgeable.lateMerges);
+
+            TierRunStats young = encodeThirtyWindowsThenMergeALateRow(864000);
+            // The tag walk's DISTINCT page over the same partition trips the threshold as well, so
+            // more than one thing is skipped; what matters is that the probe is stopped at all.
+            assertTrue("tombstones younger than gc_grace are counted -- this is the real bound",
+                       young.tagsSkipped >= 1);
+            assertEquals(0, young.lateMerges);
+        }
+        finally
+        {
+            DatabaseDescriptor.setTombstoneFailureThreshold(previousThreshold);
+        }
+    }
+
+    private TierRunStats encodeThirtyWindowsThenMergeALateRow(int gcGraceSeconds) throws Throwable
+    {
+        DatabaseDescriptor.setTombstoneFailureThreshold(100_000);
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) " +
+                    "WITH gc_grace_seconds = " + gcGraceSeconds);
+        setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
+        long wt = 1;
+        for (int w = 0; w < 30; w++)
+            insertRow("deep", w * HOUR, w, wt++);
+        TieredStorageService service = new TieredStorageService();
+        assertEquals(30, service.runOnce(KEYSPACE, currentTable(), 40 * HOUR).windowsEncoded);
+
+        // A late row in the newest encoded window: reaching it walks past 29 windows' range tombstones.
+        insertRow("deep", 29 * HOUR + 60_000L, 99.0, 1000);
+        Thread.sleep(1100); // a tombstone is purgeable once its deletion time is strictly before gcBefore
+        DatabaseDescriptor.setTombstoneFailureThreshold(10);
+        // A read that trips a threshold reports it through the coordinator's per-thread warnings,
+        // which the native-protocol path initializes and a test thread must initialize itself.
+        CoordinatorWarnings.init();
+        try
+        {
+            return service.runOnce(KEYSPACE, currentTable(), 40 * HOUR);
+        }
+        finally
+        {
+            CoordinatorWarnings.reset();
+        }
+    }
+
+    /**
+     * The tag walk halves its token span after each failed page, and forgot the span that worked
+     * after a single success: the next page went back to the full remaining ring, failed (a read
+     * timeout, ~12s of coordinator and replica work) and the ladder started over. On node 41 that
+     * was one failed scan every cycle ("has failed N cycle(s) at its current position"). The walk
+     * must keep the span that works and only try a wider one occasionally.
+     */
+    @Test
+    public void tagWalkKeepsTheSpanThatWorks() throws Throwable
+    {
+        TagRegistry.resetForTesting();
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
+        long wt = 1;
+        for (int t = 0; t < 40; t++)
+            insertRow("tag" + t, 0L, t, wt++);
+
+        TieredStorageService service = new TieredStorageService();
+        int previousBudget = service.setScanPagesPerCycleForTesting(4);
+        int previousPage = TieredStorageService.setTagPageSizeForTesting(2);
+        AtomicInteger failedPages = new AtomicInteger();
+        AtomicInteger goodPages = new AtomicInteger();
+        // Anything wider than a quarter of the remaining ring "times out".
+        TieredStorageService.tagWalkPageHookForTesting = level ->
+        {
+            if (level < 2)
+            {
+                failedPages.incrementAndGet();
+                throw new RuntimeException("injected: page too expensive");
+            }
+            goodPages.incrementAndGet();
+        };
+        try
+        {
+            for (int cycle = 0; cycle < 10; cycle++)
+                service.runOnce(KEYSPACE, currentTable(), 5 * HOUR);
+        }
+        finally
+        {
+            TieredStorageService.tagWalkPageHookForTesting = null;
+            service.setScanPagesPerCycleForTesting(previousBudget);
+            TieredStorageService.setTagPageSizeForTesting(previousPage);
+        }
+        assertTrue("the walk must make progress at the span that works", goodPages.get() >= 10);
+        assertTrue("ten cycles re-paid the failure ladder " + failedPages.get() + " times; two to find the " +
+                   "working span and one occasional probe wider are all that is needed", failedPages.get() <= 3);
+    }
+
+    /**
+     * A table whose tiering stopped working was easy to miss: an invalid policy made the virtual
+     * table drop the table's row entirely, and a run that kept failing left only a stale
+     * last_run_at. The view must show both, with the error.
+     */
+    @Test
+    public void virtualTableShowsTablesWhoseTieringIsFailing() throws Throwable
+    {
+        String broken = createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        setPolicy("{\"hot_window\":\"not-a-duration\"}");
+        UntypedResultSet invalid = execute("SELECT * FROM system_views.timeseries_tiering WHERE keyspace_name = ? AND table_name = ?",
+                                           KEYSPACE, broken);
+        assertEquals("a table with an invalid policy must stay visible", 1, invalid.size());
+        assertTrue(invalid.one().getString("last_error").contains("invalid"));
+
+        String failing = createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
+        TieredStorageService service = TieredStorageService.instance;
+        service.preRunHookForTesting = (ks, table) ->
+        {
+            if (table.equals(failing))
+                throw new RuntimeException("injected: replicas unavailable");
+        };
+        try
+        {
+            for (int i = 0; i < 2; i++)
+            {
+                try
+                {
+                    service.retier(KEYSPACE, failing);
+                    fail("the injected failure must propagate out of retier");
+                }
+                catch (RuntimeException expected)
+                {
+                }
+            }
+        }
+        finally
+        {
+            service.preRunHookForTesting = null;
+        }
+        UntypedResultSet.Row row = execute("SELECT * FROM system_views.timeseries_tiering WHERE keyspace_name = ? AND table_name = ?",
+                                           KEYSPACE, failing).one();
+        assertEquals(2L, row.getLong("consecutive_failures"));
+        assertTrue(row.getString("last_error").contains("injected: replicas unavailable"));
+        assertTrue(row.getLong("last_attempt_at") > 0);
+        assertEquals(-1L, row.getLong("last_run_at"));
+
+        // One success clears the failure streak.
+        service.retier(KEYSPACE, failing);
+        row = execute("SELECT * FROM system_views.timeseries_tiering WHERE keyspace_name = ? AND table_name = ?",
+                      KEYSPACE, failing).one();
+        assertEquals(0L, row.getLong("consecutive_failures"));
+        assertTrue(row.getLong("last_run_at") > 0);
     }
 
     private void insertRow(String tag, long tsMillis, double value, long writetime) throws Throwable

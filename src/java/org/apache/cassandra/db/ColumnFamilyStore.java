@@ -2690,6 +2690,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
         maybeFail(failure);
 
         logger.info("Truncate of {}.{} is complete", getKeyspaceName(), name);
+        // Tiered storage caches what the truncated data looked like (chunk coverage, registered tags).
+        org.apache.cassandra.db.timeseries.tiering.TieredTruncation.afterLocalTruncate(metadata());
     }
 
     private boolean runTruncate(long truncatedAt, boolean noSnapshot, CommitLogPosition replayAfter)

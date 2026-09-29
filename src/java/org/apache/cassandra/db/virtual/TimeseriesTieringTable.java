@@ -46,6 +46,9 @@ final class TimeseriesTieringTable extends AbstractVirtualTable
     private static final String LATE_MERGES = "late_merges";
     private static final String CHUNKS_EXPIRED = "chunks_expired";
     private static final String TAGS_SKIPPED = "tags_skipped";
+    private static final String LAST_ATTEMPT_AT = "last_attempt_at";
+    private static final String CONSECUTIVE_FAILURES = "consecutive_failures";
+    private static final String LAST_ERROR = "last_error";
 
     TimeseriesTieringTable(String keyspace)
     {
@@ -65,6 +68,9 @@ final class TimeseriesTieringTable extends AbstractVirtualTable
                            .addRegularColumn(LATE_MERGES, LongType.instance)
                            .addRegularColumn(CHUNKS_EXPIRED, LongType.instance)
                            .addRegularColumn(TAGS_SKIPPED, LongType.instance)
+                           .addRegularColumn(LAST_ATTEMPT_AT, LongType.instance)
+                           .addRegularColumn(CONSECUTIVE_FAILURES, LongType.instance)
+                           .addRegularColumn(LAST_ERROR, UTF8Type.instance)
                            .build());
     }
 
@@ -83,8 +89,10 @@ final class TimeseriesTieringTable extends AbstractVirtualTable
                 }
                 catch (ConfigurationException e)
                 {
-                    // Surfaced as an ERROR log by the re-encoder itself (TieredStorageService); the
-                    // virtual table just omits the row rather than throwing out of a SELECT.
+                    // Shown, not omitted: a table whose policy does not parse is not being tiered at
+                    // all, and dropping its row made that the easiest state to miss.
+                    result.row(keyspace.name, table.name)
+                          .column(LAST_ERROR, "invalid timeseries_tiering policy: " + e.getMessage());
                     continue;
                 }
                 if (policy == null)
@@ -93,6 +101,7 @@ final class TimeseriesTieringTable extends AbstractVirtualTable
                 TieredStorageService.TierRunStats stats =
                         TieredStorageService.instance.lastStats(keyspace.name, table.name);
                 Long lastRunAt = TieredStorageService.instance.lastRunAtMillis(keyspace.name, table.name);
+                Long lastAttemptAt = TieredStorageService.instance.lastAttemptAtMillis(keyspace.name, table.name);
 
                 result.row(keyspace.name, table.name)
                       .column(HOT_WINDOW_MS, policy.hotWindowMillis)
@@ -107,7 +116,13 @@ final class TimeseriesTieringTable extends AbstractVirtualTable
                       // Non-zero means the last completed cycle did NOT encode everything below the
                       // cutoff: those tags failed and were skipped, so the table is not tiered as far
                       // as the other counters suggest.
-                      .column(TAGS_SKIPPED, stats == null ? 0L : stats.tagsSkipped);
+                      .column(TAGS_SKIPPED, stats == null ? 0L : stats.tagsSkipped)
+                      .column(LAST_ATTEMPT_AT, lastAttemptAt == null ? -1L : lastAttemptAt)
+                      // Non-zero means tiering of this table is currently failing -- last_run_at only
+                      // moves on runs that complete, so it alone just looks stale.
+                      .column(CONSECUTIVE_FAILURES,
+                              (long) TieredStorageService.instance.consecutiveFailures(keyspace.name, table.name))
+                      .column(LAST_ERROR, TieredStorageService.instance.lastError(keyspace.name, table.name));
             }
         }
 

@@ -20,6 +20,7 @@ package org.apache.cassandra.db.timeseries.tiering;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -29,6 +30,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.function.LongConsumer;
 import java.util.function.Supplier;
 
@@ -56,12 +58,16 @@ import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.db.timeseries.ColumnarChunkCodec;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.utils.Clock;
 import org.apache.cassandra.utils.FBUtilities;
 
 import static java.lang.String.format;
@@ -139,10 +145,13 @@ import static java.lang.String.format;
  * re-encoder's late merge) rather than overwriting it.
  *
  * <h2>Known residual limits (documented, not silent)</h2>
- * Each replica encodes its <em>own</em> copy of the window rather than a quorum view, so a replica
- * that permanently missed a write encodes a chunk without it; determinism plus the existing-chunk
- * merge make later flushes converge on the superset, and rows redelivered by hints or repair land as
- * base rows the re-encoder merges in on its next cycle. Rows written with a client-supplied
+ * Only the replica owning a tag's primary range encodes it at flush (the same node the re-encoder
+ * works that tag on), from its <em>own</em> copy of the window rather than a quorum view; the other
+ * replicas flush the window as rows. Until the re-encoder's next cycle folds those rows in and
+ * deletes them, a read at a consistency level spanning both kinds of replica sees a digest mismatch
+ * and read-repairs the rows back as base rows -- which that same cycle then deletes. Rows a replica
+ * permanently missed, or that hints or repair redeliver later, land as base rows the re-encoder
+ * merges in the same way. Rows written with a client-supplied
  * {@code USING TIMESTAMP} at or below an already-written chunk's {@code max_row_writetime} remain
  * subject to the same explicit-timestamp hazards {@link ChunkReadSupport} documents for the
  * re-encoder path.
@@ -152,9 +161,10 @@ public final class ColdWindowChunkFlush
     private static final Logger logger = LoggerFactory.getLogger(ColdWindowChunkFlush.class);
 
     /**
-     * Serializes cold-window encoding per table across concurrently flushing memtables: two flushes
-     * encoding the same (tag, window) must see each other's chunk through the existing-chunk read,
-     * or the second write would silently drop the first flush's samples.
+     * Serializes chunk rewrites per table on this node -- concurrently flushing memtables, and the
+     * re-encoder: two writers encoding the same (tag, window) must see each other's chunk through the
+     * existing-chunk read, or the second write would silently drop the first one's samples. Across
+     * nodes the same is achieved by ownership: only a tag's primary replica writes its chunks.
      */
     private static final ConcurrentHashMap<TableId, Object> LOCKS = new ConcurrentHashMap<>();
 
@@ -165,6 +175,28 @@ public final class ColdWindowChunkFlush
      */
     @VisibleForTesting
     public static volatile LongConsumer beforeChunkInsertForTesting;
+
+    /**
+     * The per-table lock both chunk writers hold across their read-merge-write of a chunk row: the
+     * flush for its whole encode, the re-encoder per window. See {@link #LOCKS}.
+     */
+    static Object lockFor(TableId table)
+    {
+        return LOCKS.computeIfAbsent(table, ignored -> new Object());
+    }
+
+    /**
+     * How long one flush may spend encoding cold windows before it writes the rest as rows. The
+     * encode runs on the memtable flush thread, one quorum read and one write per window in series,
+     * and every table's flushes queue behind it; a backfill's worth of windows at a few ms each fits
+     * easily, while I/O slow enough to hit this is I/O the re-encoder should do instead, off the
+     * flush path.
+     */
+    private static final long BUDGET_MILLIS = 60_000;
+
+    /** Test-only override of {@link #BUDGET_MILLIS}; negative means "use the default". */
+    @VisibleForTesting
+    static volatile long budgetMillisForTesting = -1;
 
     /** The no-omissions answer: flush every row exactly as before. */
     public static final RowOmissions NONE = new RowOmissions(Collections.emptyMap(), 0);
@@ -307,7 +339,7 @@ public final class ColdWindowChunkFlush
         TransparentReads.enterInternalBypass();
         try
         {
-            synchronized (LOCKS.computeIfAbsent(metadata.id, ignored -> new Object()))
+            synchronized (lockFor(metadata.id))
             {
                 return encodeLocked(memtable, metadata, cfs, policy, partitions);
             }
@@ -400,6 +432,18 @@ public final class ColdWindowChunkFlush
 
         long minClaimedWindow = Long.MAX_VALUE;
         long maxClaimedWindow = Long.MIN_VALUE;
+        /**
+         * Set by the first failed window or by the budget running out: from then on no window of this
+         * flush issues any chunk I/O, and all of them flush as rows. Per-window isolation alone let a
+         * flush whose chunk writes were timing out pay one timeout per remaining window -- N windows,
+         * N write timeouts -- on the flush thread, with every other table's flush queued behind it.
+         * The first failure is the best predictor of the next.
+         */
+        boolean abandoned;
+        private final long startedNanos = Clock.Global.nanoTime();
+        private final long budgetNanos;
+        /** This node's primary ranges; see {@link #ownsPrimaryRange}. Empty means "treat all as owned". */
+        private final Collection<Range<Token>> primaryRanges;
         int windowsEncoded;
         int windowsSkipped;
         int rowsEncoded;
@@ -441,6 +485,9 @@ public final class ColdWindowChunkFlush
             this.cutoff = policy.windowStartFor(ColdBoundary.hotBoundaryMs(policy));
             this.nowInSec = FBUtilities.nowInSeconds();
             this.maxSamples = TieredStorageService.instance.maxSamplesPerWindow;
+            long budgetMillis = budgetMillisForTesting >= 0 ? budgetMillisForTesting : BUDGET_MILLIS;
+            this.budgetNanos = TimeUnit.MILLISECONDS.toNanos(budgetMillis);
+            this.primaryRanges = StorageService.instance.getPrimaryRanges(metadata.keyspace);
 
             boolean descending = ColdBoundary.isDescending(metadata);
             for (SSTableReader sstable : cfs.getLiveSSTables())
@@ -467,6 +514,15 @@ public final class ColdWindowChunkFlush
         void encodePartition(Partition partition, Map<DecoratedKey, PartitionOmission> omitted)
         {
             DecoratedKey key = partition.partitionKey();
+            // One writer per tag. Chunk rows are read-modify-written with no cross-node coordination,
+            // so two nodes encoding the same window could each read the same old chunk and write their
+            // own merge of it; a timestamp tie then resolves cell by cell, and a row one replica had
+            // and the other lacked could be lost with its base copy already omitted or deleted. The
+            // re-encoder only ever works a tag on the node owning its primary range; the flush now
+            // does the same, and on that node both serialize on this class's per-table lock. The
+            // other replicas flush the window as rows, which the re-encoder folds in and deletes.
+            if (!ownsPrimaryRange(key))
+                return;
             TreeMap<Long, WindowBucket> buckets = new TreeMap<>();
             int totalRows = 0;
             boolean hasStatic;
@@ -499,6 +555,19 @@ public final class ColdWindowChunkFlush
                     windowsSkipped++;
                     continue;
                 }
+                if (!abandoned && Clock.Global.nanoTime() - startedNanos >= budgetNanos)
+                {
+                    abandoned = true;
+                    logger.warn("Cold-window chunk flush for {}.{}: spent its {}ms budget on chunk I/O; the " +
+                                "remaining cold windows of this flush are written as rows (the re-encoder will " +
+                                "encode them)", metadata.keyspace, metadata.name,
+                                TimeUnit.NANOSECONDS.toMillis(budgetNanos));
+                }
+                if (abandoned)
+                {
+                    windowsSkipped++;
+                    continue;
+                }
                 try
                 {
                     if (!encodeWindow(tag, window, bucket))
@@ -509,12 +578,14 @@ public final class ColdWindowChunkFlush
                 }
                 catch (RuntimeException e)
                 {
-                    // One window's trouble (a failed chunk write, an unreadable existing chunk, an
-                    // unavailable replica) must not fail the flush or spoil the other windows: this
-                    // window's rows simply flush as rows, and the re-encoder retries it later.
+                    // A window's trouble (a failed chunk write, an unreadable existing chunk, an
+                    // unavailable replica) must not fail the flush: this window's rows flush as rows,
+                    // and so do those of every window after it -- see `abandoned`.
                     windowsSkipped++;
+                    abandoned = true;
                     logger.error("Cold-window chunk flush for {}.{}: window [{}, {}) of partition {} could not be " +
-                                 "encoded; its rows will be flushed as rows instead", metadata.keyspace, metadata.name,
+                                 "encoded; it and every remaining cold window of this flush will be flushed as rows " +
+                                 "instead (the re-encoder will encode them)", metadata.keyspace, metadata.name,
                                  window, window + policy.chunkWindowMillis,
                                  metadata.partitionKeyType.getString(key.getKey()), e);
                     continue;
@@ -637,6 +708,22 @@ public final class ColdWindowChunkFlush
                 QueryProcessor.process(insertChunkQuery, cl, encoded.insertValues(tag, window));
             }
             return true;
+        }
+
+        /**
+         * @return whether this node holds {@code key}'s primary range -- the same partitioning of the
+         * tag space the re-encoder uses. A node reporting no primary ranges at all (not supposed to
+         * happen once joined) owns everything, matching the re-encoder's fallback.
+         */
+        private boolean ownsPrimaryRange(DecoratedKey key)
+        {
+            if (primaryRanges.isEmpty())
+                return true;
+            Token token = key.getToken();
+            for (Range<Token> range : primaryRanges)
+                if (range.contains(token))
+                    return true;
+            return false;
         }
 
         private boolean intersectsSSTables(long startMs, long endMsExclusive)

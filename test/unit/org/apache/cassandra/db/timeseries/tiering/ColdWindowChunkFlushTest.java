@@ -19,6 +19,7 @@ package org.apache.cassandra.db.timeseries.tiering;
 
 import java.nio.ByteBuffer;
 import java.util.Date;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.After;
 import org.junit.Test;
@@ -69,6 +70,59 @@ public class ColdWindowChunkFlushTest extends CQLTester
     public void clearInjection()
     {
         ColdWindowChunkFlush.beforeChunkInsertForTesting = null;
+        ColdWindowChunkFlush.budgetMillisForTesting = -1;
+    }
+
+    /**
+     * The cold-window encode runs on the memtable flush thread and issues a quorum read and a write
+     * per window, one after another. A failure was caught per window and the loop moved on -- so
+     * when the chunk writes were failing (the case: a backfill has the memtable pool near full, so
+     * the chunk-table write itself blocks until its timeout), every remaining window paid its own
+     * timeout while the flush thread, and every table queued behind it, waited. The first failure
+     * must end chunk I/O for the rest of the flush; the remaining windows flush as rows.
+     */
+    @Test
+    public void firstChunkFailureEndsChunkIoForTheRestOfTheFlush() throws Throwable
+    {
+        String table = createTieredMemtableTable();
+        for (String tag : new String[]{ "a", "b", "c" })
+            for (int w = 0; w < 3; w++)
+                execute("INSERT INTO " + qualified(table) + " (tag, ts, value) VALUES (?, ?, ?) USING TIMESTAMP ?",
+                        tag, new Date(w * HOUR + 60_000L), (double) w, 100L + w);
+
+        AtomicInteger attempts = new AtomicInteger();
+        ColdWindowChunkFlush.beforeChunkInsertForTesting = window -> {
+            attempts.incrementAndGet();
+            throw new RuntimeException("injected chunk-write timeout");
+        };
+        flush();
+
+        assertEquals("nine windows, one failure: no further chunk write may be attempted", 1, attempts.get());
+        for (String tag : new String[]{ "a", "b", "c" })
+            assertEquals(3, raw("SELECT * FROM " + qualified(table) + " WHERE tag = ?", tag).size());
+        assertEquals(0, execute("SELECT * FROM " + coverageTable(table)).size());
+    }
+
+    /**
+     * Slow rather than failing chunk I/O must not hold the flush thread indefinitely either: past
+     * its budget a flush stops encoding and writes the remaining cold windows as rows, which the
+     * re-encoder picks up on its own schedule.
+     */
+    @Test
+    public void flushPastItsChunkBudgetWritesTheRestAsRows() throws Throwable
+    {
+        String table = createTieredMemtableTable();
+        insertTwoColdWindows(table);
+
+        ColdWindowChunkFlush.budgetMillisForTesting = 0;
+        AtomicInteger attempts = new AtomicInteger();
+        ColdWindowChunkFlush.beforeChunkInsertForTesting = window -> attempts.incrementAndGet();
+        flush();
+
+        assertEquals("an exhausted budget must stop chunk writes", 0, attempts.get());
+        assertEquals(6, raw("SELECT * FROM " + qualified(table) + " WHERE tag = 't1'").size());
+        assertNull(chunkRow(table, 0L));
+        assertEquals(6, execute("SELECT * FROM " + qualified(table) + " WHERE tag = 't1'").size());
     }
 
     @Test

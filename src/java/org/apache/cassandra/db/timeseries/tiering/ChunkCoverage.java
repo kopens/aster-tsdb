@@ -364,6 +364,12 @@ public final class ChunkCoverage
         forTable(base, cl);
     }
 
+    /** Drops {@code base}'s cached coverage, so the next caller reads the ledger again. */
+    static void invalidate(TableMetadata base)
+    {
+        CACHE.remove(base.id);
+    }
+
     @VisibleForTesting
     public static void invalidateAll()
     {
