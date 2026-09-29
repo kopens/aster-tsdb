@@ -24,12 +24,15 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.google.common.annotations.VisibleForTesting;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.concurrent.ExecutorPlus;
+import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
@@ -42,6 +45,7 @@ import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.utils.Clock;
 import org.apache.cassandra.utils.NoSpamLogger;
 
 import static java.lang.String.format;
@@ -142,18 +146,63 @@ public final class TagRegistry
      */
     private static final ConcurrentHashMap<TableId, Integer> consecutiveScanFailures = new ConcurrentHashMap<>();
 
+    /**
+     * {@link TableId} -> how many cycles in a row the walk has run at its current span level with
+     * every page succeeding. After {@link #CLEAN_CYCLES_BEFORE_WIDENING} of them the level drops by
+     * one, so the walk tries a wider span again -- occasionally, not on the very next page.
+     */
+    private static final ConcurrentHashMap<TableId, Integer> cleanScanCycles = new ConcurrentHashMap<>();
+
+    /** Clean cycles at one span level before the walk tries the next wider one. */
+    static final int CLEAN_CYCLES_BEFORE_WIDENING = 4;
+
     private TagRegistry()
     {
     }
+
+    /**
+     * Where write-path registrations run: {@link ScheduledExecutors#nonPeriodicTasks}, the node's
+     * pool for one-off background work (and one the node already shuts down). The INSERT used to be
+     * issued synchronously, on the client's own write, at the policy's consistency level: a slow
+     * registry replica added up to a write timeout to that client write, and after a restart (the
+     * cache is empty) every tag's first write paid it again. Registration is the re-encoder's
+     * bookkeeping, so it happens off the client's time.
+     */
+    private static ExecutorPlus registrationExecutor()
+    {
+        return ScheduledExecutors.nonPeriodicTasks;
+    }
+
+    /** Registrations queued or running on {@link #registrationExecutor()}. */
+    private static final AtomicInteger pendingRegistrations = new AtomicInteger();
+
+    /**
+     * Past this many queued registrations, new ones are dropped rather than queued: the queue must not
+     * become a heap problem, and a dropped tag is registered by the walk when it next passes.
+     */
+    private static final int MAX_PENDING_REGISTRATIONS = 100_000;
+
+    /**
+     * {@link TableId} -> {@code nanoTime} before which the write path does not try to register a tag
+     * of that table again, because a registration just failed. Without it a failed registration,
+     * which releases its tag's claim so the tag is retried, was retried by EVERY later write to that
+     * tag -- one more distributed INSERT per write against a registry that had just failed one.
+     */
+    private static final ConcurrentHashMap<TableId, Long> registrationBackoffUntilNanos = new ConcurrentHashMap<>();
+
+    private static final long REGISTRATION_BACKOFF_NANOS = TimeUnit.SECONDS.toNanos(30);
 
     /** Test-only seam, run with the tag just before each registry INSERT; throwing fails that INSERT. */
     @VisibleForTesting
     static volatile java.util.function.Consumer<List<ByteBuffer>> writeHookForTesting;
 
-    /** Test-only: waits for registrations still in flight. A no-op while registration is synchronous. */
+    /** Test-only: waits (up to 30s) for write-path registrations still queued or running. */
     @VisibleForTesting
     static void awaitPendingWritesForTesting()
     {
+        long deadline = Clock.Global.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (pendingRegistrations.get() > 0 && Clock.Global.nanoTime() < deadline)
+            Thread.yield();
     }
 
     /** @return the token to resume the incremental scan after, or {@code null} to start from the beginning. */
@@ -174,8 +223,13 @@ public final class TagRegistry
         scanCursor.remove(base.id);
     }
 
-    /** @return how many cycles in a row the walk has failed at its current position. */
-    static int consecutiveScanFailures(TableMetadata base)
+    /**
+     * @return the walk's span level: 0 pages over the whole remaining ring, {@code n} over 1/2^n of
+     * it. Raised by one per failed page, and lowered by one only after
+     * {@link #CLEAN_CYCLES_BEFORE_WIDENING} cycles in which every page succeeded -- a span that works
+     * is kept, rather than forgotten after a single success.
+     */
+    static int scanSpanLevel(TableMetadata base)
     {
         return consecutiveScanFailures.getOrDefault(base.id, 0);
     }
@@ -183,11 +237,36 @@ public final class TagRegistry
     static void recordScanFailure(TableMetadata base)
     {
         consecutiveScanFailures.merge(base.id, 1, Integer::sum);
+        cleanScanCycles.remove(base.id);
     }
 
-    static void clearScanFailures(TableMetadata base)
+    /** Notes a cycle whose pages all succeeded; see {@link #scanSpanLevel}. */
+    static void recordCleanScanCycle(TableMetadata base)
     {
+        int level = consecutiveScanFailures.getOrDefault(base.id, 0);
+        if (level == 0)
+            return;
+        int clean = cleanScanCycles.merge(base.id, 1, Integer::sum);
+        if (clean < CLEAN_CYCLES_BEFORE_WIDENING)
+            return;
+        cleanScanCycles.remove(base.id);
+        if (level <= 1)
+            consecutiveScanFailures.remove(base.id);
+        else
+            consecutiveScanFailures.put(base.id, level - 1);
+    }
+
+    /**
+     * Forgets everything this node remembers about {@code base}'s tags -- after a TRUNCATE emptied
+     * the registry, the tags it had registered must be registered again by their next write.
+     */
+    static void forget(TableMetadata base)
+    {
+        seenTags.remove(base.id);
+        scanCursor.remove(base.id);
         consecutiveScanFailures.remove(base.id);
+        cleanScanCycles.remove(base.id);
+        registrationBackoffUntilNanos.remove(base.id);
     }
 
     @VisibleForTesting
@@ -196,6 +275,8 @@ public final class TagRegistry
         seenTags.clear();
         scanCursor.clear();
         consecutiveScanFailures.clear();
+        cleanScanCycles.clear();
+        registrationBackoffUntilNanos.clear();
     }
 
     /**
@@ -249,9 +330,11 @@ public final class TagRegistry
     /**
      * Registers one tag seen on the write path, if this node has not already registered it.
      * <p>
-     * Best-effort by construction: a failure here is logged (rate-limited) and swallowed, because
-     * failing a client's write to maintain a re-encoder's index would be indefensible. A lost
-     * registration costs one delayed tag -- the walk registers it when it next passes that token.
+     * Best-effort and off the client's time: the INSERT is queued on {@link #registrationExecutor()},
+     * and a failure is logged (rate-limited), backs the table off for
+     * {@link #REGISTRATION_BACKOFF_NANOS}, and is otherwise swallowed -- failing or slowing a
+     * client's write to maintain a re-encoder's index would be indefensible. A lost registration
+     * costs one delayed tag: the walk registers it when it next passes that token.
      */
     static void noteTag(TableMetadata base, ConsistencyLevel cl, List<ByteBuffer> tag)
     {
@@ -312,10 +395,51 @@ public final class TagRegistry
         // ...and losing the claim race means another thread is already registering this exact tag, so
         // this one returns rather than issuing a duplicate. Checking `contains` above and then adding
         // unconditionally would have let every racer through, which is the burst this exists to stop.
+        if (!discovered)
+        {
+            Long backoffUntil = registrationBackoffUntilNanos.get(base.id);
+            if (backoffUntil != null && Clock.Global.nanoTime() - backoffUntil < 0)
+                return; // a registration just failed; the walk, or a write after the backoff, retries
+        }
         if (!seen.add(tag))
             return;
-        if (!write(base, cl, registry, tag))
+        if (discovered)
+        {
+            // Discovery runs on the tiering thread already, so it stays synchronous.
+            if (!write(base, cl, registry, tag))
+                seen.remove(tag);
+            return;
+        }
+
+        if (pendingRegistrations.incrementAndGet() > MAX_PENDING_REGISTRATIONS)
+        {
+            pendingRegistrations.decrementAndGet();
             seen.remove(tag);
+            return;
+        }
+        try
+        {
+            registrationExecutor().execute(() -> {
+                try
+                {
+                    if (!write(base, cl, registry, tag))
+                    {
+                        seen.remove(tag);
+                        registrationBackoffUntilNanos.put(base.id, Clock.Global.nanoTime() + REGISTRATION_BACKOFF_NANOS);
+                    }
+                }
+                finally
+                {
+                    pendingRegistrations.decrementAndGet();
+                }
+            });
+        }
+        catch (RuntimeException e)
+        {
+            // Rejected (the executor is shutting down): nothing was queued, so nothing is pending.
+            pendingRegistrations.decrementAndGet();
+            seen.remove(tag);
+        }
     }
 
     /** @return whether the registry INSERT succeeded; a failure is logged (rate-limited) and swallowed. */

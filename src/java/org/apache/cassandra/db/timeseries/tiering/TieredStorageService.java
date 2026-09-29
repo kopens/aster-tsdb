@@ -47,6 +47,7 @@ import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.ResultSet;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.ConsistencyLevel;
+import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.marshal.TimestampType;
@@ -238,6 +239,13 @@ public class TieredStorageService implements TieredStorageServiceMBean
     private final ConcurrentHashMap<String, Long> lastAttemptAtMillisByTable = new ConcurrentHashMap<>();
     /** {@code "keyspace.table"} -> stats from that table's last *completed* run. */
     private final ConcurrentHashMap<String, TierRunStats> lastStatsByTable = new ConcurrentHashMap<>();
+    /**
+     * {@code "keyspace.table"} -> how many runs in a row threw or finished with skipped tags, and the
+     * last one's cause. Without these a table whose tiering had stopped working showed only a
+     * {@code last_run_at} that quietly stopped advancing (see {@code system_views.timeseries_tiering}).
+     */
+    private final ConcurrentHashMap<String, Integer> consecutiveFailuresByTable = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> lastErrorByTable = new ConcurrentHashMap<>();
 
     /**
      * Test-only seam: invoked with {@code (keyspace, table)} at the top of every guarded run, i.e.
@@ -502,6 +510,15 @@ public class TieredStorageService implements TieredStorageServiceMBean
             stats = runOnce(keyspace, table, Clock.Global.currentTimeMillis());
             lastRunAtMillisByTable.put(key, Clock.Global.currentTimeMillis());
             lastStatsByTable.put(key, stats);
+            if (stats.tagsSkipped > 0)
+                recordFailure(key, format("%d tag(s) skipped; see this node's log for the per-tag cause", stats.tagsSkipped));
+            else
+                recordSuccess(key);
+        }
+        catch (RuntimeException | Error e)
+        {
+            recordFailure(key, e.toString());
+            throw e;
         }
         finally
         {
@@ -518,6 +535,36 @@ public class TieredStorageService implements TieredStorageServiceMBean
                        "(their source rows are untouched, so nothing is lost, but the table is not tiered up to the " +
                        "cutoff). See this node's log for the per-tag cause, fix it, and run retier again.",
                        keyspace, table, stats.tagsSkipped));
+    }
+
+    private void recordFailure(String key, String error)
+    {
+        consecutiveFailuresByTable.merge(key, 1, Integer::sum);
+        lastErrorByTable.put(key, error);
+    }
+
+    private void recordSuccess(String key)
+    {
+        consecutiveFailuresByTable.remove(key);
+        lastErrorByTable.remove(key);
+    }
+
+    /** @return epoch millis of {@code keyspace.table}'s last attempted run, completed or not, or {@code null}. */
+    public Long lastAttemptAtMillis(String keyspace, String table)
+    {
+        return lastAttemptAtMillisByTable.get(key(keyspace, table));
+    }
+
+    /** @return how many runs of {@code keyspace.table} in a row threw or skipped tags. */
+    public int consecutiveFailures(String keyspace, String table)
+    {
+        return consecutiveFailuresByTable.getOrDefault(key(keyspace, table), 0);
+    }
+
+    /** @return the cause of {@code keyspace.table}'s last failed run, or {@code null} if the last run was clean. */
+    public String lastError(String keyspace, String table)
+    {
+        return lastErrorByTable.get(key(keyspace, table));
     }
 
     @Override
@@ -640,8 +687,12 @@ public class TieredStorageService implements TieredStorageServiceMBean
         }
         catch (ConfigurationException e)
         {
-            logger.error("Tiered storage runOnce skipped: {}.{} has an invalid timeseries_tiering policy: {}",
-                         keyspace, table, e.getMessage());
+            // Rate-limited: the sweep retries an invalid policy every tick, and this does not clear
+            // itself. system_views.timeseries_tiering shows the table with the error meanwhile.
+            NoSpamLogger.log(logger, NoSpamLogger.Level.ERROR, key(keyspace, table) + ":invalid-policy",
+                             10, TimeUnit.MINUTES,
+                             "Tiered storage runOnce skipped: {}.{} has an invalid timeseries_tiering policy: {}",
+                             keyspace, table, e.getMessage());
             return stats;
         }
         if (policy == null)
@@ -727,6 +778,12 @@ public class TieredStorageService implements TieredStorageServiceMBean
         long[] windowsWithoutWritetime = { 0 };
         // Set when the table's columns changed under this cycle; see regularColumnsChanged().
         boolean schemaChanged = false;
+        // A TRUNCATE during the cycle empties the base and then the chunk table; rows this cycle read
+        // before it must not then be written into the freshly emptied chunk table. The truncation
+        // record is node-local and every node truncates before the TRUNCATE returns (see
+        // TieredTruncation), so this node's record moving is the signal.
+        long truncatedAtStart = SystemKeyspace.getTruncatedAt(base.id);
+        boolean truncated = false;
 
         // Bounded, per-window queries -- see the class javadoc. "oldest"/"next" only ever return the
         // single row needed to locate the next window with work; the row scan itself is restricted to
@@ -825,124 +882,134 @@ public class TieredStorageService implements TieredStorageServiceMBean
                         continue;
                     }
 
-                    UntypedResultSet existingRs = QueryProcessor.process(existingChunkQuery, cl,
-                            boundTo(tag, TimestampType.instance.fromTimeInMillis(windowStart)));
-                    UntypedResultSet.Row existingRow = (existingRs == null || existingRs.isEmpty()) ? null : existingRs.one();
-                    ChunkWindowEncoder.Window window = encoder.open(existingRow);
-
-                    int rowsThisWindow = 0;
-                    for (UntypedResultSet.Row row : windowRows)
+                    // Held from the existing-chunk read to the chunk write: the cold-window flush rewrites
+                    // the same chunk rows and serializes on this lock, and without it the two could each
+                    // read the same old chunk and the later write would drop the other's rows.
+                    synchronized (ColdWindowChunkFlush.lockFor(base.id))
                     {
-                        ByteBuffer[] fresh = new ByteBuffer[valueCount];
-                        for (int c = 0; c < valueCount; c++)
+                        UntypedResultSet existingRs = QueryProcessor.process(existingChunkQuery, cl,
+                                boundTo(tag, TimestampType.instance.fromTimeInMillis(windowStart)));
+                        UntypedResultSet.Row existingRow = (existingRs == null || existingRs.isEmpty()) ? null : existingRs.one();
+                        ChunkWindowEncoder.Window window = encoder.open(existingRow);
+
+                        int rowsThisWindow = 0;
+                        for (UntypedResultSet.Row row : windowRows)
                         {
-                            // A live cell wins over whatever the chunk held; an absent one leaves the
-                            // chunk's value in place (see ChunkWindowEncoder.Window#mergeSample).
-                            // row.has() is "the cell is present", and an empty-but-present value
-                            // (e.g. text '') counts as present.
-                            if (row.has(valueRawNames[c]))
-                                fresh[c] = row.getBytes(valueRawNames[c]);
-                            // Every column's writetime feeds the maximum -- the delete below must not
-                            // outrun the newest cell of any column of any row it is about to destroy.
-                            if (row.has(writetimeAliases[c]))
-                                window.noteWritetime(row.getLong(writetimeAliases[c]));
+                            ByteBuffer[] fresh = new ByteBuffer[valueCount];
+                            for (int c = 0; c < valueCount; c++)
+                            {
+                                // A live cell wins over whatever the chunk held; an absent one leaves the
+                                // chunk's value in place (see ChunkWindowEncoder.Window#mergeSample).
+                                // row.has() is "the cell is present", and an empty-but-present value
+                                // (e.g. text '') counts as present.
+                                if (row.has(valueRawNames[c]))
+                                    fresh[c] = row.getBytes(valueRawNames[c]);
+                                // Every column's writetime feeds the maximum -- the delete below must not
+                                // outrun the newest cell of any column of any row it is about to destroy.
+                                if (row.has(writetimeAliases[c]))
+                                    window.noteWritetime(row.getLong(writetimeAliases[c]));
+                            }
+                            window.mergeSample(row.getTimestamp(tsRaw).getTime(), fresh);
+                            // Rows with every regular column null (a bare primary-key insert, or a row whose
+                            // cells were all deleted/TTL'd) are ENCODED, not skipped: the row exists, the
+                            // range delete would take it, and a chunk that omitted it would be silent data
+                            // loss. It contributes no writetime, which is why haveWritetime is tracked
+                            // separately from "the window had rows".
+                            rowsThisWindow++;
                         }
-                        window.mergeSample(row.getTimestamp(tsRaw).getTime(), fresh);
-                        // Rows with every regular column null (a bare primary-key insert, or a row whose
-                        // cells were all deleted/TTL'd) are ENCODED, not skipped: the row exists, the
-                        // range delete would take it, and a chunk that omitted it would be silent data
-                        // loss. It contributes no writetime, which is why haveWritetime is tracked
-                        // separately from "the window had rows".
-                        rowsThisWindow++;
+
+                        if (!window.haveWritetime())
+                        {
+                            // Not one cell writetime anywhere in this window, and no prior chunk to inherit
+                            // one from: there is no timestamp the range delete could use that is provably
+                            // not newer than some row it would destroy. Leave the window entirely alone --
+                            // nothing encoded, nothing deleted -- and retry (cheaply) on a future cycle.
+                            windowsWithoutWritetime[0]++;
+                            windowStart = windowEnd;
+                            continue;
+                        }
+
+                        int count = window.sampleCount();
+                        if (count > maxSamples)
+                        {
+                            // The window's own rows fit the cap, but merged with the existing chunk's
+                            // samples (disjoint late-row timestamps) the total doesn't -- encode would
+                            // throw, be caught by the per-tag handler, and retry identically forever.
+                            logger.error("Tiered storage runOnce: {}.{} tag {} window [{}, {}) merges to {} samples, " +
+                                         "over the {}-sample per-chunk codec limit -- it cannot be encoded. Lower the " +
+                                         "table's timeseries_tiering chunk_window so one window holds at most {} samples; " +
+                                         "skipping this tag until then", keyspace, table, describeTag(tagColumns, tag),
+                                         windowStart, readEnd, count, maxSamples, maxSamples);
+                            stats.tagsSkipped++;
+                            break;
+                        }
+
+                        // BEFORE the chunk is written and the source rows are deleted: the read path's
+                        // fast path is driven by this ledger, so it has to be at least as wide as the
+                        // chunk table at every instant. Widening it first means a crash in between only
+                        // over-states coverage (an unnecessary chunk read); the reverse order would leave
+                        // a chunk whose base rows are gone and which the fast path does not know to look
+                        // for. Claimed on every window, not only on windows that write a chunk, so a lost
+                        // or truncated ledger is rebuilt by the next cycle over already-encoded data.
+                        // windowStart on BOTH ends, not `cutoff` for the top: the ledger's top feeds the
+                        // write guard as well as the read path, and there over-claiming refuses tombstones
+                        // on hot rows this cycle never encoded (see ChunkCoverage.claim).
+                        // The encoder, the window query and the delete below were all built from `base`,
+                        // the metadata read at the top of this cycle, so the read above selected only the
+                        // columns that existed then. The delete is a whole-row range delete at the window's
+                        // maximum cell writetime, so a column added since would be deleted without ever
+                        // having been encoded: a silent loss. Stop before touching anything and leave the
+                        // table to the next cycle, which reads the new schema. This narrows the race to
+                        // the few milliseconds between this check and the delete; closing it outright
+                        // would need the delete to name its columns.
+                        if (regularColumnsChanged(base))
+                        {
+                            schemaChanged = true;
+                            break;
+                        }
+                        if (SystemKeyspace.getTruncatedAt(base.id) != truncatedAtStart)
+                        {
+                            truncated = true;
+                            break;
+                        }
+
+                        ChunkCoverage.claim(base, cl, windowStart, windowStart, policy.chunkWindowMillis);
+
+                        ChunkWindowEncoder.Encoded encoded = window.encode();
+                        long maxWt = encoded.maxWritetime;
+                        ByteBuffer payload = encoded.payload;
+                        // An unchanged chunk is not re-written, but the delete below still runs -- this is
+                        // also what completes an interrupted cycle that wrote the chunk and died before the
+                        // delete.
+                        boolean chunkUnchanged = encoded.unchanged;
+                        if (!chunkUnchanged)
+                        {
+                            Consumer<TableMetadata> beforeInsert = beforeChunkInsertForTesting;
+                            if (beforeInsert != null)
+                                beforeInsert.accept(base);
+                            QueryProcessor.process(insertChunkQuery, cl, encoded.insertValues(tag, windowStart));
+                        }
+
+                        // The USING TIMESTAMP marker precedes the WHERE clause, so this is the one query
+                        // whose tag values are not the leading binds.
+                        List<ByteBuffer> deleteValues = new ArrayList<>(tag.size() + 3);
+                        deleteValues.add(LongType.instance.decompose(maxWt));
+                        deleteValues.addAll(tag);
+                        deleteValues.add(TimestampType.instance.fromTimeInMillis(windowStart));
+                        deleteValues.add(TimestampType.instance.fromTimeInMillis(readEnd));
+                        QueryProcessor.process(deleteRowsQuery, cl, deleteValues);
+
+                        // Counted only when a chunk was actually written -- a suppressed re-write encoded
+                        // nothing new, and reporting it would make an idle table look like it is churning.
+                        if (!chunkUnchanged)
+                        {
+                            stats.windowsEncoded++;
+                            stats.rowsEncoded += rowsThisWindow;
+                            if (existingRow != null)
+                                stats.lateMerges++;
+                            stats.bytesWritten += payload.remaining();
+                        }
                     }
-
-                    if (!window.haveWritetime())
-                    {
-                        // Not one cell writetime anywhere in this window, and no prior chunk to inherit
-                        // one from: there is no timestamp the range delete could use that is provably
-                        // not newer than some row it would destroy. Leave the window entirely alone --
-                        // nothing encoded, nothing deleted -- and retry (cheaply) on a future cycle.
-                        windowsWithoutWritetime[0]++;
-                        windowStart = windowEnd;
-                        continue;
-                    }
-
-                    int count = window.sampleCount();
-                    if (count > maxSamples)
-                    {
-                        // The window's own rows fit the cap, but merged with the existing chunk's
-                        // samples (disjoint late-row timestamps) the total doesn't -- encode would
-                        // throw, be caught by the per-tag handler, and retry identically forever.
-                        logger.error("Tiered storage runOnce: {}.{} tag {} window [{}, {}) merges to {} samples, " +
-                                     "over the {}-sample per-chunk codec limit -- it cannot be encoded. Lower the " +
-                                     "table's timeseries_tiering chunk_window so one window holds at most {} samples; " +
-                                     "skipping this tag until then", keyspace, table, describeTag(tagColumns, tag),
-                                     windowStart, readEnd, count, maxSamples, maxSamples);
-                        stats.tagsSkipped++;
-                        break;
-                    }
-
-                    // BEFORE the chunk is written and the source rows are deleted: the read path's
-                    // fast path is driven by this ledger, so it has to be at least as wide as the
-                    // chunk table at every instant. Widening it first means a crash in between only
-                    // over-states coverage (an unnecessary chunk read); the reverse order would leave
-                    // a chunk whose base rows are gone and which the fast path does not know to look
-                    // for. Claimed on every window, not only on windows that write a chunk, so a lost
-                    // or truncated ledger is rebuilt by the next cycle over already-encoded data.
-                    // windowStart on BOTH ends, not `cutoff` for the top: the ledger's top feeds the
-                    // write guard as well as the read path, and there over-claiming refuses tombstones
-                    // on hot rows this cycle never encoded (see ChunkCoverage.claim).
-                    // The encoder, the window query and the delete below were all built from `base`,
-                    // the metadata read at the top of this cycle, so the read above selected only the
-                    // columns that existed then. The delete is a whole-row range delete at the window's
-                    // maximum cell writetime, so a column added since would be deleted without ever
-                    // having been encoded: a silent loss. Stop before touching anything and leave the
-                    // table to the next cycle, which reads the new schema. This narrows the race to
-                    // the few milliseconds between this check and the delete; closing it outright
-                    // would need the delete to name its columns.
-                    if (regularColumnsChanged(base))
-                    {
-                        schemaChanged = true;
-                        break;
-                    }
-
-                    ChunkCoverage.claim(base, cl, windowStart, windowStart, policy.chunkWindowMillis);
-
-                    ChunkWindowEncoder.Encoded encoded = window.encode();
-                    long maxWt = encoded.maxWritetime;
-                    ByteBuffer payload = encoded.payload;
-                    // An unchanged chunk is not re-written, but the delete below still runs -- this is
-                    // also what completes an interrupted cycle that wrote the chunk and died before the
-                    // delete.
-                    boolean chunkUnchanged = encoded.unchanged;
-                    if (!chunkUnchanged)
-                    {
-                        Consumer<TableMetadata> beforeInsert = beforeChunkInsertForTesting;
-                        if (beforeInsert != null)
-                            beforeInsert.accept(base);
-                        QueryProcessor.process(insertChunkQuery, cl, encoded.insertValues(tag, windowStart));
-                    }
-
-                    // The USING TIMESTAMP marker precedes the WHERE clause, so this is the one query
-                    // whose tag values are not the leading binds.
-                    List<ByteBuffer> deleteValues = new ArrayList<>(tag.size() + 3);
-                    deleteValues.add(LongType.instance.decompose(maxWt));
-                    deleteValues.addAll(tag);
-                    deleteValues.add(TimestampType.instance.fromTimeInMillis(windowStart));
-                    deleteValues.add(TimestampType.instance.fromTimeInMillis(readEnd));
-                    QueryProcessor.process(deleteRowsQuery, cl, deleteValues);
-
-                    // Counted only when a chunk was actually written -- a suppressed re-write encoded
-                    // nothing new, and reporting it would make an idle table look like it is churning.
-                    if (!chunkUnchanged)
-                    {
-                        stats.windowsEncoded++;
-                        stats.rowsEncoded += rowsThisWindow;
-                        if (existingRow != null)
-                            stats.lateMerges++;
-                        stats.bytesWritten += payload.remaining();
-                    }
-
                     windowStart = windowEnd;
                 }
 
@@ -985,6 +1052,15 @@ public class TieredStorageService implements TieredStorageServiceMBean
                 logger.error("Tiered storage runOnce: {}.{} failed while re-encoding tag {} -- skipping to the " +
                              "next tag; this tag will be retried next cycle", keyspace, table,
                              describeTag(tagColumns, tag), e);
+            }
+
+            if (truncated)
+            {
+                // Not counted as skipped: nothing was left under-encoded, the data is gone on purpose.
+                logger.info("Tiered storage runOnce: {}.{} was truncated during the cycle; stopping at tag {} so " +
+                            "that no row read before the truncate is written back as a chunk", keyspace, table,
+                            describeTag(tagColumns, tag));
+                break;
             }
 
             if (schemaChanged)
@@ -1244,15 +1320,12 @@ public class TieredStorageService implements TieredStorageServiceMBean
         // bounded stretch that was scanned and held nothing live is ground covered: the cursor
         // advances to the span's end. A stretch too expensive at any width is stepped over after
         // finitely many halvings instead of stalling the walk forever.
-        int failures = TagRegistry.consecutiveScanFailures(base);
+        int level = TagRegistry.scanSpanLevel(base);
         int pageSize = TAG_PAGE_SIZE;
-        Token spanUpper = boundedScanUpper(base.partitioner, TagRegistry.scanCursor(base), failures);
-        if (failures > 0)
-            logger.info("Tiered storage: {}.{}'s tag walk has failed {} cycle(s) at its current position; " +
-                        "retrying over {} of the remaining ring{}",
-                        base.keyspace, base.name, failures,
-                        spanUpper == null ? "all" : "1/" + (1L << Math.min(failures, MAX_SPAN_HALVINGS)),
-                        spanUpper == null ? " (partitioner cannot split token ranges)" : "");
+        if (level > 0)
+            logger.info("Tiered storage: {}.{}'s tag walk is paging over 1/{} of the remaining ring (a wider page " +
+                        "failed at its current position)", base.keyspace, base.name,
+                        1L << Math.min(level, MAX_SPAN_HALVINGS));
 
         String query = format("SELECT DISTINCT %s, token(%s) AS %s FROM %s WHERE token(%s) > ? LIMIT %d",
                               tagCqlList, tagCqlList, tokenAlias, baseRef, tagCqlList, pageSize);
@@ -1266,12 +1339,17 @@ public class TieredStorageService implements TieredStorageServiceMBean
         for (int page = 0; page < scanPagesPerCycle; page++)
         {
             Token cursor = TagRegistry.scanCursor(base);
+            // The span is re-derived from wherever the cursor now is, at the SAME level: a width that
+            // just worked keeps being used. Resetting to the full ring after one success -- as this
+            // once did -- sent the very next page back over the stretch that had just timed out, and
+            // the halving ladder was paid again (one ~12s read timeout per cycle on node 41).
+            Token spanUpper = boundedScanUpper(base.partitioner, cursor, level);
             List<UntypedResultSet.Row> rows;
             try
             {
                 java.util.function.IntConsumer pageHook = tagWalkPageHookForTesting;
                 if (pageHook != null)
-                    pageHook.accept(spanUpper == null ? 0 : Math.min(failures, MAX_SPAN_HALVINGS));
+                    pageHook.accept(spanUpper == null ? 0 : Math.min(level, MAX_SPAN_HALVINGS));
                 ByteBuffer upperRaw = spanUpper == null ? null : tokenType.decomposeUntyped(spanUpper.getTokenValue());
                 if (cursor == null)
                     rows = spanUpper == null
@@ -1295,7 +1373,7 @@ public class TieredStorageService implements TieredStorageServiceMBean
                 logger.warn("Tiered storage: {}.{}'s incremental tag scan failed at cursor {} over {} of the " +
                             "remaining ring; retrying from the same position over a smaller span next cycle",
                             base.keyspace, base.name, cursor,
-                            spanUpper == null ? "all" : "1/" + (1L << Math.min(failures, MAX_SPAN_HALVINGS)), e);
+                            spanUpper == null ? "all" : "1/" + (1L << Math.min(level, MAX_SPAN_HALVINGS)), e);
                 return;
             }
 
@@ -1307,8 +1385,6 @@ public class TieredStorageService implements TieredStorageServiceMBean
                 TagRegistry.registerDiscovered(base, cl, tag);
             }
 
-            TagRegistry.clearScanFailures(base);
-
             if (rows.size() >= pageSize)
             {
                 // The LIMIT was the binding constraint: ground beyond the last row is unscanned,
@@ -1316,25 +1392,25 @@ public class TieredStorageService implements TieredStorageServiceMBean
                 UntypedResultSet.Row last = rows.get(rows.size() - 1);
                 TagRegistry.advanceScanCursor(base, base.partitioner.getTokenFactory()
                                                                     .fromByteArray(last.getBytes(tokenAlias)));
-                spanUpper = null; // the shrunken span did its job; resume at full width
                 continue;
             }
 
             if (spanUpper != null)
             {
                 // A short page of a BOUNDED span is not exhaustion -- it means the whole stretch up
-                // to spanUpper was scanned. That is the progress the halving exists to buy: advance
-                // past it and resume at full width within the same cycle's page budget.
+                // to spanUpper was scanned. That is the progress the halving exists to buy.
                 TagRegistry.advanceScanCursor(base, spanUpper);
-                spanUpper = null;
                 continue;
             }
 
             // A short UNBOUNDED page means the ring is exhausted: a full pass is done. Rewind so the
             // next pass picks up tags created since.
             TagRegistry.rewindScanCursor(base);
+            TagRegistry.recordCleanScanCycle(base);
             return;
         }
+        // The page budget ran out with every page succeeding.
+        TagRegistry.recordCleanScanCycle(base);
     }
 
     /** Span halvings are capped: beyond this the stretch is one 2^-{@value}th of the ring and still failing. */

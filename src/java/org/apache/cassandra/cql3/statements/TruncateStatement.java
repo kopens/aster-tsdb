@@ -31,6 +31,7 @@ import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.guardrails.Guardrails;
+import org.apache.cassandra.db.timeseries.tiering.TieredTruncation;
 import org.apache.cassandra.db.virtual.VirtualKeyspaceRegistry;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.TruncateException;
@@ -84,6 +85,10 @@ public class TruncateStatement extends QualifiedStatement implements CQLStatemen
             else
             {
                 StorageProxy.truncateBlocking(keyspace(), name());
+                // Tiered storage: the chunk table holds the only copy of the table's tiered history,
+                // and reads merge it back in -- so it is truncated with the base (see TieredTruncation).
+                for (String shadow : TieredTruncation.shadowTablesOf(keyspace(), name()))
+                    truncateShadow(shadow, () -> StorageProxy.truncateBlocking(keyspace(), shadow));
             }
         }
         catch (UnavailableException | TimeoutException e)
@@ -91,6 +96,31 @@ public class TruncateStatement extends QualifiedStatement implements CQLStatemen
             throw new TruncateException(e);
         }
         return null;
+    }
+
+    private interface ShadowTruncate
+    {
+        void run() throws UnavailableException, TimeoutException;
+    }
+
+    /**
+     * Truncates one tiering shadow table after the base table has already been truncated, naming
+     * the half-done state if it fails: the base is empty but part of its tiered history is still
+     * readable, and re-running the TRUNCATE is what finishes it.
+     */
+    private void truncateShadow(String shadow, ShadowTruncate truncate) throws UnavailableException, TimeoutException
+    {
+        try
+        {
+            truncate.run();
+        }
+        catch (TimeoutException | RuntimeException e)
+        {
+            throw new TruncateException(String.format(
+                "%s.%s was truncated, but its tiered-storage table %s.%s could not be (%s): part of the table's " +
+                "tiered history is still readable. Re-run the TRUNCATE to finish it.",
+                keyspace(), name(), keyspace(), shadow, e));
+        }
     }
 
     public ResultMessage executeLocally(QueryState state, QueryOptions options)
@@ -109,6 +139,8 @@ public class TruncateStatement extends QualifiedStatement implements CQLStatemen
             {
                 ColumnFamilyStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(name());
                 cfs.truncateBlocking();
+                for (String shadow : TieredTruncation.shadowTablesOf(keyspace(), name()))
+                    truncateShadow(shadow, () -> Keyspace.open(keyspace()).getColumnFamilyStore(shadow).truncateBlocking());
             }
         }
         catch (Exception e)

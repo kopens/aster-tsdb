@@ -63,6 +63,7 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.service.reads.thresholds.CoordinatorWarnings;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -1361,8 +1362,11 @@ public class TieredStorageServiceTest extends CQLTester
             assertEquals(1, purgeable.lateMerges);
 
             TierRunStats young = encodeThirtyWindowsThenMergeALateRow(864000);
-            assertEquals("tombstones younger than gc_grace are counted -- this is the real bound",
-                         1, young.tagsSkipped);
+            // The tag walk's DISTINCT page over the same partition trips the threshold as well, so
+            // more than one thing is skipped; what matters is that the probe is stopped at all.
+            assertTrue("tombstones younger than gc_grace are counted -- this is the real bound",
+                       young.tagsSkipped >= 1);
+            assertEquals(0, young.lateMerges);
         }
         finally
         {
@@ -1386,7 +1390,17 @@ public class TieredStorageServiceTest extends CQLTester
         insertRow("deep", 29 * HOUR + 60_000L, 99.0, 1000);
         Thread.sleep(1100); // a tombstone is purgeable once its deletion time is strictly before gcBefore
         DatabaseDescriptor.setTombstoneFailureThreshold(10);
-        return service.runOnce(KEYSPACE, currentTable(), 40 * HOUR);
+        // A read that trips a threshold reports it through the coordinator's per-thread warnings,
+        // which the native-protocol path initializes and a test thread must initialize itself.
+        CoordinatorWarnings.init();
+        try
+        {
+            return service.runOnce(KEYSPACE, currentTable(), 40 * HOUR);
+        }
+        finally
+        {
+            CoordinatorWarnings.reset();
+        }
     }
 
     /**
