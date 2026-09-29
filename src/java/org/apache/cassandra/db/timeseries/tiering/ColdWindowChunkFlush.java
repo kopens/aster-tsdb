@@ -166,6 +166,16 @@ public final class ColdWindowChunkFlush
     @VisibleForTesting
     public static volatile LongConsumer beforeChunkInsertForTesting;
 
+    /** The per-table lock cold-window encoding holds; see {@link #LOCKS}. */
+    static Object lockFor(TableId table)
+    {
+        return LOCKS.computeIfAbsent(table, ignored -> new Object());
+    }
+
+    /** Test-only: the wall-clock budget one flush may spend on chunk I/O. Not consulted yet. */
+    @VisibleForTesting
+    static volatile long budgetMillisForTesting = -1;
+
     /** The no-omissions answer: flush every row exactly as before. */
     public static final RowOmissions NONE = new RowOmissions(Collections.emptyMap(), 0);
 

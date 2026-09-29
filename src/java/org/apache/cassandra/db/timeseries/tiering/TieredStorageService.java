@@ -258,6 +258,29 @@ public class TieredStorageService implements TieredStorageServiceMBean
     static volatile Consumer<String> tagRangeScanHookForTesting;
 
     /**
+     * Test-only seam, run right after a window's rows have been read and before anything is claimed,
+     * written or deleted for it -- the point where a concurrent schema change or TRUNCATE is most
+     * dangerous, and which a single-threaded test cannot otherwise reach.
+     */
+    @VisibleForTesting
+    static volatile Runnable afterWindowReadHookForTesting;
+
+    /**
+     * Test-only seam, run with the base table's metadata immediately before the re-encoder writes a
+     * chunk row -- lets a test observe what the writing thread holds at that moment.
+     */
+    @VisibleForTesting
+    static volatile Consumer<TableMetadata> beforeChunkInsertForTesting;
+
+    /**
+     * Test-only seam, run before each page of the incremental tag walk with the page's span level
+     * (0 = unbounded, n = 1/2^n of the remaining ring); throwing from it fails that page, which a
+     * single-node test cluster cannot otherwise make happen.
+     */
+    @VisibleForTesting
+    static volatile java.util.function.IntConsumer tagWalkPageHookForTesting;
+
+    /**
      * Hard cap on the rows a single (tag, window) may accumulate in one cycle, pre-checked while
      * still paging so an over-dense window is aborted with an actionable error instead of being
      * fully materialized first.
@@ -774,6 +797,9 @@ public class TieredStorageService implements TieredStorageServiceMBean
                             TimestampType.instance.fromTimeInMillis(windowStart),
                             TimestampType.instance.fromTimeInMillis(readEnd)),
                             maxSamples);
+                    Runnable afterRead = afterWindowReadHookForTesting;
+                    if (afterRead != null)
+                        afterRead.run();
                     if (windowRows.size() > maxSamples)
                     {
                         // Paging stopped as soon as the count crossed the cap (see pagedSelect), so
@@ -890,7 +916,12 @@ public class TieredStorageService implements TieredStorageServiceMBean
                     // delete.
                     boolean chunkUnchanged = encoded.unchanged;
                     if (!chunkUnchanged)
+                    {
+                        Consumer<TableMetadata> beforeInsert = beforeChunkInsertForTesting;
+                        if (beforeInsert != null)
+                            beforeInsert.accept(base);
                         QueryProcessor.process(insertChunkQuery, cl, encoded.insertValues(tag, windowStart));
+                    }
 
                     // The USING TIMESTAMP marker precedes the WHERE clause, so this is the one query
                     // whose tag values are not the leading binds.
@@ -1238,6 +1269,9 @@ public class TieredStorageService implements TieredStorageServiceMBean
             List<UntypedResultSet.Row> rows;
             try
             {
+                java.util.function.IntConsumer pageHook = tagWalkPageHookForTesting;
+                if (pageHook != null)
+                    pageHook.accept(spanUpper == null ? 0 : Math.min(failures, MAX_SPAN_HALVINGS));
                 ByteBuffer upperRaw = spanUpper == null ? null : tokenType.decomposeUntyped(spanUpper.getTokenValue());
                 if (cursor == null)
                     rows = spanUpper == null

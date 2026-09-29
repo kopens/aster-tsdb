@@ -20,6 +20,7 @@ package org.apache.cassandra.distributed.test.timeseries;
 
 import java.io.IOException;
 import java.util.Date;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import com.google.common.util.concurrent.Uninterruptibles;
@@ -29,10 +30,16 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.QueryProcessor;
+import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.timeseries.tiering.TransparentReads;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
 import org.apache.cassandra.distributed.test.TestBaseImpl;
+import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.service.StorageService;
 
 import static org.apache.cassandra.distributed.api.Feature.GOSSIP;
 import static org.apache.cassandra.distributed.api.Feature.NETWORK;
@@ -84,6 +91,9 @@ public class TieredStorageDistributedTest extends TestBaseImpl
     {
         CLUSTER = init(Cluster.build(3)
                               .withConfig(config -> config.set("hinted_handoff_enabled", false)
+                                                          // the time-series memtable, for the cold-window flush test
+                                                          .set("memtable", Map.of("configurations", Map.of(
+                                                              "timeseries", Map.of("class_name", "TimeSeriesMemtable"))))
                                                           .with(GOSSIP).with(NETWORK))
                               .start(),
                        3);   // RF = 3
@@ -300,6 +310,67 @@ public class TieredStorageDistributedTest extends TestBaseImpl
         for (int node = 1; node <= 3; node++)
             assertEquals("node " + node + " must hold only the repaired row, not the decoded chunk",
                          1, localBaseRows(node, t));
+    }
+
+    /**
+     * The cold-window flush and the re-encoder both read-modify-write chunk rows, with no
+     * coordination between nodes. The re-encoder only ever works a tag on the node that owns its
+     * primary range, but the flush encoded on whichever replica flushed first: two nodes could then
+     * each read the same old chunk and write their own merge of it, and a timestamp tie is resolved
+     * cell by cell -- so a row one replica had and the other lacked could vanish with its base copy
+     * already gone. One writer per tag closes that: only the primary replica may chunk at flush;
+     * the others flush their rows, which the re-encoder (on the primary) folds in and deletes.
+     */
+    @Test
+    public void onlyThePrimaryReplicaChunksAColdWindowAtFlush()
+    {
+        String t = "cold_flush_owner";
+        CLUSTER.schemaChange(withKeyspace("CREATE TABLE %s." + t + " (tag text, ts timestamp, value double, " +
+                                          "PRIMARY KEY (tag, ts)) WITH read_repair = 'NONE' AND memtable = 'timeseries' " +
+                                          "AND compaction = {'class':'TimeSeriesCompactionStrategy','window_size':'1h','freeze_after':'2h'}"));
+        setPolicy(t, POLICY);
+        retierAllNodes(t); // no data yet: this only creates the shadow tables, which the flush path never does
+
+        for (int i = 0; i < 5; i++)
+            CLUSTER.coordinator(1).execute(withKeyspace("INSERT INTO %s." + t + " (tag, ts, value) VALUES (?, ?, ?)"),
+                                           ConsistencyLevel.ALL, "tag-0", new Date(i * 60_000L), 1.0 + i);
+
+        int primary = -1;
+        for (int node = 1; node <= 3; node++)
+            if (isPrimaryFor(node, t, "tag-0"))
+                primary = node;
+        assertTrue("some node must own tag-0's primary range", primary > 0);
+
+        // The replicas that do NOT own the tag flush first -- before this fix the first flusher won.
+        for (int node = 1; node <= 3; node++)
+        {
+            if (node == primary)
+                continue;
+            CLUSTER.get(node).flush(KEYSPACE);
+            assertEquals("node " + node + " is not tag-0's primary and must flush its rows, not chunk them",
+                         5, localBaseRows(node, t));
+        }
+        assertEquals("no chunk may exist before the primary has flushed",
+                     0L, countAt(1, "SELECT count(*) FROM %s." + t + "__chunks WHERE tag = ?", ConsistencyLevel.ALL, "tag-0"));
+
+        CLUSTER.get(primary).flush(KEYSPACE);
+        assertEquals("the primary chunks the cold window and omits its rows", 0, localBaseRows(primary, t));
+        assertEquals(1L, countAt(1, "SELECT count(*) FROM %s." + t + "__chunks WHERE tag = ?", ConsistencyLevel.ALL, "tag-0"));
+        assertEquals(5L, countAt(1, "SELECT count(*) FROM %s." + t + " WHERE tag = ?", ConsistencyLevel.ALL, "tag-0"));
+    }
+
+    /** @return whether {@code node} holds the primary range of {@code tag}'s token in {@code table}. */
+    private static boolean isPrimaryFor(int node, String table, String tag)
+    {
+        String keyspace = KEYSPACE;
+        return CLUSTER.get(node).callOnInstance(() -> {
+            TableMetadata metadata = Schema.instance.getTableMetadata(keyspace, table);
+            Token token = metadata.partitioner.getToken(UTF8Type.instance.decompose(tag));
+            for (Range<Token> range : StorageService.instance.getPrimaryRanges(keyspace))
+                if (range.contains(token))
+                    return true;
+            return false;
+        });
     }
 
     /**

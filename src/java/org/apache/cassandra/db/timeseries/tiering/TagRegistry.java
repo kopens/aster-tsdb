@@ -146,6 +146,16 @@ public final class TagRegistry
     {
     }
 
+    /** Test-only seam, run with the tag just before each registry INSERT; throwing fails that INSERT. */
+    @VisibleForTesting
+    static volatile java.util.function.Consumer<List<ByteBuffer>> writeHookForTesting;
+
+    /** Test-only: waits for registrations still in flight. A no-op while registration is synchronous. */
+    @VisibleForTesting
+    static void awaitPendingWritesForTesting()
+    {
+    }
+
     /** @return the token to resume the incremental scan after, or {@code null} to start from the beginning. */
     static Token scanCursor(TableMetadata base)
     {
@@ -320,6 +330,9 @@ public final class TagRegistry
         values.addAll(tag);
         try
         {
+            java.util.function.Consumer<List<ByteBuffer>> hook = writeHookForTesting;
+            if (hook != null)
+                hook.accept(tag);
             QueryProcessor.process(query, cl, values);
             return true;
         }
