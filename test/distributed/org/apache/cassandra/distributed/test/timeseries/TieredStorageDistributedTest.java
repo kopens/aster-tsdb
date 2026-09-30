@@ -125,7 +125,7 @@ public class TieredStorageDistributedTest extends TestBaseImpl
     private static void createTieredTable(String name)
     {
         CLUSTER.schemaChange(withKeyspace("CREATE TABLE %s." + name + " (tag text, ts timestamp, value double, " +
-                                          "PRIMARY KEY (tag, ts)) WITH read_repair = 'NONE'"));
+                                          "PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'} AND read_repair = 'NONE'"));
         setPolicy(name, POLICY);
     }
 
@@ -272,7 +272,7 @@ public class TieredStorageDistributedTest extends TestBaseImpl
         String t = "digest_mismatch";
         // Default read_repair (BLOCKING) -- unlike the other tables here, the repair path IS the test.
         CLUSTER.schemaChange(withKeyspace("CREATE TABLE %s." + t + " (tag text, ts timestamp, value double, " +
-                                          "PRIMARY KEY (tag, ts))"));
+                                          "PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}"));
         setPolicy(t, POLICY);
         for (int i = 0; i < 5; i++)
             CLUSTER.coordinator(1).execute(withKeyspace("INSERT INTO %s." + t + " (tag, ts, value) VALUES (?, ?, ?)"),

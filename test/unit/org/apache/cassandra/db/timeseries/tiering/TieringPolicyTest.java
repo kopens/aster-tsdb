@@ -26,6 +26,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ConsistencyLevel;
+import org.apache.cassandra.db.compaction.TimeSeriesCompactionStrategy;
 import org.apache.cassandra.db.marshal.BooleanType;
 import org.apache.cassandra.db.marshal.CounterColumnType;
 import org.apache.cassandra.db.marshal.DoubleType;
@@ -35,6 +36,7 @@ import org.apache.cassandra.db.marshal.ReversedType;
 import org.apache.cassandra.db.marshal.TimestampType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.exceptions.ConfigurationException;
+import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.schema.IndexMetadata;
 import org.apache.cassandra.schema.Indexes;
 import org.apache.cassandra.schema.TableMetadata;
@@ -56,14 +58,22 @@ public class TieringPolicyTest
         DatabaseDescriptor.daemonInitialization();
     }
 
+    /** Tiering refuses any other compaction strategy, so every table in this matrix starts from TSCS. */
+    private static final CompactionParams TSCS = CompactionParams.create(TimeSeriesCompactionStrategy.class, ImmutableMap.of());
+
+    private static TableMetadata.Builder tieredBuilder(String keyspace, String table)
+    {
+        return TableMetadata.builder(keyspace, table).compaction(TSCS);
+    }
+
     private static TableMetadata canonicalTable(String json)
     {
-        TableMetadata.Builder builder = TableMetadata.builder("ks", "tbl")
+        TableMetadata.Builder builder = tieredBuilder("ks", "tbl")
                                                       .addPartitionKeyColumn("tag", UTF8Type.instance)
                                                       .addClusteringColumn("ts", TimestampType.instance)
                                                       .addRegularColumn("value", DoubleType.instance);
         if (json != null)
-            builder.params(TableParams.builder()
+            builder.params(TableParams.builder().compaction(TSCS)
                                       .extensions(ImmutableMap.of(TieringPolicy.EXTENSION_KEY, ByteBufferUtil.bytes(json)))
                                       .build());
         return builder.build();
@@ -71,18 +81,18 @@ public class TieringPolicyTest
 
     private static TableMetadata tableWithTtl(int ttlSeconds)
     {
-        return TableMetadata.builder("ks", "tbl")
+        return tieredBuilder("ks", "tbl")
                              .addPartitionKeyColumn("tag", UTF8Type.instance)
                              .addClusteringColumn("ts", TimestampType.instance)
                              .addRegularColumn("value", DoubleType.instance)
-                             .params(TableParams.builder().defaultTimeToLive(ttlSeconds).build())
+                             .params(TableParams.builder().compaction(TSCS).defaultTimeToLive(ttlSeconds).build())
                              .build();
     }
 
     /** The shape of the production table this work exists for: 7 static, 7 regular of mixed types, DESC. */
     private static TableMetadata productionShapedTable()
     {
-        return TableMetadata.builder("pp", "tm_tag_point")
+        return tieredBuilder("pp", "tm_tag_point")
                              .addPartitionKeyColumn("tag_id", UTF8Type.instance)
                              .addClusteringColumn("timestamp", ReversedType.getInstance(TimestampType.instance))
                              .addStaticColumn("area_id", UTF8Type.instance)
@@ -308,7 +318,7 @@ public class TieringPolicyTest
     {
         // CLUSTERING ORDER BY (ts DESC) wraps the clustering column type in ReversedType(timestamp);
         // it is still supported -- newest-first is the dominant time-series clustering idiom.
-        TableMetadata table = TableMetadata.builder("ks", "tbl")
+        TableMetadata table = tieredBuilder("ks", "tbl")
                                             .addPartitionKeyColumn("tag", UTF8Type.instance)
                                             .addClusteringColumn("ts", ReversedType.getInstance(TimestampType.instance))
                                             .addRegularColumn("value", DoubleType.instance)
@@ -320,7 +330,7 @@ public class TieringPolicyTest
     public void testCompositePartitionKeyAccepted()
     {
         // A real production table: PRIMARY KEY ((asset_id, date, hour), ts).
-        TableMetadata table = TableMetadata.builder("ks", "tbl")
+        TableMetadata table = tieredBuilder("ks", "tbl")
                                             .addPartitionKeyColumn("asset_id", UTF8Type.instance)
                                             .addPartitionKeyColumn("date", UTF8Type.instance)
                                             .addPartitionKeyColumn("hour", Int32Type.instance)
@@ -343,7 +353,7 @@ public class TieringPolicyTest
         // Static columns are never chunked: a clustering-range delete leaves them alone (static cells
         // live outside the clustering range), so they survive tiering untouched and need no rules --
         // not even the non-frozen-collection one that applies to regular columns.
-        TableMetadata table = TableMetadata.builder("ks", "tbl")
+        TableMetadata table = tieredBuilder("ks", "tbl")
                                             .addPartitionKeyColumn("tag", UTF8Type.instance)
                                             .addClusteringColumn("ts", TimestampType.instance)
                                             .addStaticColumn("site_id", UTF8Type.instance)
@@ -358,7 +368,7 @@ public class TieringPolicyTest
     public void testFrozenCollectionRegularColumnAccepted()
     {
         // frozen<map<text,text>> is a single cell -- a chunk can carry it as opaque bytes.
-        TableMetadata table = TableMetadata.builder("ks", "tbl")
+        TableMetadata table = tieredBuilder("ks", "tbl")
                                             .addPartitionKeyColumn("tag", UTF8Type.instance)
                                             .addClusteringColumn("ts", TimestampType.instance)
                                             .addRegularColumn("attribute", MapType.getInstance(UTF8Type.instance,
@@ -373,7 +383,7 @@ public class TieringPolicyTest
         // The real table carries SAI on static asset_id/opc_id. A static column's index entries live at
         // Clustering.STATIC_CLUSTERING, outside every clustering range the re-encoder deletes, so they
         // are the only index entries that survive tiering.
-        TableMetadata table = TableMetadata.builder("ks", "tbl")
+        TableMetadata table = tieredBuilder("ks", "tbl")
                                             .addPartitionKeyColumn("tag", UTF8Type.instance)
                                             .addClusteringColumn("ts", TimestampType.instance)
                                             .addStaticColumn("asset_id", UTF8Type.instance)
@@ -390,7 +400,7 @@ public class TieringPolicyTest
     {
         // A pure event log: the timestamp axis is itself the data, and a chunk encodes it. Deliberately
         // accepted -- there is no reason to demand a value column.
-        TableMetadata table = TableMetadata.builder("ks", "tbl")
+        TableMetadata table = tieredBuilder("ks", "tbl")
                                             .addPartitionKeyColumn("tag", UTF8Type.instance)
                                             .addClusteringColumn("ts", TimestampType.instance)
                                             .addStaticColumn("site_id", UTF8Type.instance)
@@ -403,7 +413,7 @@ public class TieringPolicyTest
     @Test
     public void testNonTimestampClusteringRejected()
     {
-        TableMetadata table = TableMetadata.builder("ks", "tbl")
+        TableMetadata table = tieredBuilder("ks", "tbl")
                                             .addPartitionKeyColumn("tag", UTF8Type.instance)
                                             .addClusteringColumn("ts", Int32Type.instance)
                                             .addRegularColumn("value", DoubleType.instance)
@@ -417,7 +427,7 @@ public class TieringPolicyTest
     @Test
     public void testNoClusteringColumnRejected()
     {
-        TableMetadata table = TableMetadata.builder("ks", "tbl")
+        TableMetadata table = tieredBuilder("ks", "tbl")
                                             .addPartitionKeyColumn("tag", UTF8Type.instance)
                                             .addRegularColumn("value", DoubleType.instance)
                                             .build();
@@ -429,7 +439,7 @@ public class TieringPolicyTest
     @Test
     public void testTwoClusteringColumnsRejected()
     {
-        TableMetadata table = TableMetadata.builder("ks", "tbl")
+        TableMetadata table = tieredBuilder("ks", "tbl")
                                             .addPartitionKeyColumn("tag", UTF8Type.instance)
                                             .addClusteringColumn("ts", TimestampType.instance)
                                             .addClusteringColumn("seq", Int32Type.instance)
@@ -453,7 +463,7 @@ public class TieringPolicyTest
         for (TransactionalMode mode : TransactionalMode.values())
         {
             TableMetadata table = canonicalTable(null).unbuild()
-                                                       .params(TableParams.builder().transactionalMode(mode).build())
+                                                       .params(TableParams.builder().compaction(TSCS).transactionalMode(mode).build())
                                                        .build();
             String error = TieringPolicy.unsupportedSchemaError(table);
             if (mode == TransactionalMode.off)
@@ -467,12 +477,49 @@ public class TieringPolicyTest
         }
     }
 
+    /**
+     * The re-encoder deletes encoded rows with a range tombstone, and only a TSCS freeze reliably
+     * rewrites a window so that tombstone meets the rows it shadows. On node 41 (2026-09-24), sstables
+     * whose compaction never brought the two together held about 17M shadowed rows per node, and tiered
+     * reads timed out. So every other strategy is refused, whatever the table's shape.
+     */
+    @Test
+    public void testNonTimeSeriesCompactionRejected()
+    {
+        for (CompactionParams compaction : new CompactionParams[]{ CompactionParams.DEFAULT,
+                                                                    CompactionParams.stcs(ImmutableMap.of()),
+                                                                    CompactionParams.lcs(ImmutableMap.of()) })
+        {
+            TableMetadata table = canonicalTable(null).unbuild().compaction(compaction).build();
+            String error = TieringPolicy.unsupportedSchemaError(table);
+            assertNotNull(compaction.klass().getSimpleName() + " must be rejected", error);
+            assertTrue(error, error.contains(compaction.klass().getSimpleName()));
+            assertTrue(error, error.contains("TimeSeriesCompactionStrategy"));
+        }
+    }
+
+    /** The rule names the fix; it must win over the shape rules, which a strategy change cannot fix. */
+    @Test
+    public void testNonTimeSeriesCompactionIsReportedBeforeTheShapeRules()
+    {
+        TableMetadata table = TableMetadata.builder("ks", "tbl")
+                                           .addPartitionKeyColumn("tag", UTF8Type.instance)
+                                           .addClusteringColumn("ts", TimestampType.instance)
+                                           .addClusteringColumn("seq", Int32Type.instance)
+                                           .addRegularColumn("value", DoubleType.instance)
+                                           .compaction(CompactionParams.DEFAULT)
+                                           .build();
+        String error = TieringPolicy.unsupportedSchemaError(table);
+        assertNotNull(error);
+        assertTrue(error, error.contains("TimeSeriesCompactionStrategy"));
+    }
+
     @Test
     public void testCounterColumnRejected()
     {
         // 192 of the production keyspace's columns are counters. A counter cannot be deleted and
         // re-inserted, which is exactly what the re-encoder does -- so this is a correctness stop.
-        TableMetadata table = TableMetadata.builder("ks", "tbl")
+        TableMetadata table = tieredBuilder("ks", "tbl")
                                             .addPartitionKeyColumn("tag", UTF8Type.instance)
                                             .addClusteringColumn("ts", TimestampType.instance)
                                             .addRegularColumn("hits", CounterColumnType.instance)
@@ -486,7 +533,7 @@ public class TieringPolicyTest
     @Test
     public void testNonFrozenCollectionRegularColumnRejected()
     {
-        TableMetadata table = TableMetadata.builder("ks", "tbl")
+        TableMetadata table = tieredBuilder("ks", "tbl")
                                             .addPartitionKeyColumn("tag", UTF8Type.instance)
                                             .addClusteringColumn("ts", TimestampType.instance)
                                             .addRegularColumn("labels", MapType.getInstance(UTF8Type.instance,
@@ -501,7 +548,7 @@ public class TieringPolicyTest
     @Test
     public void testIndexOnRegularColumnRejected()
     {
-        TableMetadata table = TableMetadata.builder("ks", "tbl")
+        TableMetadata table = tieredBuilder("ks", "tbl")
                                             .addPartitionKeyColumn("tag", UTF8Type.instance)
                                             .addClusteringColumn("ts", TimestampType.instance)
                                             .addRegularColumn("value", DoubleType.instance)
@@ -520,7 +567,7 @@ public class TieringPolicyTest
         // partition key column -- and its entries are per row, so the re-encoder's range delete removes
         // them exactly as it does a regular column's. `SELECT ... WHERE ts = ?` would then silently
         // return only rows younger than hot_window.
-        TableMetadata table = TableMetadata.builder("ks", "tbl")
+        TableMetadata table = tieredBuilder("ks", "tbl")
                                             .addPartitionKeyColumn("tag", UTF8Type.instance)
                                             .addClusteringColumn("ts", TimestampType.instance)
                                             .addRegularColumn("value", DoubleType.instance)
@@ -537,7 +584,7 @@ public class TieringPolicyTest
     {
         // One component of a composite key: also per-row entries, so once every row of a partition has
         // been chunked that partition contributes nothing to the index.
-        TableMetadata table = TableMetadata.builder("ks", "tbl")
+        TableMetadata table = tieredBuilder("ks", "tbl")
                                             .addPartitionKeyColumn("asset_id", UTF8Type.instance)
                                             .addPartitionKeyColumn("date", UTF8Type.instance)
                                             .addClusteringColumn("ts", TimestampType.instance)
@@ -555,7 +602,7 @@ public class TieringPolicyTest
     {
         // An index whose target cannot be resolved to a column is rejected rather than assumed safe:
         // "cannot prove it is not on a regular column" must not read as "it is not".
-        TableMetadata table = TableMetadata.builder("ks", "tbl")
+        TableMetadata table = tieredBuilder("ks", "tbl")
                                             .addPartitionKeyColumn("tag", UTF8Type.instance)
                                             .addClusteringColumn("ts", TimestampType.instance)
                                             .addRegularColumn("value", DoubleType.instance)
@@ -573,7 +620,7 @@ public class TieringPolicyTest
         // max_row_writetime/payload -- a base key column of the same name could not be mirrored.
         for (String reserved : ChunkTables.RESERVED_COLUMN_NAMES)
         {
-            TableMetadata table = TableMetadata.builder("ks", "tbl")
+            TableMetadata table = tieredBuilder("ks", "tbl")
                                                 .addPartitionKeyColumn(reserved, UTF8Type.instance)
                                                 .addClusteringColumn("ts", TimestampType.instance)
                                                 .addRegularColumn("value", DoubleType.instance)

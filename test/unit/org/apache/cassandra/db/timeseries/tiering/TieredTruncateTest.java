@@ -106,7 +106,7 @@ public class TieredTruncateTest extends CQLTester
         // The cycle reads a window's rows, then the table is truncated, then the cycle would write
         // the chunk it built from the rows it read -- after the chunk table was emptied, so the
         // truncated data would come back as a chunk. The cycle must notice and stop.
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         new TieredStorageService().runOnce(KEYSPACE, currentTable(), 5 * HOUR); // creates the shadow tables
         execute("INSERT INTO %s (tag, ts, value) VALUES ('t1', ?, 1.0) USING TIMESTAMP 101", new Date(10 * 60_000L));
@@ -136,7 +136,7 @@ public class TieredTruncateTest extends CQLTester
 
     private void loadTwoWindowsAndReencode() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         execute("INSERT INTO %s (tag, ts, value) VALUES ('t1', ?, 1.0) USING TIMESTAMP 101", new Date(10 * 60_000L));
         execute("INSERT INTO %s (tag, ts, value) VALUES ('t1', ?, 2.0) USING TIMESTAMP 102", new Date(20 * 60_000L));

@@ -71,7 +71,7 @@ public class TransparentReadTest extends CQLTester
 
     private void loadTwoWindowsAndReencode() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         // Window [0,1h): 3 samples; window [1h,2h): 2 samples. Written with explicit writetimes.
         execute("INSERT INTO %s (tag, ts, value) VALUES ('t1', ?, 1.0) USING TIMESTAMP 101", new Date(10 * 60_000L));
@@ -255,7 +255,7 @@ public class TransparentReadTest extends CQLTester
         // Also the only coverage of the COORDINATOR hook (DigestResolver.getData); every other test
         // here goes through the local path.
         requireNetwork();
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         for (int i = 0; i < 5; i++)
             execute("INSERT INTO %s (tag, ts, value) VALUES ('t1', ?, ?) USING TIMESTAMP ?",
@@ -277,7 +277,7 @@ public class TransparentReadTest extends CQLTester
     {
         // Regression: the chunk lookup must use the base table's actual pk column name (the docker
         // canonical schema uses tag_id, the tests above use tag - hardcoding either breaks the other).
-        createTable("CREATE TABLE %s (tag_id text, ts timestamp, value double, PRIMARY KEY (tag_id, ts))");
+        createTable("CREATE TABLE %s (tag_id text, ts timestamp, value double, PRIMARY KEY (tag_id, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         execute("INSERT INTO %s (tag_id, ts, value) VALUES ('t1', ?, 1.0) USING TIMESTAMP 101", new Date(10 * 60_000L));
         execute("INSERT INTO %s (tag_id, ts, value) VALUES ('t1', ?, 2.0) USING TIMESTAMP 102", new Date(20 * 60_000L));
@@ -289,7 +289,7 @@ public class TransparentReadTest extends CQLTester
     @Test
     public void nonTieredTableUnaffected() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         execute("INSERT INTO %s (tag, ts, value) VALUES ('t1', ?, 1.0)", new Date(1000));
         UntypedResultSet rows = execute("SELECT value FROM %s WHERE tag = 't1'");
         assertEquals(1, rows.size());
@@ -312,7 +312,7 @@ public class TransparentReadTest extends CQLTester
     @Test
     public void raisingHotWindowStillServesRowsEncodedUnderTheOldOne() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"1h\",\"chunk_window\":\"1h\"}");
 
         // A closed, hour-aligned window ~3h ago: unambiguously cold under hot_window=1h whenever the
@@ -361,7 +361,7 @@ public class TransparentReadTest extends CQLTester
     @Test
     public void shrinkingChunkWindowStillFindsWiderChunks() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"48h\",\"chunk_window\":\"24h\"}");
         execute("INSERT INTO %s (tag, ts, value) VALUES ('t1', ?, 1.0) USING TIMESTAMP 101", new Date(HOUR));
         execute("INSERT INTO %s (tag, ts, value) VALUES ('t1', ?, 2.0) USING TIMESTAMP 102", new Date(20 * HOUR));
@@ -386,7 +386,7 @@ public class TransparentReadTest extends CQLTester
     @Test
     public void queryAboveChunkCoverageDoesNotReadChunksAtAll() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"1h\",\"chunk_window\":\"1h\"}");
 
         long now = System.currentTimeMillis();
@@ -456,7 +456,7 @@ public class TransparentReadTest extends CQLTester
     @Test
     public void projectionIsQueriedColumnsBecauseEverySelectFetchesThemAll() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, quality int, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, quality int, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         TableMetadata metadata = currentTableMetadata();
         ColumnMetadata value = metadata.getColumn(ByteBufferUtil.bytes("value"));
 
@@ -476,7 +476,7 @@ public class TransparentReadTest extends CQLTester
      */
     private void loadSixWindowsAndReencode() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         long writetime = 100L;
         for (int window = 0; window < 6; window++)
@@ -632,7 +632,7 @@ public class TransparentReadTest extends CQLTester
     public void lazyReadsMatchANonTieredControlTable() throws Throwable
     {
         String control = KEYSPACE + "." + createTable(
-            "CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+            "CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         loadSixWindowsAndReencode();                      // creates the tiered table; %s targets it
 
         // The exact inserts loadSixWindowsAndReencode made, replayed against the control table.
@@ -716,7 +716,7 @@ public class TransparentReadTest extends CQLTester
     @Test
     public void staticOnlyProbeDecodesAtMostOneWindow() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, meta text static, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, meta text static, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         execute("INSERT INTO %s (tag, meta) VALUES ('t1', 'pump-4') USING TIMESTAMP 99");
         long writetime = 100L;
@@ -829,7 +829,7 @@ public class TransparentReadTest extends CQLTester
     public void chunkStatementsAreSharedAcrossPartitionsAndQueries() throws Throwable
     {
         requireNetwork();
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         long writetime = 100L;
         for (String tag : new String[]{ "t1", "t2" })

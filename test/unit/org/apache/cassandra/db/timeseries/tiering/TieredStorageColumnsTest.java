@@ -88,7 +88,7 @@ public class TieredStorageColumnsTest extends CQLTester
                                    "attribute frozen<map<text,text>>, error_code int, latency int, quality int, " +
                                    "value text, value_boolean boolean, value_numeric double, " +
                                    "PRIMARY KEY (tag_id, timestamp)) " +
-                                   "WITH CLUSTERING ORDER BY (timestamp DESC) AND default_time_to_live = 5356800");
+                                   "WITH compaction = {'class': 'TimeSeriesCompactionStrategy'} AND CLUSTERING ORDER BY (timestamp DESC) AND default_time_to_live = 5356800");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         return table;
     }
@@ -282,7 +282,7 @@ public class TieredStorageColumnsTest extends CQLTester
         // columns the update did not mention keep the values already in the chunk. Replacing the
         // whole chunked row with the (mostly-null) base row would blank them.
         createTable("CREATE TABLE %s (tag text, ts timestamp, value double, quality int, note text, " +
-                    "PRIMARY KEY (tag, ts))");
+                    "PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         execute("INSERT INTO %s (tag, ts, value, quality, note) VALUES ('t', ?, 1.5, 192, 'ok') " +
@@ -335,7 +335,7 @@ public class TieredStorageColumnsTest extends CQLTester
     {
         // The other half of the merge rule: a late row at a timestamp the chunk does NOT hold is a
         // new row, and the columns it leaves out are null (there is nothing to inherit).
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, quality int, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, quality int, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         execute("INSERT INTO %s (tag, ts, value, quality) VALUES ('t', ?, 1.5, 192) USING TIMESTAMP 100",
@@ -365,7 +365,7 @@ public class TieredStorageColumnsTest extends CQLTester
 
     private void chunkOneRow() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, quality int, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, quality int, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         execute("INSERT INTO %s (tag, ts, value, quality) VALUES ('t', ?, 1.5, 192) USING TIMESTAMP 100",
                 new Date(0L));
@@ -906,7 +906,7 @@ public class TieredStorageColumnsTest extends CQLTester
     private String loadRecentWindowForDeletion() throws Throwable
     {
         String table = createTable("CREATE TABLE %s (tag text, ts timestamp, value double, quality int, " +
-                                   "PRIMARY KEY (tag, ts))");
+                                   "PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         return table;
     }
@@ -1005,7 +1005,7 @@ public class TieredStorageColumnsTest extends CQLTester
         // written at exactly that microsecond TIES with the reconstruction, and Cassandra breaks cell
         // ties by comparing the serialized values (larger wins). This test pins that documented
         // hazard in both directions -- it is the price of (A), not a desirable behaviour.
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         execute("INSERT INTO %s (tag, ts, value) VALUES ('bigger', ?, 1.0) USING TIMESTAMP 100", new Date(0L));
         execute("INSERT INTO %s (tag, ts, value) VALUES ('smaller', ?, 1.0) USING TIMESTAMP 100", new Date(0L));
@@ -1044,7 +1044,7 @@ public class TieredStorageColumnsTest extends CQLTester
     {
         // The rule is about COLD data. Ordinary deletes of current data must be untouched -- use real
         // wall-clock clusterings so the rows are unambiguously inside hot_window.
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, quality int, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, quality int, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         long recent = System.currentTimeMillis() - 60_000L;
 
@@ -1101,7 +1101,7 @@ public class TieredStorageColumnsTest extends CQLTester
         // a present-but-empty int cell can reach the encoder. Before the width check it hit
         // ByteBuffer.getInt() on a 0-byte array, the per-tag handler logged the BufferUnderflow and
         // skipped -- identically every cycle, so that partition never tiered again.
-        createTable("CREATE TABLE %s (tag text, ts timestamp, quality int, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, quality int, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         execute("INSERT INTO %s (tag, ts, quality, value) VALUES ('t', ?, 192, 1.0) USING TIMESTAMP 100",
@@ -1135,7 +1135,7 @@ public class TieredStorageColumnsTest extends CQLTester
         // One row whose three columns were written at three different timestamps. Taking any single
         // column's writetime (say the first column's, 100) would tombstone at 100 and leave the
         // cells written at 200/300 alive -- a half-deleted row that is re-encoded forever.
-        createTable("CREATE TABLE %s (tag text, ts timestamp, a double, b int, c text, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, a double, b int, c text, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         execute("INSERT INTO %s (tag, ts, a) VALUES ('t', ?, 1.0) USING TIMESTAMP 100", new Date(0L));
@@ -1165,7 +1165,7 @@ public class TieredStorageColumnsTest extends CQLTester
     public void compositePartitionKeyRoundTripsEveryColumn() throws Throwable
     {
         createTable("CREATE TABLE %s (asset_id text, date text, hour int, ts timestamp, " +
-                    "value double, quality int, note text, flag boolean, PRIMARY KEY ((asset_id, date, hour), ts))");
+                    "value double, quality int, note text, flag boolean, PRIMARY KEY ((asset_id, date, hour), ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         execute("INSERT INTO %s (asset_id, date, hour, ts, value, quality, note, flag) " +
