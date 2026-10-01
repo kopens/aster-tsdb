@@ -40,7 +40,7 @@ public class AlterTableExtensionsTest extends CQLTester
     @Test
     public void testExtensionsRoundTripAndTieringPolicyParses() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts));");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'};");
 
         String json = "{\"hot_window\":\"7d\", \"chunk_window\":\"1h\"}";
         ByteBuffer expected = ByteBufferUtil.bytes(json);
@@ -63,7 +63,7 @@ public class AlterTableExtensionsTest extends CQLTester
     {
         // Writing a tiering policy as a hex blob by hand is miserable; a plain string is accepted
         // and stored as its UTF-8 bytes, so one CQL statement is enough.
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts));");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'};");
 
         String json = "{\"hot_window\":\"1d\",\"chunk_window\":\"6h\",\"cold_window\":\"365d\"}";
         alterTable("ALTER TABLE %s WITH extensions = {'" + TieringPolicy.EXTENSION_KEY + "': '" + json + "'};");
@@ -81,7 +81,7 @@ public class AlterTableExtensionsTest extends CQLTester
     @Test
     public void testMalformedHexExtensionValueRejected() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts));");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'};");
 
         // A leading 0x still selects hex decoding, so a broken hex literal must fail loudly rather
         // than being silently stored as the text "0xnothex".

@@ -850,8 +850,8 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
     /**
      * The oldest closed window whose single sstable fails containment, that the no-progress guard has
      * not parked, and that this round can start. Such an sstable is either legacy (pre-T3 data or a
-     * strategy switch) or one TSCS wrote unsplit on purpose - a partition too large to window-route, or
-     * a window folded onto another writer at the writer cap. These classify FREEZING but cannot be fixed
+     * strategy switch) or one TSCS wrote unsplit on purpose - a partition over the flush's routing
+     * budget, or a window folded onto another writer at the writer cap. These classify FREEZING but cannot be fixed
      * by freezing (merging one sstable into one sstable never restores containment) - they need
      * {@link SplitRefreezeCompactionTask}. Side effect: refreshes {@link #splitBacklog}, blocked windows
      * included. Filtering, classification and backlog discipline are exactly as in
@@ -892,8 +892,8 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
      * round and the rewrite runs forever. Two real instances:
      * <ul>
      *   <li>a split whose output still spans window boundaries (a row whose timestamps straddle a
-     *       boundary, before element-granularity routing; or a partition too large to route, which is
-     *       written unsplit on purpose);</li>
+     *       boundary, before element-granularity routing; or, before split-refreeze re-read
+     *       over-budget partitions, a partition too large to route, written unsplit);</li>
      *   <li>a freeze that emits more than one sstable because {@code CompactionAwareWriter} switched
      *       location at a JBOD disk boundary, leaving the window at two sstables (T2-I3).</li>
      * </ul>
@@ -904,9 +904,9 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
      * produced ({@link #NO_PROGRESS_STRIKES} times).
      * <p>
      * <b>Chains, not single rewrites.</b> "The rewrite changed nothing" is too narrow a test, because
-     * the two paths can undo <em>each other</em> while each one changes the window. A closed window
-     * whose single spanning sstable holds an un-routable (over-budget) partition <em>and</em> ordinary
-     * data alternates forever: the split writes the overflowing partition unsplit into one sstable and
+     * the two paths can undo <em>each other</em> while each one changes the window. Before
+     * split-refreeze re-read over-budget partitions, a closed window whose single spanning sstable held
+     * such a partition <em>and</em> ordinary data alternated forever: the split writes the overflowing partition unsplit into one sstable and
      * the ordinary data into another, so the window goes 1 sstable -> 2 and classifies FREEZING; the
      * freeze merges those 2 back into 1 still-spanning sstable, so it classifies FREEZING again and is
      * re-split. Both rewrites change the shape, so a per-rewrite test resets on every one of them and
@@ -975,9 +975,7 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
                     "rewrites had already produced ({} sstable(s), spanning windows {}). Not re-selecting it " +
                     "for freeze or split until something outside compaction changes the window - it will not " +
                     "freeze, so downstream consumers of the frozen-window event will not see it. Investigate: " +
-                    "for a window alternating between one spanning sstable and two, check for a partition too " +
-                    "large to window-route sharing an sstable with ordinary data; for a window stuck at several " +
-                    "sstables on JBOD, run nodetool relocatesstables.",
+                    "for a window stuck at several sstables on JBOD, run nodetool relocatesstables.",
                     windowStartMillis, cfs.getKeyspaceName(), cfs.getTableName(), what, progress.strikes,
                     after.size(), describeSpans(after));
     }

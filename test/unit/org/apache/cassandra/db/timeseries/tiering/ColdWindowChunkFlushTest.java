@@ -136,7 +136,7 @@ public class ColdWindowChunkFlushTest extends CQLTester
         assertEquals(0, raw("SELECT * FROM " + qualified(flushed) + " WHERE tag = 't1'").size());
 
         // The same data through the re-encoder: a plain table, same rows, same writetimes, one cycle.
-        String reencoded = createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        String reencoded = createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         insertTwoColdWindows(reencoded);
         new TieredStorageService().runOnce(KEYSPACE, reencoded, System.currentTimeMillis());

@@ -76,7 +76,7 @@ public class TieringSchemaSupportTest extends CQLTester
     @Test
     public void materializedViewOverTheTableIsRejected() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         assertNull(TieringPolicy.unsupportedSchemaError(metadata()));
 
         // createViewAsync, not createView: the schema change itself is what this asserts on, and
@@ -93,10 +93,30 @@ public class TieringSchemaSupportTest extends CQLTester
         assertTrue(error, error.contains("materialized view"));
     }
 
+    /**
+     * Through real DDL: a tiered table moved off TSCS is refused on the next check, and moving it back
+     * makes it tierable again. The check is re-evaluated every cycle, so an ALTER in either direction
+     * takes effect without the policy being touched.
+     */
+    @Test
+    public void compactionOtherThanTimeSeriesIsRejectedAndRecoverable() throws Throwable
+    {
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
+        assertNull(TieringPolicy.unsupportedSchemaError(metadata()));
+
+        alterTable("ALTER TABLE %s WITH compaction = {'class': 'UnifiedCompactionStrategy'}");
+        String error = TieringPolicy.unsupportedSchemaError(metadata());
+        assertNotNull(error);
+        assertTrue(error, error.contains("UnifiedCompactionStrategy"));
+
+        alterTable("ALTER TABLE %s WITH compaction = {'class': 'TimeSeriesCompactionStrategy', 'window_size': '1d'}");
+        assertNull(TieringPolicy.unsupportedSchemaError(metadata()));
+    }
+
     @Test
     public void secondaryIndexOnARegularColumnIsRejected() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         String index = createIndex("CREATE CUSTOM INDEX ON %s(value) USING 'sai'");
 
         String error = TieringPolicy.unsupportedSchemaError(metadata());
@@ -110,7 +130,7 @@ public class TieringSchemaSupportTest extends CQLTester
     {
         // Proves the premise as well as the rule: CQL really does allow indexing the timestamp
         // clustering column, and those entries are per row, so the range delete takes them with it.
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         String index = createIndex("CREATE CUSTOM INDEX ON %s(ts) USING 'sai'");
 
         String error = TieringPolicy.unsupportedSchemaError(metadata());
@@ -126,7 +146,7 @@ public class TieringSchemaSupportTest extends CQLTester
         // and never deleted (their index entries sit at Clustering.STATIC_CLUSTERING, outside every
         // clustering range the re-encoder deletes), so the index stays complete.
         createTable("CREATE TABLE %s (tag text, ts timestamp, asset_id text static, opc_id text static, " +
-                    "value double, PRIMARY KEY (tag, ts))");
+                    "value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         createIndex("CREATE CUSTOM INDEX ON %s(asset_id) USING 'sai'");
         createIndex("CREATE CUSTOM INDEX ON %s(opc_id) USING 'sai'");
 
@@ -142,7 +162,7 @@ public class TieringSchemaSupportTest extends CQLTester
     @Test
     public void dropOfTheBaseTableIsRefusedWhileShadowTablesExist() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         ChunkTables.ensureChunkTable(metadata());
 
         String base = KEYSPACE + '.' + currentTable();
@@ -178,7 +198,7 @@ public class TieringSchemaSupportTest extends CQLTester
     @Test
     public void dropOfTheChunkTableIsRefusedWhileThePolicyIsAttached() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         ChunkTables.ensureChunkTable(metadata());
         alterTable("ALTER TABLE %s WITH extensions = " +
                    "{'" + TieringPolicy.EXTENSION_KEY + "': '{\"hot_window\":\"12h\"}'};");
@@ -200,7 +220,7 @@ public class TieringSchemaSupportTest extends CQLTester
     @Test
     public void anUnrelatedTableReusingTheChunkSuffixDoesNotBlockTheDrop() throws Throwable
     {
-        String table = createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        String table = createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         schemaChange("CREATE TABLE " + KEYSPACE + '.' + table + "__chunks (k text PRIMARY KEY, v int)");
 
         schemaChange("DROP TABLE " + KEYSPACE + '.' + table);
@@ -226,7 +246,7 @@ public class TieringSchemaSupportTest extends CQLTester
         try
         {
             // 1. A tierable table that someone then makes transactional.
-            createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+            createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
             assertNull(TieringPolicy.unsupportedSchemaError(metadata()));
             alterTable("ALTER TABLE %s WITH transactional_mode = 'full'");
 
@@ -240,7 +260,7 @@ public class TieringSchemaSupportTest extends CQLTester
             // routes SERIAL reads through Accord, so it is the easiest one to install a policy on by
             // mistake.
             createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) " +
-                        "WITH transactional_mode = 'mixed_reads'");
+                        "WITH compaction = {'class': 'TimeSeriesCompactionStrategy'} AND transactional_mode = 'mixed_reads'");
             error = TieringPolicy.unsupportedSchemaError(metadata());
             assertNotNull("installing a policy on an already-transactional table must be refused", error);
             assertTrue(error, error.contains("mixed_reads"));
@@ -254,7 +274,7 @@ public class TieringSchemaSupportTest extends CQLTester
     @Test
     public void counterTableIsRejected() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, hits counter, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, hits counter, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
 
         String error = TieringPolicy.unsupportedSchemaError(metadata());
         assertNotNull(error);
@@ -265,13 +285,13 @@ public class TieringSchemaSupportTest extends CQLTester
     @Test
     public void nonFrozenCollectionIsRejectedButAFrozenOneIsNot() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, labels map<text,text>, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, labels map<text,text>, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         String error = TieringPolicy.unsupportedSchemaError(metadata());
         assertNotNull(error);
         assertTrue(error, error.contains("labels"));
 
         createTable("CREATE TABLE %s (tag text, ts timestamp, attribute frozen<map<text,text>>, " +
-                    "PRIMARY KEY (tag, ts))");
+                    "PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         assertNull(TieringPolicy.unsupportedSchemaError(metadata()));
     }
 
@@ -287,7 +307,7 @@ public class TieringSchemaSupportTest extends CQLTester
                     "attribute frozen<map<text,text>>, error_code int, latency int, quality int, " +
                     "value text, value_boolean boolean, value_numeric double, " +
                     "PRIMARY KEY (tag_id, timestamp)) " +
-                    "WITH CLUSTERING ORDER BY (timestamp DESC) AND default_time_to_live = 5356800");
+                    "WITH compaction = {'class': 'TimeSeriesCompactionStrategy'} AND CLUSTERING ORDER BY (timestamp DESC) AND default_time_to_live = 5356800");
 
         assertNull(TieringPolicy.unsupportedSchemaError(metadata()));
     }
@@ -305,7 +325,7 @@ public class TieringSchemaSupportTest extends CQLTester
     @Test
     public void chunkTableDdlSurvivesTheClusterMetadataLogSerializer() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         assertChunkTableEntryIsReadable(metadata());
     }
 
@@ -313,7 +333,7 @@ public class TieringSchemaSupportTest extends CQLTester
     public void compositeKeyChunkTableDdlSurvivesTheClusterMetadataLogSerializer() throws Throwable
     {
         createTable("CREATE TABLE %s (asset_id text, date text, hour int, ts timestamp, value double, " +
-                    "PRIMARY KEY ((asset_id, date, hour), ts))");
+                    "PRIMARY KEY ((asset_id, date, hour), ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         assertChunkTableEntryIsReadable(metadata());
     }
 
@@ -324,7 +344,7 @@ public class TieringSchemaSupportTest extends CQLTester
         // mixed-case key column, and a key column that is a CQL reserved word.
         createTable(KEYSPACE,
                     "CREATE TABLE %s (\"Asset\" text, \"table\" int, ts timestamp, value double, " +
-                    "PRIMARY KEY ((\"Asset\", \"table\"), ts))",
+                    "PRIMARY KEY ((\"Asset\", \"table\"), ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}",
                     "\"MixedCase\"");
         TableMetadata base = Schema.instance.getTableMetadata(KEYSPACE, "MixedCase");
         assertNotNull(base);
@@ -358,7 +378,7 @@ public class TieringSchemaSupportTest extends CQLTester
     public void ensureChunkTableCommitsAReadableClusterMetadataLogEntry() throws Throwable
     {
         createTable("CREATE TABLE %s (asset_id text, date text, hour int, ts timestamp, value double, " +
-                    "PRIMARY KEY ((asset_id, date, hour), ts))");
+                    "PRIMARY KEY ((asset_id, date, hour), ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         ChunkTables.ensureChunkTable(metadata());
 
         ImmutableList<Entry> entries = ClusterMetadataService.instance()
@@ -379,7 +399,7 @@ public class TieringSchemaSupportTest extends CQLTester
     {
         createTable("CREATE TABLE %s (asset_id text, date text, hour int, ts timestamp, value double, " +
                     "PRIMARY KEY ((asset_id, date, hour), ts)) " +
-                    "WITH CLUSTERING ORDER BY (ts DESC) AND default_time_to_live = 604800");
+                    "WITH compaction = {'class': 'TimeSeriesCompactionStrategy'} AND CLUSTERING ORDER BY (ts DESC) AND default_time_to_live = 604800");
 
         ChunkTables.ensureChunkTable(metadata());
         TableMetadata chunk = Schema.instance.getTableMetadata(KEYSPACE, ChunkTables.chunkTableName(currentTable()));
@@ -457,7 +477,7 @@ public class TieringSchemaSupportTest extends CQLTester
     public void compositePartitionKeyIsMirroredByTheChunkTable() throws Throwable
     {
         createTable("CREATE TABLE %s (asset_id text, date text, hour int, ts timestamp, value double, " +
-                    "PRIMARY KEY ((asset_id, date, hour), ts))");
+                    "PRIMARY KEY ((asset_id, date, hour), ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         assertNull(TieringPolicy.unsupportedSchemaError(metadata()));
 
         TableMetadata chunk = ChunkTables.chunkTableMetadata(metadata());
@@ -477,7 +497,7 @@ public class TieringSchemaSupportTest extends CQLTester
     public void compositePartitionKeyRoundTripsThroughTheReEncoder() throws Throwable
     {
         createTable("CREATE TABLE %s (asset_id text, date text, hour int, ts timestamp, value double, " +
-                    "PRIMARY KEY ((asset_id, date, hour), ts))");
+                    "PRIMARY KEY ((asset_id, date, hour), ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         // Two distinct partitions differing only in the 2nd/3rd key column: they must not be conflated
@@ -531,7 +551,7 @@ public class TieringSchemaSupportTest extends CQLTester
         // columns, so this also proves the many-column delete does not reach the statics.
         createTable("CREATE TABLE %s (tag text, ts timestamp, site_id text static, unit text static, " +
                     "installed_at timestamp static, channels int static, " +
-                    "value double, quality int, note text, PRIMARY KEY (tag, ts))");
+                    "value double, quality int, note text, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         execute("INSERT INTO %s (tag, site_id, unit, installed_at, channels) " +
@@ -576,7 +596,7 @@ public class TieringSchemaSupportTest extends CQLTester
         // so tiering is on but nothing is ever compressed. Warn, do not reject -- a per-row USING TTL
         // can differ from the table default.
         createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) " +
-                    "WITH default_time_to_live = 3600");
+                    "WITH compaction = {'class': 'TimeSeriesCompactionStrategy'} AND default_time_to_live = 3600");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         Logger serviceLogger = (Logger) LoggerFactory.getLogger(TieredStorageService.class);
@@ -606,7 +626,7 @@ public class TieringSchemaSupportTest extends CQLTester
     public void ttlLongerThanHotWindowIsNotWarned() throws Throwable
     {
         createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) " +
-                    "WITH default_time_to_live = 864000");
+                    "WITH compaction = {'class': 'TimeSeriesCompactionStrategy'} AND default_time_to_live = 864000");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         Logger serviceLogger = (Logger) LoggerFactory.getLogger(TieredStorageService.class);

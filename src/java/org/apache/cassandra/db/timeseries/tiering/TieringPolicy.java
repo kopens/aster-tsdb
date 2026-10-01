@@ -31,6 +31,7 @@ import com.google.common.collect.ImmutableSet;
 
 import org.apache.cassandra.cql3.statements.schema.IndexTarget;
 import org.apache.cassandra.db.ConsistencyLevel;
+import org.apache.cassandra.db.compaction.TimeSeriesCompactionStrategy;
 import org.apache.cassandra.db.marshal.TimestampType;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.index.TargetParser;
@@ -278,6 +279,13 @@ public final class TieringPolicy
      *
      * <p><b>Rejected</b>, each for a reason that would otherwise cost data or answers silently:
      * <ul>
+     *     <li>a compaction strategy other than <b>{@link TimeSeriesCompactionStrategy}</b> -- the
+     *     re-encoder removes encoded rows with a range tombstone, and only TSCS's freeze rewrites a
+     *     window so that tombstone meets the rows it shadows ({@code tiering_aware_freeze} freezes a
+     *     window as soon as its chunks cover it). Under any other strategy the shadowed rows stay on
+     *     disk, and every read of the tiered range reads and discards them, until a compaction happens
+     *     to put both in one sstable -- the state that timed out tiered reads on a production node on
+     *     2026-09-24.</li>
      *     <li>a <b>counter</b> column anywhere in the table -- the re-encoder deletes rows and
      *     re-inserts their content, which a counter cannot survive (a counter delete is permanent;
      *     the column can never be written again). This is a correctness stop, not a limitation.</li>
@@ -324,6 +332,17 @@ public final class TieringPolicy
             return format("'%s' is a materialized view: put the timeseries_tiering policy on the base " +
                            "table instead. A view's rows are derived from its base table, so there is nothing " +
                            "for the re-encoder to own", metadata.name);
+
+        // Checked before the shape rules: it is the one rejection an operator fixes with a single
+        // ALTER, whatever else the table looks like. isAssignableFrom, not equals, so a TSCS subclass
+        // (which inherits the freeze) is accepted.
+        if (!TimeSeriesCompactionStrategy.class.isAssignableFrom(metadata.params.compaction.klass()))
+            return format("compaction is %s: tiering needs TimeSeriesCompactionStrategy, whose freeze rewrites " +
+                           "an encoded window so the re-encoder's range delete meets the rows it shadows. Under any " +
+                           "other strategy those rows stay on disk and every read of the tiered range reads and " +
+                           "discards them. Set compaction = {'class': 'TimeSeriesCompactionStrategy', ...} to make " +
+                           "this table tierable",
+                           metadata.params.compaction.klass().getSimpleName());
 
         // Accord's read path is the one read path that does not merge chunks back in: TxnNamedRead
         // executes the ReadCommand locally, with none of TransparentReads' wrapping, so a transactional

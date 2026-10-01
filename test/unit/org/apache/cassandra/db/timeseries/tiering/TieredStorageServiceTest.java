@@ -100,7 +100,7 @@ public class TieredStorageServiceTest extends CQLTester
     @Test
     public void encodeClosedWindowsAndDeleteRows() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         String[] tags = { "a", "b", "c" };
@@ -154,7 +154,7 @@ public class TieredStorageServiceTest extends CQLTester
         // exercise this: an empty window anywhere would route through nextClosedWindowStart's own
         // cutoff check and mask the bug, which is exactly how the round-1 test suite missed it (every
         // hot marker row there sat past an empty window).
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         long now = 5 * HOUR;
@@ -192,7 +192,7 @@ public class TieredStorageServiceTest extends CQLTester
     @Test
     public void roundtripThroughChunks() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         long[] tsValues = { 0L, 600_000L, 1_200_000L, 1_800_000L, 2_400_000L };
@@ -218,7 +218,7 @@ public class TieredStorageServiceTest extends CQLTester
     @Test
     public void deleteTimestampPreservesLateRows() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         for (int i = 0; i < 4; i++)
@@ -273,7 +273,7 @@ public class TieredStorageServiceTest extends CQLTester
     @Test
     public void idempotentWhenInterrupted() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         TableMetadata base = getCurrentColumnFamilyStore().metadata();
@@ -330,7 +330,7 @@ public class TieredStorageServiceTest extends CQLTester
     @Test
     public void runningTheSameCycleTwiceIsANoOp() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, extra int, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, extra int, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         for (int i = 0; i < 4; i++)
@@ -363,7 +363,7 @@ public class TieredStorageServiceTest extends CQLTester
     @Test
     public void coldWindowExpiry() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"1h\",\"chunk_window\":\"1h\",\"cold_window\":\"2h\"}");
 
         TableMetadata base = getCurrentColumnFamilyStore().metadata();
@@ -388,7 +388,7 @@ public class TieredStorageServiceTest extends CQLTester
     @Test
     public void deadTagColdChunksStillExpire() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"1h\",\"chunk_window\":\"1h\",\"cold_window\":\"2h\"}");
 
         TableMetadata base = getCurrentColumnFamilyStore().metadata();
@@ -410,7 +410,7 @@ public class TieredStorageServiceTest extends CQLTester
     {
         // A second clustering column: no time axis a chunk could encode. See TieringPolicyTest /
         // TieringSchemaSupportTest for the whole accept/reject matrix.
-        createTable("CREATE TABLE %s (tag text, ts timestamp, seq int, value double, PRIMARY KEY (tag, ts, seq))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, seq int, value double, PRIMARY KEY (tag, ts, seq)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         assertSkippedWithError("clustering column");
@@ -450,7 +450,7 @@ public class TieredStorageServiceTest extends CQLTester
         // The columnar format is the only chunk format written, so the chunk row's `codec` column is
         // a fixed 4 for every pattern -- constant series and quantized walks alike. (This replaces
         // the per-window gorilla/chimp bake-off that used to make this column vary.)
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         int n = 100;
@@ -485,7 +485,7 @@ public class TieredStorageServiceTest extends CQLTester
         // A row whose every regular column is null still EXISTS, and the range delete would take it,
         // so it must go into the chunk (as a timestamp with all columns null) rather than be skipped.
         // Skipping it -- what the single-column re-encoder did -- silently destroyed the row.
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         insertRow("n", 0L, 7.5, 50);
@@ -529,7 +529,7 @@ public class TieredStorageServiceTest extends CQLTester
         // it. There is then no timestamp the range delete could use that is provably not newer than
         // some row it would destroy, so the cycle must leave the window entirely alone -- not encode
         // it and delete at a guessed timestamp.
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         execute("INSERT INTO %s (tag, ts) VALUES (?, ?) USING TIMESTAMP 10", "n", new Date(0L));
@@ -547,7 +547,7 @@ public class TieredStorageServiceTest extends CQLTester
     @Test
     public void corruptChunkOnOneTagDoesNotAbortOtherTags() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         TableMetadata base = getCurrentColumnFamilyStore().metadata();
@@ -580,7 +580,7 @@ public class TieredStorageServiceTest extends CQLTester
         // nodetool retier is a one-shot operator instruction, not a background tick: a cycle that
         // could not finish some tags did not do what it was asked, so it must exit non-zero rather
         // than print nothing and return 0.
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         TableMetadata base = getCurrentColumnFamilyStore().metadata();
@@ -620,7 +620,7 @@ public class TieredStorageServiceTest extends CQLTester
         // same seam) must be detected while paging -- never fully materialized -- and abort that tag's walk
         // with an actionable ERROR, instead of blowing up in encode and re-reading the giant window
         // every cycle forever. Other tags in the same run must still encode.
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         // "big": 5 rows in one closed window -- over the injected 3-sample cap.
@@ -677,7 +677,7 @@ public class TieredStorageServiceTest extends CQLTester
         // empty window [1h,2h) below forces the walk through that jump (nextClosedWindowStart): it
         // must land on the OLDEST remaining row's window (2h), not the newest's (3h).
         createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) " +
-                    "WITH CLUSTERING ORDER BY (ts DESC)");
+                    "WITH compaction = {'class': 'TimeSeriesCompactionStrategy'} AND CLUSTERING ORDER BY (ts DESC)");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         long now = 6 * HOUR; // cutoff = windowStartFor(6h - 2h) = 4h
@@ -705,7 +705,7 @@ public class TieredStorageServiceTest extends CQLTester
     @Test
     public void virtualTableShowsPolicyAndStats() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         // retier() (unlike runOnce() in the other tests here) drives the cycle off real wall-clock
@@ -742,9 +742,9 @@ public class TieredStorageServiceTest extends CQLTester
         // preRunHookForTesting seam (a healthy single-node cluster cannot provoke the real failure).
         // The test is order-independent: without the per-table catch the injected throwable escapes
         // sweep() and fails this test no matter which table the schema walk visits first.
-        String badTable = createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        String badTable = createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
-        String goodTable = createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        String goodTable = createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         TieredStorageService service = new TieredStorageService(); // fresh instance: both tables are due (never run)
@@ -789,7 +789,7 @@ public class TieredStorageServiceTest extends CQLTester
         // remaining tag fails, so the cycle walked the entire backlog at shutdown speed and logged one
         // ERROR per tag: thousands of lines in seconds, burying anything real. The cycle must notice it
         // is stopping and leave, quietly.
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         long wt = 1;
@@ -834,7 +834,7 @@ public class TieredStorageServiceTest extends CQLTester
         // as an ERROR with a stack trace, so a shutdown that lands mid-scan produced one incident per
         // remaining range -- and kept scanning ranges the query path could no longer serve.
         TagRegistry.resetForTesting();
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         insertRow("tag0", 0L, 1.0, 1);
 
@@ -892,7 +892,7 @@ public class TieredStorageServiceTest extends CQLTester
         int previousCeiling = TagRegistry.setMaxCachedTagsPerTableForTesting(2);
         try
         {
-            createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+            createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
             setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
             long wt = 1;
@@ -965,7 +965,7 @@ public class TieredStorageServiceTest extends CQLTester
         // So the scan stops trying to finish. Each cycle advances a cursor by a bounded number of
         // pages and registers what it found; the ring is covered over many cycles instead of one.
         TagRegistry.resetForTesting();
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         long wt = 1;
@@ -1058,7 +1058,7 @@ public class TieredStorageServiceTest extends CQLTester
         // reading the registry instead must enumerate exactly the same tags -- encoding new closed
         // windows for them just as the scan would have.
         TagRegistry.resetForTesting();
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         String[] tags = { "a", "b", "c" };
@@ -1104,7 +1104,7 @@ public class TieredStorageServiceTest extends CQLTester
         // failure that provoked it was a read timeout on a full-table DISTINCT scan, so each retry
         // was also the most expensive thing the cycle can do -- a failing table generating the load
         // that kept it failing. Attempts, not completions, are what the interval spaces out.
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\",\"interval\":\"1h\"}");
 
         TieredStorageService service = new TieredStorageService(); // fresh instance: the table is due
@@ -1128,7 +1128,7 @@ public class TieredStorageServiceTest extends CQLTester
     @Test
     public void reentryGuardRejectsConcurrentRun() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
 
         String table = currentTable();
@@ -1169,7 +1169,7 @@ public class TieredStorageServiceTest extends CQLTester
     public void columnAddedDuringACycleIsNotDestroyedByIt() throws Throwable
     {
         TagRegistry.resetForTesting();
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         insertRow("t", 0L, 1.0, 100);
         insertRow("t", 600_000L, 2.0, 101);
@@ -1229,7 +1229,7 @@ public class TieredStorageServiceTest extends CQLTester
     public void writePathDoesNotWaitForTheRegistryInsert() throws Throwable
     {
         TagRegistry.resetForTesting();
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         ChunkTables.ensureChunkTable(Schema.instance.getTableMetadata(KEYSPACE, currentTable()));
 
@@ -1283,7 +1283,7 @@ public class TieredStorageServiceTest extends CQLTester
     public void aFailedRegistrationBacksOffInsteadOfRetryingOnEveryWrite() throws Throwable
     {
         TagRegistry.resetForTesting();
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         ChunkTables.ensureChunkTable(Schema.instance.getTableMetadata(KEYSPACE, currentTable()));
 
@@ -1318,7 +1318,7 @@ public class TieredStorageServiceTest extends CQLTester
     @Test
     public void reencoderHoldsTheFlushLockWhileItRewritesAChunk() throws Throwable
     {
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         insertRow("t", 0L, 1.0, 1);
 
@@ -1378,7 +1378,7 @@ public class TieredStorageServiceTest extends CQLTester
     {
         DatabaseDescriptor.setTombstoneFailureThreshold(100_000);
         createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) " +
-                    "WITH gc_grace_seconds = " + gcGraceSeconds);
+                    "WITH compaction = {'class': 'TimeSeriesCompactionStrategy'} AND gc_grace_seconds = " + gcGraceSeconds);
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         long wt = 1;
         for (int w = 0; w < 30; w++)
@@ -1414,7 +1414,7 @@ public class TieredStorageServiceTest extends CQLTester
     public void tagWalkKeepsTheSpanThatWorks() throws Throwable
     {
         TagRegistry.resetForTesting();
-        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         long wt = 1;
         for (int t = 0; t < 40; t++)
@@ -1459,14 +1459,14 @@ public class TieredStorageServiceTest extends CQLTester
     @Test
     public void virtualTableShowsTablesWhoseTieringIsFailing() throws Throwable
     {
-        String broken = createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        String broken = createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"not-a-duration\"}");
         UntypedResultSet invalid = execute("SELECT * FROM system_views.timeseries_tiering WHERE keyspace_name = ? AND table_name = ?",
                                            KEYSPACE, broken);
         assertEquals("a table with an invalid policy must stay visible", 1, invalid.size());
         assertTrue(invalid.one().getString("last_error").contains("invalid"));
 
-        String failing = createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts))");
+        String failing = createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
         setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         TieredStorageService service = TieredStorageService.instance;
         service.preRunHookForTesting = (ks, table) ->

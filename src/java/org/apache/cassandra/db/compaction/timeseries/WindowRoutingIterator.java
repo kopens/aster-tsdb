@@ -27,17 +27,25 @@ import java.util.NavigableMap;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
+import java.util.function.LongConsumer;
 import java.util.function.LongUnaryOperator;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.Iterators;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.Clustering;
+import org.apache.cassandra.db.ClusteringBound;
+import org.apache.cassandra.db.ClusteringComparator;
+import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.LivenessInfo;
+import org.apache.cassandra.db.Slice;
+import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.rows.AbstractUnfilteredRowIterator;
 import org.apache.cassandra.db.rows.BTreeRow;
 import org.apache.cassandra.db.rows.Cell;
@@ -121,34 +129,16 @@ public final class WindowRoutingIterator
      * partition, but {@code SplitRefreezeCompactionTask} applies the same routing to arbitrarily large
      * compaction partitions.
      *
-     * <p>Rather than materialise a million-row time-series partition on heap, routing gives up on
-     * splitting a partition once it exceeds this budget: the untouched source prefix and the unread
-     * remainder are handed back as a single lazy slice (see {@link #slices}), which keeps memory
-     * bounded and the data correct at the cost of one window-spanning sstable.
+     * <p>Rather than materialise a million-row time-series partition on heap, {@link #slices} gives up
+     * on splitting a partition once it exceeds this budget: the untouched source prefix and the unread
+     * remainder are handed back as a single lazy slice, which keeps memory bounded and the data correct
+     * at the cost of one window-spanning sstable. That is the flush path's behaviour.
      *
-     * <p><b>Why that does not livelock.</b> The spanning sstable classifies FREEZING, so
-     * {@code nextSplitRefreezeCandidate} selects it and {@code SplitRefreezeCompactionTask} re-routes
-     * it — with the same budget, so the same partition overflows again and the same window keeps a
-     * spanning sstable. What bounds that is the strategy's no-progress guard
-     * ({@code TimeSeriesCompactionStrategy#recordCompletedRewrite}), and the guarantee it gives is
-     * about a <em>chain</em> of rewrites, not about any single one:
-     * <ul>
-     *   <li>when the source sstable holds nothing but the overflowing partition, the split is
-     *       shape-preserving — one sstable in, one out, with the same timestamps, hence the same
-     *       {@code (sstable count, windows spanned)} signature — so each futile split immediately
-     *       repeats a shape the chain has already produced;</li>
-     *   <li>when it also holds ordinary data, the split is <b>not</b> shape-preserving: the
-     *       overflowing partition goes to one window's writer and the ordinary rows to their own, so
-     *       the window ends up with two sstables and is then a <em>freeze</em> candidate, and the
-     *       freeze merges them back into one still-spanning sstable. Each path changes the shape, and
-     *       each undoes the other. The guard scores this because it asks whether a chain of rewrites
-     *       has returned the window to a shape that same chain produced before — which this
-     *       alternation does on its second lap — not whether one rewrite changed anything.</li>
-     * </ul>
-     * Either way the window is parked after {@code NO_PROGRESS_STRIKES} such repeats, with a WARN
-     * naming the sstables. (Purging can shrink the span, in which case the rewrite reaches a shape the
-     * chain has not been at, the strike count resets, and the next round starts again from a strictly
-     * smaller span — still finite.)
+     * <p>The spanning sstable classifies FREEZING, so {@code SplitRefreezeCompactionTask} picks it up.
+     * It can read its input again, so it routes an over-budget partition with {@link #rereadSlices}
+     * (via {@link #slicesWithinBudget}) instead of buffering it, and its outputs are window-contained.
+     * Before that, the split overflowed the same way the flush had, never made progress, and the
+     * strategy's no-progress guard parked the window.
      *
      * <p>Failing instead was rejected: this routing is on the memtable flush path, where an exception
      * fails the whole flush and blocks writes.
@@ -228,36 +218,50 @@ public final class WindowRoutingIterator
             }
             buffered += sizeOf(unfiltered);
             routed.prefix.add(unfiltered);
+            forEachPiece(unfiltered, windowStartOfMillis, tableResolution, (window, piece) -> bucket(routed.buckets, window).add(piece));
+        }
+        return routed;
+    }
 
-            if (unfiltered instanceof RangeTombstoneBoundaryMarker)
+    /**
+     * Routes one {@link Unfiltered} at element granularity: hands {@code sink} one piece per window the
+     * element's own timestamps name (see the class javadoc). A row yields at most one piece per window;
+     * a range-tombstone boundary whose two deletions fall in different windows yields its close half
+     * and its open half separately. This is the single definition both {@link #route} and
+     * {@link #rereadSlices} apply, so the two cannot disagree about where anything goes.
+     */
+    private static void forEachPiece(Unfiltered unfiltered,
+                                     LongUnaryOperator windowStartOfMillis,
+                                     TimeUnit tableResolution,
+                                     BiConsumer<Long, Unfiltered> sink)
+    {
+        if (unfiltered instanceof RangeTombstoneBoundaryMarker)
+        {
+            RangeTombstoneBoundaryMarker boundary = (RangeTombstoneBoundaryMarker) unfiltered;
+            long closeWindow = windowOf(boundary.closeDeletionTime(false).markedForDeleteAt(), windowStartOfMillis, tableResolution);
+            long openWindow = windowOf(boundary.openDeletionTime(false).markedForDeleteAt(), windowStartOfMillis, tableResolution);
+            if (closeWindow == openWindow)
             {
-                RangeTombstoneBoundaryMarker boundary = (RangeTombstoneBoundaryMarker) unfiltered;
-                long closeWindow = windowOf(boundary.closeDeletionTime(false).markedForDeleteAt(), windowStartOfMillis, tableResolution);
-                long openWindow = windowOf(boundary.openDeletionTime(false).markedForDeleteAt(), windowStartOfMillis, tableResolution);
-                if (closeWindow == openWindow)
-                {
-                    bucket(routed.buckets, closeWindow).add(boundary);
-                }
-                else
-                {
-                    // The closing and opening deletions live in different windows: split the boundary
-                    // so each window's sstable carries a self-contained marker.
-                    bucket(routed.buckets, closeWindow).add(boundary.createCorrespondingCloseMarker(false));
-                    bucket(routed.buckets, openWindow).add(boundary.createCorrespondingOpenMarker(false));
-                }
-            }
-            else if (unfiltered instanceof RangeTombstoneBoundMarker)
-            {
-                RangeTombstoneBoundMarker marker = (RangeTombstoneBoundMarker) unfiltered;
-                bucket(routed.buckets, windowOf(marker.deletionTime().markedForDeleteAt(), windowStartOfMillis, tableResolution)).add(marker);
+                sink.accept(closeWindow, boundary);
             }
             else
             {
-                for (Map.Entry<Long, Row> piece : splitRow((Row) unfiltered, windowStartOfMillis, tableResolution).entrySet())
-                    bucket(routed.buckets, piece.getKey()).add(piece.getValue());
+                // The closing and opening deletions live in different windows: split the boundary
+                // so each window's sstable carries a self-contained marker.
+                sink.accept(closeWindow, boundary.createCorrespondingCloseMarker(false));
+                sink.accept(openWindow, boundary.createCorrespondingOpenMarker(false));
             }
         }
-        return routed;
+        else if (unfiltered instanceof RangeTombstoneBoundMarker)
+        {
+            RangeTombstoneBoundMarker marker = (RangeTombstoneBoundMarker) unfiltered;
+            sink.accept(windowOf(marker.deletionTime().markedForDeleteAt(), windowStartOfMillis, tableResolution), marker);
+        }
+        else
+        {
+            for (Map.Entry<Long, Row> piece : splitRow((Row) unfiltered, windowStartOfMillis, tableResolution).entrySet())
+                sink.accept(piece.getKey(), piece.getValue());
+        }
     }
 
     /**
@@ -431,17 +435,8 @@ public final class WindowRoutingIterator
     {
         DeletionTime partitionDeletion = partition.partitionLevelDeletion();
         Row staticRow = partition.staticRow();
-
-        long deletionWindow = partitionDeletion.isLive()
-                              ? NO_WINDOW
-                              : windowOf(partitionDeletion.markedForDeleteAt(), windowStartOfMillis, tableResolution);
-        NavigableMap<Long, Row> statics = staticRow.isEmpty()
-                                          ? Collections.emptyNavigableMap()
-                                          : splitRow(staticRow, windowStartOfMillis, tableResolution);
-
         Routed routed = routeBounded(partition, windowStartOfMillis, tableResolution, maxBufferedBytesPerPartition);
 
-        NavigableMap<Long, UnfilteredRowIterator> slices = new TreeMap<>();
         if (routed.overflowed())
         {
             // Degraded, memory-bounded path: one slice carrying the whole partition, header included.
@@ -456,9 +451,9 @@ public final class WindowRoutingIterator
                              "window-routing-buffer:" + partition.metadata().keyspace + '.' + partition.metadata().name,
                              1, TimeUnit.MINUTES,
                              "Partition {} of {}.{} exceeded the {}-byte window-routing buffer; writing it " +
-                             "unsplit into window {}. The resulting sstable will span windows and will be " +
-                             "parked by the no-progress guard rather than re-split - consider a larger " +
-                             "window_size, or splitting this partition.",
+                             "unsplit into window {}. The resulting sstable spans windows until a " +
+                             "split-refreeze re-reads it window by window; a partition this large also " +
+                             "hurts repair and streaming, so consider a time bucket in the partition key.",
                              partition.partitionKey(), partition.metadata().keyspace, partition.metadata().name,
                              maxBufferedBytesPerPartition, routed.overflowWindow);
 
@@ -482,17 +477,36 @@ public final class WindowRoutingIterator
             // The source prefix has neither problem by construction: clusterings are strictly increasing,
             // boundary markers are still whole, and the unread remainder appends behind it in order.
             Row overflowStatic = staticRow.isEmpty() ? Rows.EMPTY_STATIC_ROW : staticRow;
+            NavigableMap<Long, UnfilteredRowIterator> slices = new TreeMap<>();
             slices.put(routed.overflowWindow,
                        new WindowSlice(partition, partitionDeletion, overflowStatic,
                                        Iterators.concat(routed.prefix.iterator(), routed.remainder)));
             return slices;
         }
 
+        return windowSlices(partition, partitionDeletion, staticRow, routed, windowStartOfMillis, tableResolution);
+    }
+
+    private static NavigableMap<Long, UnfilteredRowIterator> windowSlices(UnfilteredRowIterator partition,
+                                                                          DeletionTime partitionDeletion,
+                                                                          Row staticRow,
+                                                                          Routed routed,
+                                                                          LongUnaryOperator windowStartOfMillis,
+                                                                          TimeUnit tableResolution)
+    {
+        long deletionWindow = partitionDeletion.isLive()
+                              ? NO_WINDOW
+                              : windowOf(partitionDeletion.markedForDeleteAt(), windowStartOfMillis, tableResolution);
+        NavigableMap<Long, Row> statics = staticRow.isEmpty()
+                                          ? Collections.emptyNavigableMap()
+                                          : splitRow(staticRow, windowStartOfMillis, tableResolution);
+
         TreeSet<Long> windows = new TreeSet<>(routed.buckets.keySet());
         windows.addAll(statics.keySet());
         if (deletionWindow != NO_WINDOW)
             windows.add(deletionWindow);
 
+        NavigableMap<Long, UnfilteredRowIterator> slices = new TreeMap<>();
         for (long window : windows)
         {
             List<Unfiltered> content = routed.buckets.getOrDefault(window, List.of());
@@ -501,6 +515,177 @@ public final class WindowRoutingIterator
             slices.put(window, new WindowSlice(partition, windowDeletion, windowStatic, content.iterator()));
         }
         return slices;
+    }
+
+    /**
+     * {@link #slices} without the degraded path: the per-window slices if the partition routes within
+     * {@link #maxBufferedBytesPerPartition}, or {@code null} if it does not. On {@code null} the
+     * partition has been partly consumed and is no use to the caller except to close; a caller that can
+     * read the partition again routes it with {@link #rereadSlices} instead.
+     */
+    public static NavigableMap<Long, UnfilteredRowIterator> slicesWithinBudget(UnfilteredRowIterator partition,
+                                                                               LongUnaryOperator windowStartOfMillis,
+                                                                               TimeUnit tableResolution)
+    {
+        DeletionTime partitionDeletion = partition.partitionLevelDeletion();
+        Row staticRow = partition.staticRow();
+        Routed routed = routeBounded(partition, windowStartOfMillis, tableResolution, maxBufferedBytesPerPartition);
+        return routed.overflowed() ? null : windowSlices(partition, partitionDeletion, staticRow, routed, windowStartOfMillis, tableResolution);
+    }
+
+    /** A partition that can be read again from the start, restricted to clustering {@link Slices}. */
+    @FunctionalInterface
+    public interface Rereadable
+    {
+        /** A fresh forward iterator over the partition's content within {@code slices}; the caller closes it. */
+        UnfilteredRowIterator open(Slices slices);
+    }
+
+    /** Receives one window's slice; it must consume the slice before returning, which is then closed. */
+    @FunctionalInterface
+    public interface SliceSink
+    {
+        void accept(long window, UnfilteredRowIterator slice);
+    }
+
+    /**
+     * Routes a partition of any size into per-window slices in bounded memory, by reading it again
+     * instead of buffering it. Pass 1 reads the partition once and records, for every window, the
+     * clustering span its elements occupy; pass 2 re-opens the partition once per window, restricted
+     * to that span, and hands {@code sink} only that window's elements (via {@link #forEachPiece}, the
+     * same routing {@link #slices} applies). What each window receives is exactly what {@link #slices}
+     * would have given it - {@code WindowRoutingIteratorTest#rereadingEachWindowMatchesInMemoryRouting}.
+     * <p>
+     * Memory is one pair of bounds per window. Reads cost the partition once plus the sum of the
+     * windows' spans; for time-series data, where write time follows clustering time, the spans barely
+     * overlap and that is about two reads in total. Windows are emitted in ascending order, one
+     * partition at a time, so each writer still sees partitions in token order.
+     * <p>
+     * Why a span edge cannot cut a tombstone: every marker of a range tombstone carries the same
+     * deletion time, so the tombstone's open and close markers both belong to the window that time
+     * names, and both lie inside that window's span. Clipping at a span edge therefore only ever
+     * truncates tombstones of <em>other</em> windows, whose markers the filter drops anyway, or
+     * re-emits a window's own marker at the very bound it already sits on.
+     *
+     * @param bytesRead told the {@link Row#dataSize()} (or a flat 64 per marker) of everything read,
+     *                  in both passes, so the caller can charge the compaction throughput limiter
+     */
+    public static void rereadSlices(Rereadable source,
+                                    LongUnaryOperator windowStartOfMillis,
+                                    TimeUnit tableResolution,
+                                    LongConsumer bytesRead,
+                                    SliceSink sink)
+    {
+        // window -> {start, end} of its body elements; null for a window only the header reaches.
+        NavigableMap<Long, ClusteringBound<?>[]> spans = new TreeMap<>();
+        ClusteringComparator comparator;
+        try (UnfilteredRowIterator partition = source.open(Slices.ALL))
+        {
+            comparator = partition.metadata().comparator;
+            DeletionTime partitionDeletion = partition.partitionLevelDeletion();
+            if (!partitionDeletion.isLive())
+                spans.putIfAbsent(windowOf(partitionDeletion.markedForDeleteAt(), windowStartOfMillis, tableResolution), null);
+            Row staticRow = partition.staticRow();
+            if (!staticRow.isEmpty())
+                for (long window : splitRow(staticRow, windowStartOfMillis, tableResolution).keySet())
+                    spans.putIfAbsent(window, null);
+
+            while (partition.hasNext())
+            {
+                Unfiltered unfiltered = partition.next();
+                bytesRead.accept(sizeOf(unfiltered));
+                ClusteringPrefix<?> position = unfiltered.clustering();
+                forEachPiece(unfiltered, windowStartOfMillis, tableResolution,
+                             (window, piece) -> widen(spans, window, position, comparator));
+            }
+        }
+
+        for (Map.Entry<Long, ClusteringBound<?>[]> entry : spans.entrySet())
+        {
+            long window = entry.getKey();
+            ClusteringBound<?>[] span = entry.getValue();
+            // A header-only window still needs the header; its (lazily read) body is never iterated.
+            Slices slices = span == null ? Slices.ALL : Slices.with(comparator, Slice.make(span[0], span[1]));
+            try (UnfilteredRowIterator reread = source.open(slices))
+            {
+                DeletionTime partitionDeletion = reread.partitionLevelDeletion();
+                DeletionTime windowDeletion = !partitionDeletion.isLive()
+                                              && windowOf(partitionDeletion.markedForDeleteAt(), windowStartOfMillis, tableResolution) == window
+                                              ? partitionDeletion : DeletionTime.LIVE;
+                Row staticRow = reread.staticRow();
+                Row windowStatic = staticRow.isEmpty()
+                                   ? Rows.EMPTY_STATIC_ROW
+                                   : splitRow(staticRow, windowStartOfMillis, tableResolution).getOrDefault(window, Rows.EMPTY_STATIC_ROW);
+                Iterator<Unfiltered> content = span == null
+                                               ? Collections.emptyIterator()
+                                               : new WindowFilter(reread, window, windowStartOfMillis, tableResolution, bytesRead);
+                sink.accept(window, new WindowSlice(reread, windowDeletion, windowStatic, content));
+            }
+        }
+    }
+
+    private static void widen(NavigableMap<Long, ClusteringBound<?>[]> spans, long window, ClusteringPrefix<?> position, ClusteringComparator comparator)
+    {
+        ClusteringBound<?>[] span = spans.get(window);
+        if (span == null)
+        {
+            spans.put(window, new ClusteringBound<?>[]{ startOf(position), endOf(position) });
+            return;
+        }
+        // The partition is read in clustering order, so a window's first element fixes its start and
+        // only the end can move.
+        if (comparator.compare(position, span[1]) > 0)
+            span[1] = endOf(position);
+    }
+
+    // retainable(): the position may point into a reused read buffer; a span outlives the element.
+    private static ClusteringBound<?> startOf(ClusteringPrefix<?> position)
+    {
+        return ClusteringBound.inclusiveStartOf(position.retainable());
+    }
+
+    private static ClusteringBound<?> endOf(ClusteringPrefix<?> position)
+    {
+        return ClusteringBound.inclusiveEndOf(position.retainable());
+    }
+
+    /** One window's elements of a (re-read) partition body, produced lazily. */
+    private static final class WindowFilter extends AbstractIterator<Unfiltered>
+    {
+        private final UnfilteredRowIterator source;
+        private final long window;
+        private final LongUnaryOperator windowStartOfMillis;
+        private final TimeUnit tableResolution;
+        private final LongConsumer bytesRead;
+        private Unfiltered found;
+
+        WindowFilter(UnfilteredRowIterator source, long window, LongUnaryOperator windowStartOfMillis,
+                     TimeUnit tableResolution, LongConsumer bytesRead)
+        {
+            this.source = source;
+            this.window = window;
+            this.windowStartOfMillis = windowStartOfMillis;
+            this.tableResolution = tableResolution;
+            this.bytesRead = bytesRead;
+        }
+
+        @Override
+        protected Unfiltered computeNext()
+        {
+            while (source.hasNext())
+            {
+                Unfiltered unfiltered = source.next();
+                bytesRead.accept(sizeOf(unfiltered));
+                found = null;
+                forEachPiece(unfiltered, windowStartOfMillis, tableResolution, (w, piece) -> {
+                    if (w == window)
+                        found = piece;
+                });
+                if (found != null)
+                    return found;
+            }
+            return endOfData();
+        }
     }
 
     /** One window's view of a partition: original key/columns/stats + that window's content. */

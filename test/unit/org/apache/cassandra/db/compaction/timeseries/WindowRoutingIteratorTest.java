@@ -22,7 +22,10 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import java.util.NavigableMap;
+import java.util.Random;
+import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongUnaryOperator;
 
@@ -35,9 +38,13 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
+import org.apache.cassandra.db.RangeTombstone;
+import org.apache.cassandra.db.Slice;
+import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.marshal.DoubleType;
 import org.apache.cassandra.db.marshal.TimestampType;
 import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.BTreeRow;
 import org.apache.cassandra.db.rows.BufferCell;
 import org.apache.cassandra.db.rows.Cell;
@@ -664,6 +671,90 @@ public class WindowRoutingIteratorTest
         {
             WindowRoutingIterator.maxBufferedBytesPerPartition = saved;
         }
+    }
+
+    /**
+     * The bounded-memory route split-refreeze takes for a partition over the routing budget: read the
+     * partition again once per window, restricted to that window's clustering span, and keep only that
+     * window's elements. Each window's output must be exactly what in-memory routing produces for it
+     * (same header, same unfiltereds in the same order); anything else loses or resurrects data.
+     * <p>
+     * Random partitions with rows that straddle windows, overlapping range tombstones whose deletions
+     * fall in different windows (so the source carries boundary markers and the per-window spans cut
+     * through other windows' tombstones), a split static row and a partition deletion. The source is a
+     * real {@link PartitionUpdate}, so slicing and range-tombstone clipping at the span edges are the
+     * storage engine's own, not a test double's.
+     */
+    @Test
+    public void rereadingEachWindowMatchesInMemoryRouting()
+    {
+        for (long s = 1; s <= 300; s++)
+        {
+            long seed = s;
+            Random random = new Random(seed);
+            PartitionUpdate update = randomPartition(random);
+
+            NavigableMap<Long, UnfilteredRowIterator> expected =
+                WindowRoutingIterator.slices(update.unfilteredIterator(), WINDOW, TimeUnit.MICROSECONDS);
+
+            NavigableMap<Long, List<Unfiltered>> actualContent = new TreeMap<>();
+            NavigableMap<Long, DeletionTime> actualDeletion = new TreeMap<>();
+            NavigableMap<Long, Row> actualStatic = new TreeMap<>();
+            WindowRoutingIterator.rereadSlices(slices -> update.unfilteredIterator(ColumnFilter.all(metadata), slices, false),
+                                               WINDOW, TimeUnit.MICROSECONDS, bytes -> {},
+                                               (window, slice) -> {
+                                                   assertFalse("window " + window + " emitted twice (seed " + seed + ')',
+                                                               actualContent.containsKey(window));
+                                                   actualDeletion.put(window, slice.partitionLevelDeletion());
+                                                   actualStatic.put(window, slice.staticRow());
+                                                   actualContent.put(window, drain(slice));
+                                               });
+
+            assertEquals("windows (seed " + seed + ')', expected.keySet(), actualContent.keySet());
+            for (Map.Entry<Long, UnfilteredRowIterator> entry : expected.entrySet())
+            {
+                long window = entry.getKey();
+                UnfilteredRowIterator want = entry.getValue();
+                String where = "window " + window + " (seed " + seed + ')';
+                assertEquals("partition deletion, " + where, want.partitionLevelDeletion(), actualDeletion.get(window));
+                assertEquals("static row, " + where, want.staticRow(), actualStatic.get(window));
+                assertEquals("content, " + where, drain(want), actualContent.get(window));
+            }
+        }
+    }
+
+    /** Twenty rows ten seconds apart, write timestamps over four windows, plus tombstones and a header. */
+    private static PartitionUpdate randomPartition(Random random)
+    {
+        PartitionUpdate.Builder builder = new PartitionUpdate.Builder(metadata, key, metadata.regularAndStaticColumns(), 32);
+        for (int i = 0; i < 20; i++)
+        {
+            long event = BASE + i * 10_000L;
+            if (random.nextInt(4) == 0)
+                continue;                                               // gaps, so spans do not tile
+            if (random.nextInt(3) == 0)
+                builder.add(twoCellRow(event, randomWrite(random), randomWrite(random)));
+            else
+                builder.add(row(event, randomWrite(random)));
+        }
+        int tombstones = random.nextInt(4);
+        for (int t = 0; t < tombstones; t++)
+        {
+            long a = BASE + random.nextInt(20) * 10_000L + random.nextInt(3) * 5_000L;
+            long b = a + random.nextInt(8) * 10_000L;
+            DeletionTime deletion = DeletionTime.build(micros(randomWrite(random)), 1000);
+            builder.add(new RangeTombstone(Slice.make(ck(a), ck(b)), deletion));
+        }
+        if (random.nextInt(3) == 0)
+            builder.add(staticRow(randomWrite(random), randomWrite(random)));
+        if (random.nextInt(5) == 0)
+            builder.addPartitionDeletion(DeletionTime.build(micros(BASE - 1), 1000));   // shadows nothing live
+        return builder.build();
+    }
+
+    private static long randomWrite(Random random)
+    {
+        return BASE + random.nextInt(4) * HOUR_MS + 1 + random.nextInt(1000);
     }
 
     private static void assertStrictlyIncreasing(List<Unfiltered> unfiltereds)

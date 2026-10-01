@@ -20,6 +20,7 @@ package org.apache.cassandra.db.compaction;
 
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.NavigableSet;
 import java.util.Set;
 import java.util.TreeMap;
@@ -34,15 +35,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.compaction.timeseries.TimeWindowSplittingMultiWriter;
 import org.apache.cassandra.db.compaction.timeseries.WindowRoutingIterator;
+import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.db.lifecycle.WrappedLifecycleTransaction;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
+import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.SSTableRewriter;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableWriter;
@@ -76,9 +80,9 @@ import org.apache.cassandra.utils.TimeUUID;
  * already-open rewriter. A folded output still spans windows and is re-selected for a later split,
  * and that sequence terminates because each pass emits at most {@code maxWindowWriters} non-empty
  * outputs, so every output covers a proper subset of this input's windows and the widest span
- * strictly shrinks. Anything that does not converge - a partition too large to window-route, which
- * this task rewrites unsplit every time - is parked by the strategy's no-progress guard instead of
- * being rewritten forever.
+ * strictly shrinks. A partition too large to window-route on heap is split by reading it again
+ * once per window ({@link #splitByRereading}), so it converges too. Anything else that does not
+ * converge is parked by the strategy's no-progress guard instead of being rewritten forever.
  */
 public class SplitRefreezeCompactionTask extends AbstractCompactionTask
 {
@@ -173,22 +177,36 @@ public class SplitRefreezeCompactionTask extends AbstractCompactionTask
             activeCompactions.beginCompaction(ci);
             try
             {
+                long[] rereadBytes = { 0 };
+                long lastRereadBytes = 0;
                 while (ci.hasNext())
                 {
+                    // One admission decision maker per partition, seeded from the rewriters already
+                    // open: that is what keeps the fan-out capped WITHIN a partition too, not just
+                    // across them (a single partition can span every window in the input).
+                    WindowAdmission admission = new WindowAdmission(rewriters.keySet());
+                    DecoratedKey overflowed = null;
                     try (UnfilteredRowIterator partition = ci.next())
                     {
-                        // One admission decision maker per partition, seeded from the rewriters already
-                        // open: that is what keeps the fan-out capped WITHIN a partition too, not just
-                        // across them (a single partition can span every window in the input).
-                        WindowAdmission admission = new WindowAdmission(rewriters.keySet());
-                        for (Map.Entry<Long, UnfilteredRowIterator> entry : WindowRoutingIterator.slices(partition, admission, tableResolution).entrySet())
-                            rewriterFor(rewriters, entry.getKey(), admission, shared, maxDataAge, originals).append(entry.getValue());
+                        NavigableMap<Long, UnfilteredRowIterator> slices =
+                            WindowRoutingIterator.slicesWithinBudget(partition, admission, tableResolution);
+                        if (slices == null)
+                            overflowed = partition.partitionKey();
+                        else
+                            for (Map.Entry<Long, UnfilteredRowIterator> entry : slices.entrySet())
+                                rewriterFor(rewriters, entry.getKey(), admission, shared, maxDataAge, originals).append(entry.getValue());
                     }
+                    if (overflowed != null)
+                        splitByRereading(spanning, overflowed, admission, rewriters, shared, maxDataAge, originals, rereadBytes);
+
                     // Obey compaction_throughput like every other compaction does (M6): this rewrites a
-                    // whole sstable and would otherwise run at unthrottled disk speed.
+                    // whole sstable and would otherwise run at unthrottled disk speed. The re-reads of an
+                    // over-budget partition bypass the scanner, so they are charged separately.
                     long bytesScanned = scanner.getBytesScanned();
                     CompactionManager.instance.compactionRateLimiterAcquire(limiter, bytesScanned, lastBytesScanned, compressionRatio);
                     lastBytesScanned = bytesScanned;
+                    CompactionManager.instance.compactionRateLimiterAcquire(limiter, rereadBytes[0], lastRereadBytes, compressionRatio);
+                    lastRereadBytes = rereadBytes[0];
                 }
 
                 for (SSTableRewriter rewriter : rewriters.values())
@@ -224,6 +242,37 @@ public class SplitRefreezeCompactionTask extends AbstractCompactionTask
             if (err != null)
                 Throwables.maybeFail(err);
         }
+    }
+
+    /**
+     * Splits one partition too large to window-route on heap by reading it back from {@code spanning}
+     * once per window ({@link WindowRoutingIterator#rereadSlices}), so memory stays bounded and every
+     * output is still window-contained. Writing it unsplit instead - the flush path's degraded mode -
+     * would give this task nothing to converge on: the next split would overflow the same way, and the
+     * window would be parked for good, which is how a production snapshot table came to have 23 parked
+     * windows (node 41, 2026-10-01).
+     * <p>
+     * The re-reads bypass the {@link CompactionIterator}, so this partition is written without
+     * tombstone purging. That only keeps garbage one rewrite longer: the window's freeze, which runs
+     * next, purges it.
+     */
+    private void splitByRereading(SSTableReader spanning,
+                                  DecoratedKey key,
+                                  WindowAdmission admission,
+                                  Map<Long, SSTableRewriter> rewriters,
+                                  ILifecycleTransaction shared,
+                                  long maxDataAge,
+                                  Set<SSTableReader> originals,
+                                  long[] bytesRead)
+    {
+        logger.info("Partition {} of {}.{} is over the {}-byte window-routing buffer; splitting it by reading it " +
+                    "again once per window", key, cfs.getKeyspaceName(), cfs.getTableName(),
+                    WindowRoutingIterator.maxBufferedBytesPerPartition);
+        ColumnFilter columns = ColumnFilter.all(cfs.metadata());
+        WindowRoutingIterator.rereadSlices(slices -> spanning.rowIterator(key, slices, columns, false, SSTableReadsListener.NOOP_LISTENER),
+                                           admission, tableResolution,
+                                           bytes -> bytesRead[0] += bytes,
+                                           (window, slice) -> rewriterFor(rewriters, window, admission, shared, maxDataAge, originals).append(slice));
     }
 
     /**
