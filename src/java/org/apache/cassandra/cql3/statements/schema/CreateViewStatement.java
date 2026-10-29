@@ -45,6 +45,7 @@ import org.apache.cassandra.db.filter.IndexHints;
 import org.apache.cassandra.db.guardrails.Guardrails;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.ReversedType;
+import org.apache.cassandra.db.timeseries.tiering.TieringPolicy;
 import org.apache.cassandra.db.view.View;
 import org.apache.cassandra.exceptions.AlreadyExistsException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
@@ -377,7 +378,13 @@ public final class CreateViewStatement extends AlterSchemaStatement
         ViewMetadata view = new ViewMetadata(table.id, table.name, rawColumns.isEmpty(), whereClause, builder.build());
         view.metadata.validate();
 
-        return schema.withAddedOrUpdated(keyspace.withSwapped(keyspace.views.with(view)));
+        KeyspaceMetadata newKeyspace = keyspace.withSwapped(keyspace.views.with(view));
+        // A view over a tiered table would silently lose everything older than hot_window (the
+        // re-encoder's deletes propagate into it, transparent reads rebuild only the base table).
+        String tieringError = TieringPolicy.ddlRejection(table, keyspace, table, newKeyspace);
+        if (tieringError != null)
+            throw ire("Cannot create materialized view '%s': %s", viewName, tieringError);
+        return schema.withAddedOrUpdated(newKeyspace);
     }
 
     SchemaChange schemaChangeEvent(KeyspacesDiff diff)

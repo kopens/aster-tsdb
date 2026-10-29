@@ -717,4 +717,57 @@ public class TieringPolicyTest
         assertNotNull(policy);
         assertEquals(TimeUnit.DAYS.toMillis(7), policy.hotWindowMillis);
     }
+
+    // ---- ddlRejection: the DDL-time half of the index / view rules ----
+
+    private static TableMetadata tiered(TableMetadata table)
+    {
+        return table.unbuild().params(TableParams.builder().compaction(TSCS)
+                                                 .extensions(ImmutableMap.of(TieringPolicy.EXTENSION_KEY,
+                                                                             ByteBufferUtil.bytes("{\"hot_window\":\"12h\"}")))
+                                                 .build()).build();
+    }
+
+    private static TableMetadata withIndex(TableMetadata table, String name, String target)
+    {
+        return table.unbuild().indexes(Indexes.of(index(name, target))).build();
+    }
+
+    @Test
+    public void ddlRejectsANewRegularIndexOnATieredTable()
+    {
+        TableMetadata tiered = canonicalTable("{\"hot_window\":\"12h\"}");
+        String error = TieringPolicy.ddlRejection(tiered, null, withIndex(tiered, "by_value", "value"), null);
+        assertNotNull(error);
+        assertTrue(error, error.contains("ks.tbl has a timeseries_tiering policy"));
+        assertTrue(error, error.contains("by_value"));
+        assertTrue(error, error.contains("extensions = {}"));
+    }
+
+    @Test
+    public void ddlRejectsAttachingThePolicyToATableWithARegularIndex()
+    {
+        TableMetadata plain = withIndex(canonicalTable(null), "by_value", "value");
+        TableMetadata attached = withIndex(canonicalTable("{\"hot_window\":\"12h\"}"), "by_value", "value");
+        assertNotNull(TieringPolicy.ddlRejection(plain, null, attached, null));
+    }
+
+    @Test
+    public void ddlAcceptsUntieredTablesStaticIndexesAndUnchangedState()
+    {
+        // No policy: any index is the table's own business.
+        TableMetadata plain = canonicalTable(null);
+        assertNull(TieringPolicy.ddlRejection(plain, null, withIndex(plain, "by_value", "value"), null));
+        // The production shape: SAI on a static column survives tiering.
+        TableMetadata production = tiered(productionShapedTable());
+        assertNull(TieringPolicy.ddlRejection(production, null, withIndex(production, "by_asset", "asset_id"), null));
+        // ... and the same table with the index on a regular column is refused.
+        assertNotNull(TieringPolicy.ddlRejection(production, null, withIndex(production, "by_value", "value"), null));
+        // Already in the state before the change (a schema older than this rule): not refused, so the
+        // operator can still ALTER it - the sweeper keeps reporting it.
+        TableMetadata bad = withIndex(canonicalTable("{\"hot_window\":\"12h\"}"), "by_value", "value");
+        assertNull(TieringPolicy.ddlRejection(bad, null, bad, null));
+        // Detaching the policy is always allowed.
+        assertNull(TieringPolicy.ddlRejection(bad, null, withIndex(canonicalTable(null), "by_value", "value"), null));
+    }
 }

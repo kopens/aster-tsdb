@@ -412,6 +412,50 @@ public final class TieringPolicy
     }
 
     /**
+     * The DDL-time half of the index and view rules of {@link #unsupportedSchemaError}: the reason a
+     * schema change must be refused because it leaves a <b>tiered</b> table (one carrying a
+     * {@code timeseries_tiering} policy) with an index on a non-static column or a materialized view,
+     * else {@code null}.
+     * <p>
+     * Covers both orders: an index or view added to a tiered table, and a policy attached to a table
+     * that already has one. Before this, only the sweeper ({@link TieredStorageService#runOnce}) noticed,
+     * and it then logged an ERROR every cycle and skipped tiering of the whole table, while the DDL had
+     * reported success. The sweeper check stays as the backstop for schemas that predate this rule.
+     * <p>
+     * Only a change that <em>introduces</em> the condition is refused: a table that was already in it
+     * (created before this rule) can still be altered, so the operator can repair it by dropping the
+     * index or view, or by detaching the policy.
+     *
+     * @param before         the table before the change, {@code null} when the change creates it
+     * @param beforeKeyspace the keyspace before the change (for its materialized views), may be {@code null}
+     * @param after          the table as the change would leave it
+     * @param afterKeyspace  the keyspace as the change would leave it
+     */
+    public static String ddlRejection(TableMetadata before, KeyspaceMetadata beforeKeyspace,
+                                      TableMetadata after, KeyspaceMetadata afterKeyspace)
+    {
+        String afterError = indexOrViewError(after, afterKeyspace);
+        if (afterError == null)
+            return null;
+        String beforeError = before == null ? null : indexOrViewError(before, beforeKeyspace);
+        if (afterError.equals(beforeError))
+            return null;
+        return format("%s.%s has a timeseries_tiering policy, and %s. Drop that index or view first, or detach " +
+                      "the policy (ALTER TABLE %s.%s WITH extensions = {}) if the table should not be tiered",
+                      after.keyspace, after.name, afterError, after.keyspace, after.name);
+    }
+
+    private static String indexOrViewError(TableMetadata metadata, KeyspaceMetadata keyspace)
+    {
+        if (metadata == null || !metadata.params.extensions.containsKey(EXTENSION_KEY))
+            return null;
+        String indexError = unsafeIndexError(metadata);
+        if (indexError != null)
+            return indexError;
+        return materializedViewError(metadata, keyspace);
+    }
+
+    /**
      * @return why {@code metadata}'s secondary indexes make it un-tierable, or {@code null} if none do.
      * Every index is resolved to its target column via {@link TargetParser} (the same parse the index
      * implementations themselves use, so {@code values(m)}/{@code keys(m)}/quoted names all resolve
@@ -468,7 +512,12 @@ public final class TieringPolicy
      */
     private static String materializedViewError(TableMetadata metadata)
     {
-        KeyspaceMetadata keyspace = Schema.instance.getKeyspaceMetadata(metadata.keyspace);
+        return materializedViewError(metadata, Schema.instance.getKeyspaceMetadata(metadata.keyspace));
+    }
+
+    /** {@link #materializedViewError(TableMetadata)} against an explicit keyspace (a DDL's view of the schema). */
+    private static String materializedViewError(TableMetadata metadata, KeyspaceMetadata keyspace)
+    {
         if (keyspace == null)
             return null;
 
