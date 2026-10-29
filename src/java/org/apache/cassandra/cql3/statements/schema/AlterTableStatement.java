@@ -50,6 +50,7 @@ import org.apache.cassandra.cql3.functions.masking.ColumnMask;
 import org.apache.cassandra.db.guardrails.Guardrails;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.UserType;
+import org.apache.cassandra.db.timeseries.tiering.TieringPolicy;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.gms.ApplicationState;
 import org.apache.cassandra.gms.Gossiper;
@@ -137,7 +138,13 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
         if (table.isView())
             throw ire("Cannot use ALTER TABLE on a materialized view; use ALTER MATERIALIZED VIEW instead");
 
-        return schema.withAddedOrUpdated(apply(metadata.nextEpoch(), keyspace, table, metadata));
+        KeyspaceMetadata updated = apply(metadata.nextEpoch(), keyspace, table, metadata);
+        // An ALTER that attaches a timeseries_tiering policy to a table with an index on a non-static
+        // column (or a materialized view) is refused here; until now only the sweeper noticed.
+        String tieringError = TieringPolicy.ddlRejection(table, keyspace, updated.tables.getNullable(tableName), updated);
+        if (tieringError != null)
+            throw ire("Cannot alter table '%s.%s': %s", keyspaceName, tableName, tieringError);
+        return schema.withAddedOrUpdated(updated);
     }
 
     SchemaChange schemaChangeEvent(KeyspacesDiff diff)

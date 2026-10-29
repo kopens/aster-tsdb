@@ -153,6 +153,96 @@ public class TieringSchemaSupportTest extends CQLTester
         assertNull(TieringPolicy.unsupportedSchemaError(metadata()));
     }
 
+    // ---- DDL-time refusal (2026-10-30): the sweeper used to be the only one to notice ----
+
+    private static final String POLICY = "{'" + TieringPolicy.EXTENSION_KEY + "': '{\"hot_window\":\"12h\"}'}";
+
+    private void createTieredTable() throws Throwable
+    {
+        createTable("CREATE TABLE %s (tag text, ts timestamp, asset_id text static, value double, " +
+                    "PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
+        alterTable("ALTER TABLE %s WITH extensions = " + POLICY + ";");
+    }
+
+    @Test
+    public void indexOnARegularColumnOfATieredTableIsRefusedAtDdl() throws Throwable
+    {
+        createTieredTable();
+        assertInvalidThrowMessage("has a timeseries_tiering policy", InvalidRequestException.class,
+                                  formatQuery("CREATE CUSTOM INDEX ON %s(value) USING 'sai'"));
+        assertInvalidThrowMessage("regular column 'value'", InvalidRequestException.class,
+                                  formatQuery("CREATE INDEX ON %s(value)"));
+        assertTrue("the refused index must not exist", metadata().indexes.isEmpty());
+        assertNull(TieringPolicy.unsupportedSchemaError(metadata()));
+    }
+
+    @Test
+    public void indexOnTheClusteringColumnOfATieredTableIsRefusedAtDdl() throws Throwable
+    {
+        createTieredTable();
+        assertInvalidThrowMessage("clustering column 'ts'", InvalidRequestException.class,
+                                  formatQuery("CREATE CUSTOM INDEX ON %s(ts) USING 'sai'"));
+        assertTrue(metadata().indexes.isEmpty());
+    }
+
+    @Test
+    public void indexOnAStaticColumnOfATieredTableIsAccepted() throws Throwable
+    {
+        createTieredTable();
+        createIndex("CREATE CUSTOM INDEX ON %s(asset_id) USING 'sai'");
+        assertNull(TieringPolicy.unsupportedSchemaError(metadata()));
+    }
+
+    @Test
+    public void attachingThePolicyToATableWithARegularIndexIsRefusedAndRecoverable() throws Throwable
+    {
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) " +
+                    "WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
+        String index = createIndex("CREATE CUSTOM INDEX ON %s(value) USING 'sai'");
+
+        assertInvalidThrowMessage(index, InvalidRequestException.class,
+                                  formatQuery("ALTER TABLE %s WITH extensions = " + POLICY));
+        assertTrue("the policy must not be attached",
+                   !metadata().params.extensions.containsKey(TieringPolicy.EXTENSION_KEY));
+
+        schemaChange("DROP INDEX " + KEYSPACE + '.' + index);
+        alterTable("ALTER TABLE %s WITH extensions = " + POLICY + ";");
+        assertTrue(metadata().params.extensions.containsKey(TieringPolicy.EXTENSION_KEY));
+    }
+
+    @Test
+    public void tieringATableWithNoIndexIsAccepted() throws Throwable
+    {
+        createTieredTable();
+        assertTrue(metadata().params.extensions.containsKey(TieringPolicy.EXTENSION_KEY));
+        // An unrelated ALTER of a tiered table is not affected.
+        alterTable("ALTER TABLE %s ADD note text");
+        assertNull(TieringPolicy.unsupportedSchemaError(metadata()));
+    }
+
+    @Test
+    public void materializedViewOverATieredTableIsRefusedAtDdl() throws Throwable
+    {
+        createTieredTable();
+        assertInvalidThrowMessage("materialized view", InvalidRequestException.class,
+                                  "CREATE MATERIALIZED VIEW " + KEYSPACE + ".mv_refused AS SELECT * FROM " +
+                                  KEYSPACE + '.' + currentTable() + " WHERE tag IS NOT NULL AND ts IS NOT NULL AND " +
+                                  "value IS NOT NULL PRIMARY KEY (value, tag, ts)");
+        assertNull(Schema.instance.getTableMetadata(KEYSPACE, "mv_refused"));
+    }
+
+    @Test
+    public void attachingThePolicyToATableWithAViewIsRefused() throws Throwable
+    {
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) " +
+                    "WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
+        String view = createViewAsync("CREATE MATERIALIZED VIEW %s AS SELECT * FROM %s " +
+                                      "WHERE tag IS NOT NULL AND ts IS NOT NULL AND value IS NOT NULL " +
+                                      "PRIMARY KEY (value, tag, ts)");
+        assertInvalidThrowMessage(view, InvalidRequestException.class,
+                                  formatQuery("ALTER TABLE %s WITH extensions = " + POLICY));
+    }
+
     /**
      * The chunk table holds the only copy of every tiered row (the base copies are deleted when they
      * are encoded), and transparent reads resolve through the <em>base</em> table's name -- so a

@@ -65,7 +65,17 @@ ALP의 압축 특성은 [bake-off 결과](codec-bakeoff.md)를 참고하세요.
 | 청크 테이블 예약어와 겹치는 파티션 키 이름 | `window_start`/`codec`/`samples`/`max_row_writetime`/`payload` — 미러링 시 같은 이름이 두 번 선언됩니다 |
 | `transactional_mode`이 `off`가 아닌 테이블 | Accord 트랜잭션 읽기(`TxnNamedRead.performLocalKeyRead`)는 `ReadCommand`를 로컬에서 그대로 실행하며 투명 읽기 병합을 **거치지 않습니다**. Accord를 켜는 모든 값(`off` 이외 전부, `mixed_reads`는 평범한 SERIAL 읽기까지 그리로 보냅니다)이 해당됩니다 |
 
-거부는 **그 테이블의 계층화 전체**를 멈추며, 콜드 청크 만료도 함께 멈춥니다(§1.3). `transactional_mode`
+거부는 **그 테이블의 계층화 전체**를 멈추며, 콜드 청크 만료도 함께 멈춥니다(§1.3).
+
+**DDL 시점 거절 (2026-10-30)**: 위 표 가운데 «static이 아닌 컬럼의 보조 인덱스» 와 «머티리얼라이즈드 뷰» 두 줄은
+스위퍼만이 아니라 **DDL 이 바로 거절**합니다 — 계층화 정책이 붙은 테이블에 그런 인덱스·뷰를 만드는
+`CREATE INDEX`/`CREATE CUSTOM INDEX`/`CREATE MATERIALIZED VIEW`, 그리고 그런 인덱스·뷰가 이미 있는 테이블에
+정책을 붙이는 `ALTER TABLE ... WITH extensions = {'timeseries_tiering': ...}` 가 `InvalidRequestException` 으로
+실패하며, 메시지가 테이블·인덱스(뷰)·컬럼과 사유를 말합니다(`TieringPolicy.ddlRejection`, 규칙 본문은
+`unsupportedSchemaError` 와 같은 함수). 그 전에는 DDL 이 성공하고 스위퍼가 5분 틱마다 ERROR 를 남기며 계층화를
+통째로 건너뛰었습니다. 이 규칙보다 먼저 그 상태가 된 스키마는 DDL 이 막지 않고(인덱스 삭제·정책 분리로 고칠 수
+있게) 스위퍼 검사가 그대로 잡습니다. 나머지 줄(컴팩션·counter·컬렉션·클러스터링·예약어·`transactional_mode`)은
+지금도 스위퍼 단계에서만 거부됩니다. `transactional_mode`
 줄은 특히 함정이 많으니 §1.2를 반드시 읽으십시오.
 
 아래는 이 문서 전체에서 쓰는 실 운영 테이블입니다 — static 7개 + 일반 컬럼 8개(혼합 타입, frozen 맵
