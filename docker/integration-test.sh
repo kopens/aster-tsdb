@@ -452,6 +452,9 @@ check "LIKE combines with time_bucket aggregation" \
     '^ *2024-01-01 09:00:00.* 2'
 
 section "tiered storage: policy, retier, chunk re-encode, late merge"
+# Every tiered table below is TSCS: since e3bec50b TieringPolicy.unsupportedSchemaError refuses any other
+# compaction (only TSCS's freeze reclaims the rows the re-encoder hides). This script was not run between that
+# commit and 2026-10-30, so its tables kept the default compaction and 15 tiering checks failed.
 # The simplest supported shape (TieringPolicy.unsupportedSchemaError accepts far more -- composite
 # partition keys, many regular columns, static columns): one text partition key, timestamp
 # clustering, one double value, which is also all the re-encoder can encode until it goes columnar.
@@ -459,7 +462,7 @@ cql "
 CREATE TABLE IF NOT EXISTS it.sensor (
     tag_id text, timestamp timestamp, value double,
     PRIMARY KEY (tag_id, timestamp)
-);
+) WITH compaction = {'class':'TimeSeriesCompactionStrategy'};
 " > /dev/null
 
 # Policy: hot_window 1h / chunk_window 1h, so the rows inserted 4 hours in the past below are
@@ -560,7 +563,7 @@ CREATE TABLE IF NOT EXISTS it.tm_tag_point (
     error_code int, latency int, quality int,
     value text, value_boolean boolean, value_numeric double,
     PRIMARY KEY (tag_id, timestamp)
-) WITH CLUSTERING ORDER BY (timestamp DESC);
+) WITH CLUSTERING ORDER BY (timestamp DESC) AND compaction = {'class':'TimeSeriesCompactionStrategy'};
 " > /dev/null
 
 check "ALTER TABLE installs the tiering policy on the production shape" \
@@ -814,7 +817,7 @@ cql "
 CREATE TABLE IF NOT EXISTS it.cold_expiry (
     tag_id text, timestamp timestamp, value double,
     PRIMARY KEY (tag_id, timestamp)
-);
+) WITH compaction = {'class':'TimeSeriesCompactionStrategy'};
 " > /dev/null
 OLD_WIN_MS=$(( (NOW2_MS / 3600000 - 5) * 3600000 ))     # expires under cold_window 3h
 NEW_WIN_MS=$(( (NOW2_MS / 3600000 - 2) * 3600000 ))     # cold (past hot_window 1h) but inside 3h
@@ -860,7 +863,7 @@ cql "
 CREATE TABLE IF NOT EXISTS it.swept (
     tag_id text, timestamp timestamp, value double,
     PRIMARY KEY (tag_id, timestamp)
-);
+) WITH compaction = {'class':'TimeSeriesCompactionStrategy'};
 " > /dev/null
 SWEPT_WIN_MS=$(( (NOW2_MS / 3600000 - 4) * 3600000 ))
 cql "
@@ -898,7 +901,7 @@ cql "
 CREATE TABLE IF NOT EXISTS it.restarted (
     tag_id text, timestamp timestamp, value double,
     PRIMARY KEY (tag_id, timestamp)
-);
+) WITH compaction = {'class':'TimeSeriesCompactionStrategy'};
 " > /dev/null
 cql "ALTER TABLE it.restarted WITH extensions = {'timeseries_tiering': '$TIERING_JSON'};" > /dev/null
 cql "
