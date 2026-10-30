@@ -31,6 +31,10 @@ variables:
   # modules/accord is a git submodule and is required by the build.
   GIT_SUBMODULE_STRATEGY: recursive
   GIT_SUBMODULE_DEPTH: 1
+  # The Testcontainers image and its package are named by COMMIT, never by a moving name: a consumer
+  # (plantpulse-core integrationTest) pins one SHA and must get exactly those bytes. "6.0.0" alone used to be
+  # both the image tag and the package version, so every publish silently replaced what consumers ran.
+  ASTER_IMAGE: "aster-tsdb:6.0.0-${CI_COMMIT_SHA}"
   ANT_OPTS: "-Xmx3g"   # 4g heap + metaspace/native exceeded the runner container cgroup during checkstyle (2,931 files) -> ant Killed; 3g leaves headroom on the smaller runners
 
 default:
@@ -177,7 +181,8 @@ timeseries-heap-soak:
 #   curl -sH "PRIVATE-TOKEN: <token>" \
 #     "$CI_API_V4_URL/projects/<id>/packages/generic/aster-tsdb-docker/<version>/aster-tsdb-6.0.0-docker.tar" \
 #     | podman load   # or: docker load
-#   ./gradlew integrationTest -Pcassandra.image=aster-tsdb:6.0.0
+#   ./gradlew integrationTest -Pcassandra.image=aster-tsdb:6.0.0-<commit sha>
+# The package version is the commit SHA (a tag pipeline: the tag), the image inside is aster-tsdb:6.0.0-<sha>.
 docker-image:
   # Throw-away work: a newer commit makes this run pointless, and the project has
   # ONE dedicated runner. auto_cancel_pending_pipelines is already enabled, but it
@@ -202,7 +207,7 @@ docker-image:
       --dockerfile "$CI_PROJECT_DIR/docker/Dockerfile"
       --no-push
       --tar-path "$CI_PROJECT_DIR/aster-tsdb-6.0.0-docker.tar"
-      --destination "aster-tsdb:6.0.0"
+      --destination "$ASTER_IMAGE"
   artifacts:
     name: "aster-tsdb-6.0.0-docker"
     paths:
@@ -248,7 +253,7 @@ docker-integration-test:
       allow_failure: true
   script:
     - docker load -i aster-tsdb-6.0.0-docker.tar
-    - ./docker/integration-test.sh aster-tsdb:6.0.0
+    - ./docker/integration-test.sh "$ASTER_IMAGE"
   artifacts:
     name: "timeseries-integration-test-report"
     when: always
@@ -296,7 +301,7 @@ docker-cluster-test:
       allow_failure: true
   script:
     - docker load -i aster-tsdb-6.0.0-docker.tar
-    - ./docker/cluster-test.sh aster-tsdb:6.0.0
+    - ./docker/cluster-test.sh "$ASTER_IMAGE"
   after_script:
     - docker rm -f cassandra-ts-cluster-1 cassandra-ts-cluster-2 cassandra-ts-cluster-3 || true
   artifacts:
@@ -334,7 +339,7 @@ docker-image-publish:
     - >-
       curl --fail --silent --show-error -H "JOB-TOKEN: $CI_JOB_TOKEN"
       --upload-file aster-tsdb-6.0.0-docker.tar
-      "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/aster-tsdb-docker/${CI_COMMIT_TAG:-6.0.0}/aster-tsdb-6.0.0-docker.tar"
+      "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/aster-tsdb-docker/${CI_COMMIT_TAG:-$CI_COMMIT_SHA}/aster-tsdb-6.0.0-docker.tar"
 
 # On tag pushes (e.g. 6.0.0-r1), publish a GitLab Release pointing at the built jar.
 changelog:
