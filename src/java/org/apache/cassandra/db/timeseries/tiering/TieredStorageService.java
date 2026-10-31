@@ -246,6 +246,14 @@ public class TieredStorageService implements TieredStorageServiceMBean
      */
     private final ConcurrentHashMap<String, Integer> consecutiveFailuresByTable = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> lastErrorByTable = new ConcurrentHashMap<>();
+    /**
+     * {@code "keyspace.table"} -> epoch millis of its last run that encoded everything it was asked to.
+     * Unlike {@link #lastRunAtMillisByTable}, a run that skipped tags does not move it, so its age is
+     * what an alert on "tiering has stopped working" has to watch.
+     */
+    private final ConcurrentHashMap<String, Long> lastSuccessAtMillisByTable = new ConcurrentHashMap<>();
+    /** What a table that has never succeeded is aged from. */
+    private final long createdAtMillis = Clock.Global.currentTimeMillis();
 
     /**
      * Test-only seam: invoked with {@code (keyspace, table)} at the top of every guarded run, i.e.
@@ -339,6 +347,7 @@ public class TieredStorageService implements TieredStorageServiceMBean
             return;
 
         MBeanWrapper.instance.registerMBean(this, MBEAN_NAME);
+        TieringMetrics.init();
         tieringExecutor.scheduleWithFixedDelay(this::sweep, SWEEP_DELAY_SECONDS, SWEEP_DELAY_SECONDS, TimeUnit.SECONDS);
         StorageService.instance.addPreShutdownHook(TieredStorageService::stopSweeping);
     }
@@ -510,6 +519,7 @@ public class TieredStorageService implements TieredStorageServiceMBean
             stats = runOnce(keyspace, table, Clock.Global.currentTimeMillis());
             lastRunAtMillisByTable.put(key, Clock.Global.currentTimeMillis());
             lastStatsByTable.put(key, stats);
+            TieringMetrics.record(keyspace, table, TieringMetrics.Event.TAG_SKIPPED, stats.tagsSkipped);
             if (stats.tagsSkipped > 0)
                 recordFailure(key, format("%d tag(s) skipped; see this node's log for the per-tag cause", stats.tagsSkipped));
             else
@@ -547,6 +557,30 @@ public class TieredStorageService implements TieredStorageServiceMBean
     {
         consecutiveFailuresByTable.remove(key);
         lastErrorByTable.remove(key);
+        lastSuccessAtMillisByTable.put(key, Clock.Global.currentTimeMillis());
+    }
+
+    /** @return the most runs in a row any table's tiering has failed or skipped tags; 0 when all are healthy. */
+    public int maxConsecutiveFailures()
+    {
+        int max = 0;
+        for (int failures : consecutiveFailuresByTable.values())
+            max = Math.max(max, failures);
+        return max;
+    }
+
+    /**
+     * @return over every table this node has attempted to tier, the longest time since one of its runs
+     * last encoded everything (since this service started, for a table that never has); 0 if none has
+     * been attempted.
+     */
+    public long maxMillisSinceLastSuccess()
+    {
+        long now = Clock.Global.currentTimeMillis();
+        long max = 0;
+        for (String key : lastAttemptAtMillisByTable.keySet())
+            max = Math.max(max, now - lastSuccessAtMillisByTable.getOrDefault(key, createdAtMillis));
+        return max;
     }
 
     /** @return epoch millis of {@code keyspace.table}'s last attempted run, completed or not, or {@code null}. */
