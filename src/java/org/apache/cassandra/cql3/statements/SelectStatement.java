@@ -1076,6 +1076,10 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         if (keyBounds == null)
             return ReadQuery.empty(table);
 
+        // A range scan cannot merge a tiered table's chunks; refuse one that could reach them rather
+        // than answer with the hot rows alone. See TransparentReads.guardRangeRead.
+        org.apache.cassandra.db.timeseries.tiering.TransparentReads.guardRangeRead(table, clusteringIndexFilter, state, options.getConsistency());
+
         ReadQuery command =
             PartitionRangeReadQuery.create(table, nowInSec, columnFilter, rowFilter, limit, new DataRange(keyBounds, clusteringIndexFilter), potentialTxnConflicts);
 

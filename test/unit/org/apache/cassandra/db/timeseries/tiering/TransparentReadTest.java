@@ -38,6 +38,7 @@ import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
+import org.apache.cassandra.db.timeseries.CorruptChunkException;
 import org.apache.cassandra.db.timeseries.UnsupportedChunkFormatException;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
@@ -179,39 +180,55 @@ public class TransparentReadTest extends CQLTester
                 "SET payload = " + hexPayload + " WHERE tag = 't1' AND window_start = ?", new Date(0L));
     }
 
-    private void assertOnlySecondWindowAndHotRowServed() throws Throwable
+    /**
+     * A corrupt chunk used to be skipped with a warning, so the SELECT succeeded with that window's
+     * rows silently missing -- the same wrong-answer-as-success a range scan gave, and one a retry
+     * never fixes: the encoder is deterministic, so every replica holds the same bad bytes and read
+     * repair has nothing to repair from. The read now fails, naming the table, the window and the
+     * chunk table, as upstream fails a read of a corrupt sstable.
+     */
+    private void assertCorruptFirstWindowFailsTheRead() throws Throwable
     {
-        UntypedResultSet rows = execute("SELECT value FROM %s WHERE tag = 't1'");
-        assertEquals(3, rows.size());
-        double[] expected = { 4.0, 5.0, 6.0 };
-        int i = 0;
-        for (UntypedResultSet.Row row : rows)
-            assertEquals(expected[i++], row.getDouble("value"), 0.0);
+        long corruptBefore = TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.CORRUPT_CHUNK_READ);
+        try
+        {
+            UntypedResultSet rows = execute("SELECT value FROM %s WHERE tag = 't1'");
+            fail("expected the corrupt chunk to fail the read; got " + rows.size() + " row(s) with its window missing");
+        }
+        catch (CorruptChunkException e)
+        {
+            assertTrue(e.getMessage(), e.getMessage().contains(currentTable()));
+            assertTrue(e.getMessage(), e.getMessage().contains(ChunkTables.chunkTableName(currentTable())));
+            assertTrue(e.getMessage(), e.getMessage().contains("corrupt"));
+        }
+        assertEquals(corruptBefore + 1,
+                     TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.CORRUPT_CHUNK_READ));
+
+        // Reads that do not reach the corrupt window are unaffected.
+        assertEquals(3, execute("SELECT value FROM %s WHERE tag = 't1' AND ts >= ?", new Date(HOUR)).size());
     }
 
     @Test
-    public void corruptChunkSkippedWithRemainingDataServed() throws Throwable
+    public void corruptChunkFailsTheReadInsteadOfOmittingItsWindow() throws Throwable
     {
         loadTwoWindowsAndReencode();
 
         // A first byte naming no chunk format at all -- what a scrambled header looks like.
         overwriteFirstChunkPayload("0xdeadbeef");
 
-        // Window [0,1h) is unreadable and skipped; window [1h,2h) and the hot row still serve.
-        assertOnlySecondWindowAndHotRowServed();
+        assertCorruptFirstWindowFailsTheRead();
     }
 
     @Test
-    public void corruptChunkWithASupportedVersionIsStillSkipped() throws Throwable
+    public void corruptChunkWithASupportedVersionFailsTheReadToo() throws Throwable
     {
         loadTwoWindowsAndReencode();
 
         // Version byte 4 (the format this build writes), but a header claiming 0 rows: corrupt
-        // CONTENT, not a format this build cannot read. Availability wins here -- skip the one bad
-        // chunk, serve the rest.
+        // CONTENT, not a format this build cannot read. Still not a reason to answer without it.
         overwriteFirstChunkPayload("0x04" + "0".repeat(78));
 
-        assertOnlySecondWindowAndHotRowServed();
+        assertCorruptFirstWindowFailsTheRead();
     }
 
     @Test
@@ -603,19 +620,20 @@ public class TransparentReadTest extends CQLTester
      * can reach is read, and the ones beyond the range are not touched at all.
      * <p>
      * "Can reach" is the look-back, not the range: a chunk of width W starting at S holds
-     * {@code [S, S+W)}, so the window listing starts at {@code startMs - widestChunkWindow} and the
-     * range {@code [1h, 3h)} lists windows 0, 1 and 2. Window 0 contributes nothing (all of its rows
-     * are below 1h) but it has to be decoded to establish that -- the chunk table records where a
-     * window starts, not how wide it is. That is the bound the read path has always used; it is
-     * asserted here so that "3" stays a deliberate cost rather than a number nobody chose.
+     * {@code [S, S+W)}, so it reaches a range starting at {@code startMs} only if
+     * {@code S > startMs - widestChunkWindow}. The range {@code [1h, 3h)} therefore lists windows 1
+     * and 2 and not window 0, which starts exactly at {@code 1h - 1h} and ends at {@code 1h - 1ms}.
+     * The listing used to be inclusive and decoded window 0 for nothing; that only cost a decode
+     * until a corrupt chunk started failing the query, at which point it failed every query starting
+     * at the window after a corrupt one (see assertCorruptFirstWindowFailsTheRead).
      */
     @Test
     public void boundedReadStillReadsExactlyTheWindowsItsRangeCanReach() throws Throwable
     {
         loadSixWindowsAndReencode();
 
-        assertEquals("a range over two windows reads those two plus the one the look-back admits",
-                     3, payloadReadsFor("SELECT value FROM %s WHERE tag = 't1' AND ts >= ? AND ts < ?",
+        assertEquals("a range over two windows reads those two, and not the one that ends where it starts",
+                     2, payloadReadsFor("SELECT value FROM %s WHERE tag = 't1' AND ts >= ? AND ts < ?",
                                         new Date(HOUR), new Date(3 * HOUR)));
         assertEquals(6, execute("SELECT value FROM %s WHERE tag = 't1' AND ts >= ? AND ts < ?",
                                 new Date(HOUR), new Date(3 * HOUR)).size());
@@ -684,9 +702,9 @@ public class TransparentReadTest extends CQLTester
      * Slices compose with the limit's early termination: the window listing is already bounded by the
      * slice (windows outside {@code [startMs - lookback, endMsExcl)} are never even listed, see
      * {@code boundedReadStillReadsExactlyTheWindowsItsRangeCanReach}), and within that bound a
-     * {@code LIMIT} stops the walk. The slice [1h, 4h) admits windows 0-3 (window 0 via the
-     * look-back); ascending must decode window 0 just to learn all its rows sit below 1h, so the
-     * counts differ by direction -- and both are smaller than the 4 a full slice scan pays.
+     * {@code LIMIT} stops the walk. The slice [1h, 4h) admits windows 1-3 (window 0 ends where the
+     * slice starts, so the look-back no longer admits it), and in either direction the first window
+     * decoded satisfies LIMIT 1 -- against the 3 a full slice scan pays.
      */
     @Test
     public void sliceWithLimitDecodesOnlyTheWindowsItNeeds() throws Throwable
@@ -696,11 +714,11 @@ public class TransparentReadTest extends CQLTester
         assertEquals("DESC: the newest in-slice window satisfies LIMIT 1 by itself",
                      1, payloadReadsFor("SELECT value FROM %s WHERE tag = 't1' AND ts >= ? AND ts < ? " +
                                         "ORDER BY ts DESC LIMIT 1", new Date(HOUR), new Date(4 * HOUR)));
-        assertEquals("ASC: the look-back window decodes empty, then the first in-slice window serves",
-                     2, payloadReadsFor("SELECT value FROM %s WHERE tag = 't1' AND ts >= ? AND ts < ? LIMIT 1",
+        assertEquals("ASC: the first in-slice window serves; nothing below the slice is decoded",
+                     1, payloadReadsFor("SELECT value FROM %s WHERE tag = 't1' AND ts >= ? AND ts < ? LIMIT 1",
                                         new Date(HOUR), new Date(4 * HOUR)));
         assertEquals("the un-limited slice still reads every window its range can reach",
-                     4, payloadReadsFor("SELECT value FROM %s WHERE tag = 't1' AND ts >= ? AND ts < ?",
+                     3, payloadReadsFor("SELECT value FROM %s WHERE tag = 't1' AND ts >= ? AND ts < ?",
                                         new Date(HOUR), new Date(4 * HOUR)));
     }
 
@@ -916,6 +934,74 @@ public class TransparentReadTest extends CQLTester
         assertTrue("statements prepared against a dropped chunk table must not survive it: "
                    + cachedChunkStatements(chunkTable).keySet(),
                    cachedChunkStatements(chunkTable).isEmpty());
+    }
+
+    /**
+     * A range scan has no partition to merge chunks into, so on a tiered table it used to come back
+     * with the hot rows alone, behind a client warning most drivers never surface: {@code count(*)}
+     * over 20M rows answered 500 (tiering-benchmark.md). A successful query that is silently missing
+     * every cold row is the worst answer there is, so the scan is now refused instead.
+     * <p>
+     * Through the native protocol, because that is the path a client takes and the guard leaves
+     * internal callers alone. Spark's full-table read is the token-range shape below.
+     */
+    @Test
+    public void rangeScansThatReachColdDataAreRefused() throws Throwable
+    {
+        requireNetwork();
+        loadTwoWindowsAndReencode();
+
+        assertRangeScanRefused("SELECT ts, value FROM %s");
+        assertRangeScanRefused("SELECT count(*) FROM %s");
+        assertRangeScanRefused("SELECT DISTINCT tag FROM %s");
+        assertRangeScanRefused("SELECT ts, value FROM %s WHERE token(tag) > -9223372036854775808 AND token(tag) <= 0");
+        assertRangeScanRefused("SELECT ts, value FROM %s WHERE ts < ? ALLOW FILTERING", new Date(HOUR));
+    }
+
+    /**
+     * ...but a scan whose time range lies wholly above the cold boundary reads no chunked window, so
+     * its answer is complete and it is served. The guard uses the real clock, not runOnce's synthetic
+     * one: hot_window is 2h, so one hour ago is hot.
+     */
+    @Test
+    public void rangeScansConfinedToTheHotWindowAreStillServed() throws Throwable
+    {
+        requireNetwork();
+        loadTwoWindowsAndReencode();
+        long recent = System.currentTimeMillis() - HOUR;
+        execute("INSERT INTO %s (tag, ts, value) VALUES ('t2', ?, 7.0)", new Date(recent));
+
+        assertEquals(1, executeNet("SELECT value FROM %s WHERE ts >= ? ALLOW FILTERING",
+                                   new Date(recent - 60_000L)).all().size());
+    }
+
+    @Test
+    public void rangeScansOnATableThatWasNeverTieredAreUntouched() throws Throwable
+    {
+        requireNetwork();
+        createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
+        execute("INSERT INTO %s (tag, ts, value) VALUES ('t1', ?, 1.0)", new Date(10 * 60_000L));
+
+        assertEquals(1L, executeNet("SELECT count(*) FROM %s").one().getLong(0));
+    }
+
+    private void assertRangeScanRefused(String query, Object... values) throws Throwable
+    {
+        long refusedBefore = TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.RANGE_SCAN_REFUSED);
+        try
+        {
+            int rows = executeNet(query, values).all().size();
+            fail("expected the range scan to be refused rather than answered from hot rows only: " + query +
+                 " returned " + rows + " row(s)");
+        }
+        catch (com.datastax.driver.core.exceptions.InvalidQueryException e)
+        {
+            assertTrue(e.getMessage(), e.getMessage().contains("range scan"));
+            assertTrue(e.getMessage(), e.getMessage().contains("partition key"));
+        }
+        assertEquals("each refusal is counted, so an operator sees it without a log search",
+                     refusedBefore + 1,
+                     TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.RANGE_SCAN_REFUSED));
     }
 
     /** @return what {@link TransparentReads#maybeWrap} does to {@code hot} for a full-partition read of 't1'. */
