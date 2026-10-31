@@ -43,6 +43,16 @@ import static org.junit.Assert.assertTrue;
  */
 public class TieredTruncateTest extends CQLTester
 {
+    /**
+     * These fixtures pin results with tiny explicit writetimes on 1970 clusterings, the shape the
+     * past-timestamp guard refuses on a tiered table; see TieredWrites#acceptPastTimestampsIntoColdDataForTesting.
+     */
+    @BeforeClass
+    public static void acceptPastTimestampFixtures()
+    {
+        TieredWrites.acceptPastTimestampsIntoColdDataForTesting = true;
+    }
+
     private static final long HOUR = 3_600_000L;
 
     @BeforeClass

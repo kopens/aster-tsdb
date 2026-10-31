@@ -22,6 +22,7 @@ import java.util.List;
 
 import com.google.common.collect.ImmutableList;
 
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.slf4j.LoggerFactory;
 
@@ -69,6 +70,16 @@ import static org.junit.Assert.assertTrue;
  */
 public class TieringSchemaSupportTest extends CQLTester
 {
+    /**
+     * These fixtures pin results with tiny explicit writetimes on 1970 clusterings, the shape the
+     * past-timestamp guard refuses on a tiered table; see TieredWrites#acceptPastTimestampsIntoColdDataForTesting.
+     */
+    @BeforeClass
+    public static void acceptPastTimestampFixtures()
+    {
+        TieredWrites.acceptPastTimestampsIntoColdDataForTesting = true;
+    }
+
     private static final long HOUR = 3_600_000L;
 
     // ---- rejections that need a live schema ----

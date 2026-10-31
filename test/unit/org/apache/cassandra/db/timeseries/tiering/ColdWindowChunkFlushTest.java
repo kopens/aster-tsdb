@@ -22,6 +22,7 @@ import java.util.Date;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.After;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.CQLTester;
@@ -62,6 +63,16 @@ import static org.junit.Assert.assertTrue;
  */
 public class ColdWindowChunkFlushTest extends CQLTester
 {
+    /**
+     * These fixtures pin results with tiny explicit writetimes on 1970 clusterings, the shape the
+     * past-timestamp guard refuses on a tiered table; see TieredWrites#acceptPastTimestampsIntoColdDataForTesting.
+     */
+    @BeforeClass
+    public static void acceptPastTimestampFixtures()
+    {
+        TieredWrites.acceptPastTimestampsIntoColdDataForTesting = true;
+    }
+
     private static final long HOUR = 3_600_000L;
     private static final String TSCS_1H =
         "{'class':'TimeSeriesCompactionStrategy','window_size':'1h','freeze_after':'2h'}";

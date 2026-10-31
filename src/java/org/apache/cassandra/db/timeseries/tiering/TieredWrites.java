@@ -20,6 +20,8 @@ package org.apache.cassandra.db.timeseries.tiering;
 import java.util.Iterator;
 import java.util.List;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.DeletionInfo;
 import org.apache.cassandra.db.IMutation;
@@ -152,6 +154,8 @@ public final class TieredWrites
         if (!ColdBoundary.hasTimestampClustering(metadata))
             return;
 
+        refusePastTimestampsIntoColdData(update);
+
         // CONTENT FIRST, coverage second. Coverage can cost a ledger read, and the overwhelming
         // majority of writes -- every plain INSERT/UPDATE of real values -- cannot un-write anything
         // whatever the coverage turns out to be. Asking coverage before looking at the update made
@@ -221,6 +225,83 @@ public final class TieredWrites
     {
         long lastKnownTop = ChunkCoverage.lastKnownTopExclusiveMs(metadata);
         return policy == null ? lastKnownTop : Math.max(lastKnownTop, ColdBoundary.hotBoundaryMs(policy));
+    }
+
+    /**
+     * Test-only seam. The tiering tests pin their results with tiny explicit writetimes
+     * ({@code USING TIMESTAMP 101}) on 1970 clusterings -- exactly the shape
+     * {@link #refusePastTimestampsIntoColdData} refuses -- and assert what the re-encoder does with
+     * them. Production never sets it.
+     */
+    @VisibleForTesting
+    public static volatile boolean acceptPastTimestampsIntoColdDataForTesting;
+
+    /**
+     * Refuses a live write into the cold region that carries a write timestamp older than the hot
+     * boundary -- a client-supplied past timestamp, typically {@code USING TIMESTAMP <measurement
+     * time>} on a backfill.
+     * <p>
+     * The re-encoder removes the rows it encoded with a range tombstone at the window's newest
+     * writetime ({@code USING TIMESTAMP maxWt}, tiered-storage.md §5.1). A write that reaches the
+     * window after that and carries a timestamp at or below {@code maxWt} is shadowed by it the moment
+     * it lands: it never shows in a read and the next cycle never sees it to encode, so it is lost
+     * without an error. With server timestamps that cannot happen (a write made after the cycle read
+     * the window is newer than anything the cycle read); with measurement-time timestamps it is the
+     * normal case for late data -- an edge device's backlog stamped with the times it measured. Both
+     * conditions below hold for exactly that write: its clustering is cold, and so is its stamp.
+     * Refused loudly so the writer keeps it and resends without the explicit timestamp, which the
+     * next cycle merges into the chunk. Current-time writes, and measurement-time stamps on hot data
+     * (ordinary collection, and what TSCS windows by), are untouched.
+     * <p>
+     * Needs the policy's hot window to say what is cold; a table whose policy was detached is not
+     * re-encoded any more, so there is no future tombstone to be shadowed by.
+     */
+    private static void refusePastTimestampsIntoColdData(PartitionUpdate update)
+    {
+        if (acceptPastTimestampsIntoColdDataForTesting)
+            return;
+
+        TableMetadata metadata = update.metadata();
+        TieringPolicy policy;
+        try
+        {
+            policy = TieringPolicy.fromTable(metadata);
+        }
+        catch (ConfigurationException e)
+        {
+            // Not being re-encoded with an invalid policy either.
+            return;
+        }
+        if (policy == null)
+            return;
+
+        long hotBoundaryMs = ColdBoundary.hotBoundaryMs(policy);
+        long hotBoundaryMicros = hotBoundaryMs * 1000;
+        for (Row row : update)
+        {
+            if (row.clustering() == Clustering.STATIC_CLUSTERING)
+                continue;
+            if (ColdBoundary.clusteringMs(row.clustering()) >= hotBoundaryMs)
+                continue;
+            long oldest = Long.MAX_VALUE;
+            if (!row.primaryKeyLivenessInfo().isEmpty())
+                oldest = row.primaryKeyLivenessInfo().timestamp();
+            for (Cell<?> cell : row.cells())
+                if (!cell.isTombstone())
+                    oldest = Math.min(oldest, cell.timestamp());
+            if (oldest < hotBoundaryMicros)
+            {
+                TieringMetrics.record(metadata, TieringMetrics.Event.COLD_WRITE_REFUSED);
+                throw new InvalidRequestException(
+                    String.format("Writing to %s.%s at a clustering older than the hot window with a write timestamp " +
+                                  "(%d) also older than it -- a client-supplied past timestamp, such as USING TIMESTAMP " +
+                                  "<measurement time> -- is not allowed on a tiered table: the re-encoder removes rows it " +
+                                  "has encoded with a range tombstone at the window's newest write timestamp, which would " +
+                                  "shadow this write silently and lose it. Resend it without USING TIMESTAMP (the server's " +
+                                  "timestamp); tiering merges it into the chunk on its next cycle.",
+                                  metadata.keyspace, metadata.name, oldest));
+            }
+        }
     }
 
     /**
