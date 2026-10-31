@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,6 +66,16 @@ import static org.junit.Assert.fail;
  */
 public class TieredStorageColumnsTest extends CQLTester
 {
+    /**
+     * These fixtures pin results with tiny explicit writetimes on 1970 clusterings, the shape the
+     * past-timestamp guard refuses on a tiered table; see TieredWrites#acceptPastTimestampsIntoColdDataForTesting.
+     */
+    @BeforeClass
+    public static void acceptPastTimestampFixtures()
+    {
+        TieredWrites.acceptPastTimestampsIntoColdDataForTesting = true;
+    }
+
     private static final Logger logger = LoggerFactory.getLogger(TieredStorageColumnsTest.class);
 
     private static final long HOUR = 3_600_000L;
@@ -475,6 +486,72 @@ public class TieredStorageColumnsTest extends CQLTester
         UntypedResultSet.Row row = execute("SELECT value, quality FROM %s WHERE tag = 't' AND ts = ?", new Date(0L)).one();
         assertEquals("the chunk's value survives the null once merged", 1.5, row.getDouble("value"), 0.0);
         assertEquals("the live column of the late row is merged", 7, row.getInt("quality"));
+    }
+
+    /**
+     * The loss the past-timestamp guard exists for, reproduced with the guard off (this class's
+     * fixtures run with it off anyway). Window [0, 1h) is encoded and its rows range-deleted at its
+     * max writetime, 100. A late row for that window stamped with its measurement time -- 50, below
+     * 100 -- is shadowed by that tombstone the moment it lands: no read ever shows it, and the next
+     * cycle never sees it to encode. No error anywhere. With server timestamps this cannot happen.
+     */
+    @Test
+    public void aLateRowStampedBelowItsWindowsMaxWritetimeIsLostWithoutTheGuard() throws Throwable
+    {
+        chunkOneRow();
+        execute("INSERT INTO %s (tag, ts, value) VALUES ('t', ?, 2.5) USING TIMESTAMP 50", new Date(30 * 60_000L));
+
+        assertEquals("shadowed the moment it lands", 0,
+                     execute("SELECT value FROM %s WHERE tag = 't' AND ts = ?", new Date(30 * 60_000L)).size());
+        new TieredStorageService().runOnce(KEYSPACE, currentTable(), 5 * HOUR);
+        assertEquals("and never encoded by the next cycle", 0,
+                     execute("SELECT value FROM %s WHERE tag = 't' AND ts = ?", new Date(30 * 60_000L)).size());
+    }
+
+    /**
+     * With the guard on, that write is refused instead of lost, and counted. The same row resent
+     * without the explicit timestamp is accepted and merged by the next cycle; a measurement-time
+     * stamp on hot data (ordinary collection) is untouched.
+     */
+    @Test
+    public void aPastTimestampIntoColdDataIsRefusedRatherThanLost() throws Throwable
+    {
+        chunkOneRow();
+        TieredWrites.acceptPastTimestampsIntoColdDataForTesting = false;
+        try
+        {
+            long refusedBefore = TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.COLD_WRITE_REFUSED);
+            for (String write : new String[]{ "INSERT INTO %s (tag, ts, value) VALUES ('t', ?, 2.5) USING TIMESTAMP 50",
+                                              "UPDATE %s USING TIMESTAMP 50 SET value = 2.5 WHERE tag = 't' AND ts = ?" })
+            {
+                try
+                {
+                    execute(write, new Date(30 * 60_000L));
+                    fail("expected the past-timestamped cold write to be refused rather than shadowed: " + write);
+                }
+                catch (InvalidRequestException e)
+                {
+                    assertTrue(e.getMessage(), e.getMessage().contains("USING TIMESTAMP"));
+                }
+            }
+            assertEquals(refusedBefore + 2,
+                         TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.COLD_WRITE_REFUSED));
+
+            execute("INSERT INTO %s (tag, ts, value) VALUES ('t', ?, 2.5)", new Date(30 * 60_000L));
+            new TieredStorageService().runOnce(KEYSPACE, currentTable(), 5 * HOUR);
+            assertEquals("resent with the server's timestamp, it survives and is merged", 2.5,
+                         execute("SELECT value FROM %s WHERE tag = 't' AND ts = ?", new Date(30 * 60_000L))
+                         .one().getDouble("value"), 0.0);
+
+            long recent = System.currentTimeMillis() - 60_000L;
+            execute("INSERT INTO %s (tag, ts, value) VALUES ('t', ?, 3.5) USING TIMESTAMP ?", new Date(recent), recent * 1000);
+            assertEquals(3.5, execute("SELECT value FROM %s WHERE tag = 't' AND ts = ?", new Date(recent))
+                              .one().getDouble("value"), 0.0);
+        }
+        finally
+        {
+            TieredWrites.acceptPastTimestampsIntoColdDataForTesting = true;
+        }
     }
 
     @Test

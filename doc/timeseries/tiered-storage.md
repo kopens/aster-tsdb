@@ -624,8 +624,13 @@ static 컬럼(`site_id`, `tag_name`, …)에 대한 쓰기·삭제는 이 규칙
    있습니다. `cold_window`를 정할 때 `chunk_window`만큼의 여유를 두세요.
 2. **서버측 write timestamp 가정**: 설계는 행 writetime이 서버가 찍는 현재 시각이라는 전제 위에
    있습니다. 클라이언트가 `USING TIMESTAMP`로 **이미 스윕된 maxWt 이하의** writetime을 지정해 행을
-   넣으면, 그 행은 기존 레인지 톰스톤보다 오래된 것으로 취급되어 재인코딩 없이 사라질 수 있습니다.
-   계층화 대상 테이블에는 클라이언트 지정 타임스탬프를 쓰지 마세요.
+   넣으면, 그 행은 기존 레인지 톰스톤에 가려져 재인코딩 없이 사라집니다(재현:
+   `TieredStorageColumnsTest.aLateRowStampedBelowItsWindowsMaxWritetimeIsLostWithoutTheGuard`).
+   측정 시각을 writetime으로 찍는 수집기의 늦은 데이터가 정확히 이 형태라, 이제 쓰기 가드가 막습니다:
+   클러스터링이 `now - hot_window`보다 오래됐고 writetime도 그보다 오래된 쓰기는
+   `InvalidRequestException`으로 **거부**됩니다(`cold_writes_refused`로 집계). 조용히 사라지는 대신
+   시끄럽게 실패하므로, 수집기는 거부된 데이터를 보관했다가 `USING TIMESTAMP` 없이 다시 보내면 됩니다
+   — 다음 주기에 청크로 병합됩니다. 근본 해결(툼스톤 없이 원본을 회수)은 후속 과제입니다.
 3. ~~**베이스 행이 전부 사라진 태그의 청크 만료**~~ — **해결됨.** `cold_window` 만료는 베이스
    테이블이 아니라 **청크 테이블**에서 태그를 열거하므로, 모든 행이 재인코딩·삭제된 뒤 새 쓰기가
    없는 태그의 콜드 청크도 정상 만료됩니다. (인코딩 쪽 태그 열거는 여전히 베이스 테이블
