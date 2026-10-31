@@ -753,7 +753,7 @@ ALTER TABLE pp.tm_tag_point WITH extensions = {};
 
 ## 통합 테스트 (릴리스 게이트)
 
-유닛 테스트는 함수를 프로세스 안에서 검증하지만, [docker/integration-test.sh](docker/integration-test.sh)는 **실제 이미지를 띄워** 스키마 생성부터 읽기 경로·집계·네이티브 프로토콜까지 통과하는 시계열 CQL 결과를 손으로 계산한 값과 대조합니다(93개 검증, 프로세스 재시작 포함).
+유닛 테스트는 함수를 프로세스 안에서 검증하지만, [docker/integration-test.sh](docker/integration-test.sh)는 **실제 이미지를 띄워** 스키마 생성부터 읽기 경로·집계·네이티브 프로토콜까지 통과하는 시계열 CQL 결과를 손으로 계산한 값과 대조합니다(107개 검증, 프로세스 재시작 포함).
 
 ```bash
 docker build -t aster-tsdb:6.0.0 -f docker/Dockerfile .
