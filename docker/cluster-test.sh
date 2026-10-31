@@ -495,11 +495,15 @@ check "the whole table reads back at ALL after the repair" \
     "CONSISTENCY ALL; SELECT count(*) FROM ct.tscs;" "^ *$((WINDOWS * FLUSHES + 4))"
 
 section "tiered storage across three replicas"
+# TSCS, not the default compaction: since e3bec50b1d tiering refuses any other strategy (only TSCS's
+# freeze reclaims the rows the re-encoder hides), and a default-compaction table here is skipped by
+# every cycle -- no chunk table, and the "encoded exactly once" check fails. The integration test got
+# the same fix in d343bda4a6; this script is a manual CI job, so it was missed until 2026-11-01.
 cql_at 1 "
 CREATE TABLE IF NOT EXISTS ct.sensor (
     tag_id text, timestamp timestamp, value double,
     PRIMARY KEY (tag_id, timestamp)
-);
+) WITH compaction = {'class':'TimeSeriesCompactionStrategy'};
 " > /dev/null
 sleep 3
 

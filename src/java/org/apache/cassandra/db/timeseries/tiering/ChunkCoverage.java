@@ -142,6 +142,15 @@ public final class ChunkCoverage
      */
     private static final ConcurrentHashMap<TableId, Object> LOADING = new ConcurrentHashMap<>();
 
+    /**
+     * The newest established {@link Coverage#topExclusiveMs()} per table, kept across an
+     * {@link Coverage#UNKNOWN} reload. The ledger only ever widens (see {@link #claim}), so a top that
+     * was once established is still a floor on where chunked data begins while the ledger cannot be
+     * read -- which is what {@link TieredWrites} needs then. Forgotten where the ledger is
+     * legitimately reset, with the cache entry ({@link #invalidate}, called on TRUNCATE).
+     */
+    private static final ConcurrentHashMap<TableId, Long> LAST_KNOWN_TOP = new ConcurrentHashMap<>();
+
     private ChunkCoverage()
     {
     }
@@ -368,6 +377,7 @@ public final class ChunkCoverage
     static void invalidate(TableMetadata base)
     {
         CACHE.remove(base.id);
+        LAST_KNOWN_TOP.remove(base.id);
     }
 
     @VisibleForTesting
@@ -375,6 +385,18 @@ public final class ChunkCoverage
     {
         CACHE.clear();
         LOADING.clear();
+        LAST_KNOWN_TOP.clear();
+    }
+
+    /**
+     * @return the newest top this node has seen established for {@code base}'s ledger, or
+     * {@link Long#MIN_VALUE} if none -- never reads the ledger. Data below it was chunked, whatever
+     * the ledger answers now.
+     */
+    public static long lastKnownTopExclusiveMs(TableMetadata base)
+    {
+        Long top = LAST_KNOWN_TOP.get(base.id);
+        return top == null ? Long.MIN_VALUE : top;
     }
 
     /**
@@ -490,6 +512,8 @@ public final class ChunkCoverage
 
     private static void put(TableId id, Coverage coverage)
     {
+        if (coverage.anyChunks())
+            LAST_KNOWN_TOP.merge(id, coverage.topExclusiveMs(), Math::max);
         if (CACHE.size() >= MAX_CACHED_TABLES)
         {
             // Wholesale, like TieringPolicy.PARSED: at 4096 distinct tables this is a once-in-a-very-
@@ -518,6 +542,7 @@ public final class ChunkCoverage
                              "reaches cannot be established; every read will merge chunks until the ledger is " +
                              "rebuilt by the next re-encode cycle",
                              base.keyspace, base.name, ChunkTables.coverageTableName(base.name));
+            TieringMetrics.record(base, TieringMetrics.Event.COVERAGE_READ_FAILURE);
             return Coverage.UNKNOWN;
         }
 
@@ -542,6 +567,7 @@ public final class ChunkCoverage
                              base.keyspace + '.' + base.name + ":coverage-read", 1, TimeUnit.MINUTES,
                              "Tiered storage: could not read {}.{}'s chunk coverage ledger; merging chunks into " +
                              "every read of this table until it can be read again", base.keyspace, base.name, e);
+            TieringMetrics.record(base, TieringMetrics.Event.COVERAGE_READ_FAILURE);
             return Coverage.UNKNOWN;
         }
         finally

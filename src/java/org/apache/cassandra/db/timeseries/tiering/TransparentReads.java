@@ -32,6 +32,7 @@ import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.ReadQuery;
 import org.apache.cassandra.db.SinglePartitionReadQuery;
+import org.apache.cassandra.db.Slice;
 import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.filter.ClusteringIndexFilter;
 import org.apache.cassandra.db.filter.ClusteringIndexNamesFilter;
@@ -39,8 +40,10 @@ import org.apache.cassandra.db.filter.ClusteringIndexSliceFilter;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.exceptions.ConfigurationException;
+import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.ClientWarn;
 
 /**
@@ -156,11 +159,13 @@ public final class TransparentReads
             commands = Collections.singletonList((SinglePartitionReadQuery) query);
         else
         {
-            // Range scans cannot merge chunks (no partition context) and would otherwise silently
-            // see hot rows only - warn instead of returning a quietly incomplete answer (v1 scope;
-            // spec section 3.3). The hook now fires from several places per query, so de-duplicate
-            // against the warnings already accumulated for THIS request rather than sending the
-            // client the same sentence three times.
+            // Range scans cannot merge chunks (no partition context). A client's range scan that
+            // could reach chunked data never gets here -- guardRangeRead refused it before it was
+            // issued -- so what arrives is either confined to the hot window (complete) or an
+            // internal caller, which reads the base table as it stands on purpose. The warning is
+            // for the latter. The hook fires from several places per query, so de-duplicate against
+            // the warnings already accumulated for THIS request rather than sending the same
+            // sentence three times.
             String warning = "tiered table " + metadata.keyspace + '.' + metadata.name +
                              ": range scans read hot rows only; query by partition key for merged hot+cold reads";
             List<String> existing = ClientWarn.instance.getWarnings();
@@ -259,6 +264,86 @@ public final class TransparentReads
                                                    // Decode only the columns this query reads.
                                                    chunkProjection(query.columnFilter()), cl);
         return ChunkMergeUnfilteredIterator.wrap(hot, keys, chunks::rowsFor, metadata, filter.isReversed());
+    }
+
+    /**
+     * Refuses a client's range scan (any read without a partition key: a full scan, {@code count(*)},
+     * {@code DISTINCT}, a token range -- Spark's full-table read) when it could reach chunked data.
+     * <p>
+     * {@link #maybeWrap} can only merge chunks into a partition it is told about, and a range scan
+     * names none, so on a tiered table it used to come back with the hot rows alone behind a client
+     * warning most drivers never surface: {@code count(*)} over 20M rows answered 500
+     * (tiering-benchmark.md). A successful query silently missing every cold row is the worst answer
+     * there is; an error is not.
+     * <p>
+     * Allowed through: internal callers (the server reads base tables as they stand on purpose), and
+     * a scan whose time range starts at or above {@link ColdBoundary#coldBelowMs} -- no chunk reaches
+     * it, so its answer is complete. An unknowable coverage puts that boundary at
+     * {@link Long#MAX_VALUE}, so every scan is refused: the same fail-closed reading the merge and
+     * the write guard take.
+     *
+     * @throws InvalidRequestException if the scan could reach data that only a chunk holds
+     */
+    public static void guardRangeRead(TableMetadata metadata, ClusteringIndexFilter filter,
+                                      ClientState state, ConsistencyLevel cl)
+    {
+        if (state.isInternal || inInternalBypass())
+            return;
+        // Free, and first: nothing without exactly one timestamp clustering column was ever chunked,
+        // and every timestamp read below would throw on any other shape.
+        if (!ColdBoundary.hasTimestampClustering(metadata))
+            return;
+
+        TieringPolicy policy;
+        try
+        {
+            policy = TieringPolicy.fromTable(metadata);
+        }
+        catch (ConfigurationException e)
+        {
+            // As in maybeWrap: a typo in the extension does not make encoded windows disappear.
+            policy = null;
+        }
+
+        ChunkCoverage.Coverage coverage = ChunkCoverage.forTable(metadata, cl);
+        if (!coverage.chunkTableExists())
+            return;
+        long coldBelowMs = ColdBoundary.coldBelowMs(coverage, policy);
+        if (coldBelowMs == Long.MIN_VALUE || lowestRequestedMs(filter, ColdBoundary.isDescending(metadata)) >= coldBelowMs)
+            return;
+
+        TieringMetrics.record(metadata, TieringMetrics.Event.RANGE_SCAN_REFUSED);
+        String hotOnly = coldBelowMs == Long.MAX_VALUE
+                         ? "(its chunk coverage cannot be read right now, so no time range is provably hot)"
+                         : "or restrict its time range to at or above epoch millis " + coldBelowMs + " (the cold boundary)";
+        throw new InvalidRequestException(
+            String.format("A range scan (a query without the partition key: a full scan, an aggregate, DISTINCT or a " +
+                          "token range) is not supported on %s.%s, because part of its data lives only in %s and a " +
+                          "range scan cannot merge it; it would return the hot rows alone as a complete answer. " +
+                          "Restrict the query by partition key %s.",
+                          metadata.keyspace, metadata.name, ChunkTables.chunkTableName(metadata.name), hotOnly));
+    }
+
+    /** @return the oldest timestamp {@code filter} can select, {@link Long#MIN_VALUE} if unbounded below. */
+    private static long lowestRequestedMs(ClusteringIndexFilter filter, boolean descending)
+    {
+        if (filter instanceof ClusteringIndexSliceFilter)
+        {
+            long lowest = Long.MAX_VALUE;
+            for (Slice slice : ((ClusteringIndexSliceFilter) filter).requestedSlices())
+                lowest = Math.min(lowest, ColdBoundary.lowestMs(slice, descending));
+            return lowest;
+        }
+        if (filter instanceof ClusteringIndexNamesFilter)
+        {
+            long lowest = Long.MAX_VALUE;
+            for (Clustering<?> clustering : ((ClusteringIndexNamesFilter) filter).requestedRows())
+                if (clustering != Clustering.STATIC_CLUSTERING)
+                    lowest = Math.min(lowest, ColdBoundary.clusteringMs(clustering));
+            return lowest;
+        }
+        // An unknown filter shape is not evidence the scan stays hot.
+        return Long.MIN_VALUE;
     }
 
     /**

@@ -118,8 +118,9 @@ chunk format v4 — [벤치마크 전문](doc/timeseries/tiering-benchmark.md):
 > **`hot_window` 안쪽 질의는 비용이 없습니다** — 콜드 경계 위에서 시작하는 질의는 병합을 건너뛰고
 > 핫 이터레이터를 그대로 돌려줍니다. 위 수치는 전 구간을 콜드로 만든 최대 부하 조건입니다.
 >
-> **주의 두 가지.** 파티션 키 없는 풀스캔 집계는 계층화된 테이블에서 오답을 냅니다 — 청크를
-> 병합하지 않는 경로입니다([벤치마크 §주의](doc/timeseries/tiering-benchmark.md) 참고). 그리고
+> **주의 두 가지.** 계층화된 테이블에서 파티션 키 없는 풀스캔(집계·`DISTINCT`·Spark 전체 테이블
+> 읽기 포함)은 청크를 병합하지 못하므로, 오답을 내는 대신 **거부됩니다** — 파티션 키를 지정해
+> 조회하십시오([프로덕션 체크리스트 §3.1](doc/timeseries/production-rollout.md)). 그리고
 > 저장 절감 폭은 형태에 좌우됩니다 — 접을 상수·null 컬럼이 없는 최소 형태(고엔트로피 `double`
 > 1컬럼)는 v4 기준 재측정 전이니, 도입 전 자기 테이블 형태로 재보십시오.
 
@@ -677,7 +678,7 @@ SELECT count(*) FROM pp.tm_tag_point
 SELECT site_id, tag_name, type FROM pp.tm_tag_point WHERE tag_id='TAG-001' LIMIT 1;
 ```
 
-> 계층화 여부를 세어서 확인할 때는 **반드시 클러스터링 범위를 거세요.** 클러스터링 행이 하나도 남지 않은 파티션에 범위 없이 `count(*)`를 하면 static만 있는 행 때문에 `1`이 나옵니다. 그리고 파티션 키 없는 풀스캔 `SELECT count(*)`는 애초에 병합하지 않으므로(범위 스캔은 핫 로우만 봅니다) 전량 청크화된 테이블에서 **0**을 돌려줍니다.
+> 계층화 여부를 세어서 확인할 때는 **반드시 클러스터링 범위를 거세요.** 클러스터링 행이 하나도 남지 않은 파티션에 범위 없이 `count(*)`를 하면 static만 있는 행 때문에 `1`이 나옵니다. 그리고 파티션 키 없는 풀스캔 `SELECT count(*)`는 청크를 병합할 수 없어 계층화된 테이블에서는 거부됩니다 — 태그별로, 파티션 키를 지정해 세십시오.
 
 ### 12.3 정책 필드
 
@@ -752,7 +753,7 @@ ALTER TABLE pp.tm_tag_point WITH extensions = {};
 
 ## 통합 테스트 (릴리스 게이트)
 
-유닛 테스트는 함수를 프로세스 안에서 검증하지만, [docker/integration-test.sh](docker/integration-test.sh)는 **실제 이미지를 띄워** 스키마 생성부터 읽기 경로·집계·네이티브 프로토콜까지 통과하는 시계열 CQL 결과를 손으로 계산한 값과 대조합니다(93개 검증, 프로세스 재시작 포함).
+유닛 테스트는 함수를 프로세스 안에서 검증하지만, [docker/integration-test.sh](docker/integration-test.sh)는 **실제 이미지를 띄워** 스키마 생성부터 읽기 경로·집계·네이티브 프로토콜까지 통과하는 시계열 CQL 결과를 손으로 계산한 값과 대조합니다(107개 검증, 프로세스 재시작 포함).
 
 ```bash
 docker build -t aster-tsdb:6.0.0 -f docker/Dockerfile .

@@ -36,6 +36,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.ColumnIdentifier;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.ResultSet;
@@ -47,10 +48,10 @@ import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.db.marshal.TimestampType;
 import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.db.timeseries.CorruptChunkException;
 import org.apache.cassandra.db.timeseries.UnsupportedChunkFormatException;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.service.ClientWarn;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.service.pager.PagingState;
 import org.apache.cassandra.transport.Dispatcher;
@@ -129,8 +130,9 @@ import static java.lang.String.format;
  *
  * <h2>Failure handling is unchanged</h2>
  * A failed chunk query fails the SELECT (the base rows were deleted when they were encoded, so
- * hot-only would be a silently incomplete success); a corrupt chunk is skipped with a warning; a
- * chunk from a removed codec fails the SELECT, because that is systematic rather than isolated.
+ * hot-only would be a silently incomplete success); so does a corrupt chunk, and a chunk from a
+ * removed codec. None of them is skipped: each would make the SELECT succeed without rows that exist
+ * nowhere else.
  * Splitting the lookup in two only moves where those are raised: the corrupt/unsupported cases still
  * surface from {@link ChunkReadSupport#rowsFromChunk}, which decodes the whole payload before
  * returning its first row.
@@ -344,7 +346,7 @@ final class ChunkRowSource
                     if (exhausted)
                         return endOfData();
 
-                    QueryOptions options = QueryOptions.create(cl, values, false, TieredStorageService.PAGE_SIZE,
+                    QueryOptions options = QueryOptions.create(cl, values, false, PageSize.inRows(TieredStorageService.PAGE_SIZE),
                                                                pagingState, null, ProtocolVersion.CURRENT, null);
                     ResultMessage result = QueryProcessor.instance.process(statement, queryState, options,
                                                                            Dispatcher.RequestTime.forImmediateExecution());
@@ -387,7 +389,11 @@ final class ChunkRowSource
         // +/-2^62 BEFORE subtracting so the arithmetic cannot wrap (the clamped bounds are still
         // ~146M years away from any real timestamp, and W is capped at 31 days).
         long safeStart = Math.max(startMs, -(1L << 62));
-        long windowLow = safeStart - lookbackMs;
+        // "+ 1" is the strict ">" above: a chunk starting exactly at startMs - W ends at startMs - 1,
+        // whatever its width up to W. Listing it anyway was harmless while a chunk that failed to
+        // decode was skipped; now that a corrupt one fails the query, it would fail every query that
+        // starts at the next window boundary without reaching the corrupt window at all.
+        long windowLow = safeStart - lookbackMs + 1;
         long windowHigh = Math.min(endMsExcl, 1L << 62);
 
         List<ByteBuffer> values = new ArrayList<>(tagValues.size() + 2);
@@ -405,7 +411,7 @@ final class ChunkRowSource
             // QueryProcessor's internal-statement cache, and pagedRows is pagedSelectLazy with the
             // per-page re-parse taken out (see prepare and pagedRows).
             rows = cl == null
-                   ? QueryProcessor.executeInternalWithPaging(windowSelect, TieredStorageService.PAGE_SIZE,
+                   ? QueryProcessor.executeInternalWithPaging(windowSelect, PageSize.inRows(TieredStorageService.PAGE_SIZE),
                                                               values.toArray()).iterator()
                    : pagedRows(windowStatement(), values);
         }
@@ -566,7 +572,7 @@ final class ChunkRowSource
             current = Collections.emptyIterator();
         }
 
-        /** @return the rows of {@code window}, or nothing if its chunk is unreadable or gone. */
+        /** @return the rows of {@code window}, or nothing if its chunk is gone; an unreadable chunk throws. */
         private Iterator<Row> decode(Window window)
         {
             ByteBuffer payload = payload(window);
@@ -598,12 +604,21 @@ final class ChunkRowSource
             }
             catch (IllegalArgumentException e)
             {
-                NoSpamLogger.log(logger, NoSpamLogger.Level.WARN,
+                // NOT skippable either. The chunk is the only copy of its window (the base rows were
+                // deleted when it was encoded) and the encoder is deterministic, so every replica holds
+                // the same bytes and read repair has nothing to repair from: skipping made the window a
+                // permanent, silent hole in every answer that reached it. Fail the query, as upstream
+                // fails a read of a corrupt sstable; reads that do not reach this window are untouched.
+                String detail = format("%s.%s: the chunk for window %s in %s is corrupt and cannot be decoded (%s). " +
+                                       "It is the only copy of that window's rows. Restore %s from a backup, or, " +
+                                       "to accept the loss of that window, delete its row from %s.",
+                                       metadata.keyspace, metadata.name, window.startDate(), chunkRef(metadata),
+                                       e.getMessage(), chunkRef(metadata), chunkRef(metadata));
+                NoSpamLogger.log(logger, NoSpamLogger.Level.ERROR,
                                  metadata.keyspace + '.' + metadata.name + ":chunk-corrupt", 1, TimeUnit.MINUTES,
-                                 "Corrupt chunk skipped during transparent read of {}.{} window {}: {}",
-                                 metadata.keyspace, metadata.name, window.startDate(), e.getMessage());
-                ClientWarn.instance.warn("tiered read: corrupt chunk skipped for window " + window.startDate());
-                return Collections.emptyIterator();
+                                 "{}", detail);
+                TieringMetrics.record(metadata, TieringMetrics.Event.CORRUPT_CHUNK_READ);
+                throw new CorruptChunkException(detail, e);
             }
         }
 

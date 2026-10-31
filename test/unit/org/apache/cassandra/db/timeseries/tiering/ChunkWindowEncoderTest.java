@@ -51,6 +51,16 @@ import static org.junit.Assert.assertTrue;
  */
 public class ChunkWindowEncoderTest
 {
+    /**
+     * These fixtures pin results with tiny explicit writetimes on 1970 clusterings, the shape the
+     * past-timestamp guard refuses on a tiered table; see TieredWrites#acceptPastTimestampsIntoColdDataForTesting.
+     */
+    @BeforeClass
+    public static void acceptPastTimestampFixtures()
+    {
+        TieredWrites.acceptPastTimestampsIntoColdDataForTesting = true;
+    }
+
     private static final long WINDOW = 1_577_836_800_000L; // 2020-01-01T00:00Z
     private static final long WT = 1_650_000_000_000_000L; // micros
 

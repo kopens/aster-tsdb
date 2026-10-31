@@ -78,7 +78,7 @@ Spark integration comes from the companion project
 | **Time-series compaction (TSCS)** | `TimeSeriesCompactionStrategy` — window ordering, in-window UCS delegation, whole-window retention drops, closed-window freeze (one SSTable per window, `WindowFrozenListener` event hook, far-future guard `max_future_window`, and reclamation of data already expired **at the moment of freeze** without retention — data expiring after the freeze needs `retention`), plus late-data isolation (flush and streaming split at window boundaries so backfill lands locally in its own past window; legacy spanning SSTables are split automatically) and a **dedicated memtable** (opt-in per table — rows are assigned to their TSCS window at write time, removing flush routing and the 64 MiB partition cap; primitive-array column storage measured at **5.5× less heap per row**; cold windows on a tiered table flush straight to chunks) | [timeseries-compaction.md](doc/timeseries/timeseries-compaction.md) · [timeseries-memtable.md](doc/timeseries/timeseries-memtable.md) |
 | **Column-oriented chunk codec (chunk format v4)** *(tiered storage, stage 1)* | One window = a shared timestamp axis plus an independent section per regular column, losslessly compressed, every block independently decodable and randomly addressable. `double` uses ALP/ALP-RD (the only double codec); integers and time types use FOR/delta bit-packing; `boolean` packs to one bit; `text` and opaque bytes use a dictionary (DICT) or RAW. A column whose value never changes becomes CONSTANT and an all-null column becomes ALL_NULL, both O(1). Measured at **~1.7 B/row** on 20M rows of the production shape — **7.1×** against row storage's 11.9 B/row, host 234 | [Format spec](doc/timeseries/chunk-format-v4.md) · [Codec bake-off](doc/timeseries/codec-bakeoff.md) |
 | **Tiered storage (chunk store)** *(tiered storage, stage 2)* | A `timeseries_tiering` table extension policy — a background re-encoder compresses windows past `hot_window` into chunks and moves them to `<table>__chunks` (late-row merge, `cold_window` expiry, a consistency-level quorum floor). `nodetool retier`/`tieringstatus`, `system_views.timeseries_tiering`. **Transparent reads**: a `SELECT` on the base table merges hot rows with chunks automatically — ranges, point lookups, aggregates, gap-fill and `LIMIT`/`DESC` all work across hot and cold | [tiered-storage.md](doc/timeseries/tiered-storage.md) |
-| **Test infrastructure** | 93 docker integration assertions (the release gate), a 49-assertion three-node cluster test, a 100-million-row scale harness, jvm-dtests, a JMH performance regression gate, and a GC comparison (ZGC vs G1) | [Reports](doc/timeseries/) |
+| **Test infrastructure** | 107 docker integration assertions (the release gate), a 49-assertion three-node cluster test, a 100-million-row scale harness, jvm-dtests, a JMH performance regression gate, and a GC comparison (ZGC vs G1) | [Reports](doc/timeseries/) |
 | **Packaging / CI** | Testcontainers-compatible docker image, GitLab CI (build → test → image → integration gate → release), automated tag releases | [.gitlab-ci.yml](.gitlab-ci.yml) |
 
 ## 🎯 What it buys you (against stock Cassandra 6.0.0)
@@ -114,7 +114,7 @@ ORDER BY timestamp ASC;
 >
 > **A query inside `hot_window` costs nothing** — a query starting above the cold boundary skips the merge entirely and returns the hot iterator unchanged. The figures above are the maximum-load case, with the whole range forced cold.
 >
-> **Two caveats.** A full-scan aggregate with no partition key returns wrong answers on a tiered table — that path does not merge chunks (see [the benchmark's caveats](doc/timeseries/tiering-benchmark.md)). And the storage saving depends on shape — a minimal shape with no constant or all-null columns to fold (one high-entropy `double`) has not been re-measured on v4, so measure your own table before committing.
+> **Two caveats.** On a tiered table, a full scan with no partition key (aggregates, `DISTINCT` and Spark's full-table read included) cannot merge chunks, so it is **refused** rather than answered wrongly — query by partition key instead ([production checklist §3.1](doc/timeseries/production-rollout.md)). And the storage saving depends on shape — a minimal shape with no constant or all-null columns to fold (one high-entropy `double`) has not been re-measured on v4, so measure your own table before committing.
 
 **4. Compaction and retention that fit time series.** SSTables are ordered by time window and frozen one-per-window; windows past their retention are dropped whole, without compacting. Late backfill from edge devices is isolated into its own window automatically.
 
@@ -669,7 +669,7 @@ SELECT count(*) FROM pp.tm_tag_point
 SELECT site_id, tag_name, type FROM pp.tm_tag_point WHERE tag_id='TAG-001' LIMIT 1;
 ```
 
-> When counting to confirm tiering, **always include a clustering range.** An unrestricted `count(*)` on a partition with no clustering rows left still returns `1`, for the static-only row. And a full-scan `SELECT count(*)` with no partition key does not merge at all (a range scan sees only hot rows), so it returns **0** on a fully-chunked table.
+> When counting to confirm tiering, **always include a clustering range.** An unrestricted `count(*)` on a partition with no clustering rows left still returns `1`, for the static-only row. And a full-scan `SELECT count(*)` with no partition key cannot merge chunks at all, so on a tiered table it is refused — count per tag, with the partition key.
 
 ### 12.3 Policy fields
 
@@ -745,7 +745,7 @@ The build artifact is always `apache-cassandra-6.0.0.jar` (`base.version` is pin
 
 ### Integration test (the release gate)
 
-Unit tests exercise the functions in-process; [docker/integration-test.sh](docker/integration-test.sh) **boots a real image** and checks time-series CQL results against hand-computed values all the way through schema creation, the read path, aggregation and the native protocol — 93 assertions, including a process restart.
+Unit tests exercise the functions in-process; [docker/integration-test.sh](docker/integration-test.sh) **boots a real image** and checks time-series CQL results against hand-computed values all the way through schema creation, the read path, aggregation and the native protocol — 107 assertions, including a process restart.
 
 ```bash
 docker build -t aster-tsdb:6.0.0 -f docker/Dockerfile .

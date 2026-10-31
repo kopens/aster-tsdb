@@ -33,8 +33,12 @@ ALP의 압축 특성은 [bake-off 결과](codec-bakeoff.md)를 참고하세요.
 > 페이징도 그대로 동작합니다 — 한 페이지를 넘는 병합 질의는 (예전과 달리) 실패하지 않고, `LIMIT`과
 > short-read protection이 병합된 결과에 적용되어 모든 행을 돌려줍니다.
 > 제한: ① 디코드 로우의 `writetime(value)`은 청크의 `max_row_writetime` 근사값입니다.
-> ② 손상 청크는 경고와 함께 건너뛰고 나머지 데이터를 제공합니다 — 반면 제거된 포맷 버전
-> (v1/v2/v3)의 청크는 건너뛰지 않고 쿼리를 실패시킵니다(§2.2).
+> ② 손상 청크와 제거된 포맷 버전(v1/v2/v3)의 청크는 건너뛰지 않고 쿼리를 실패시킵니다(§2.2) —
+> 청크가 그 창의 유일한 사본이라, 건너뛰면 쿼리가 성공하면서 그 창만 빠진 결과를 돌려주기
+> 때문입니다. 손상 청크는 그 창에 닿는 쿼리만 실패합니다(`CorruptChunkException`, 메트릭
+> `corrupt_chunk_reads`). 조치는 백업에서 청크 테이블을 복원하거나, 손실을 받아들이고 그 청크 행을
+> 지우는 것입니다.
+> ③ 파티션 키 없는 레인지 스캔은 콜드 구간까지 닿으면 거부됩니다([프로덕션 체크리스트 §3.1](production-rollout.md)).
 
 ## 1. 대상 스키마 — 시간으로 클러스터링된 아무 테이블
 
@@ -222,8 +226,10 @@ ALTER TABLE pp.tm_tag_point WITH extensions = {
 | `interval` | | `5m` | 이 테이블의 재인코딩 주기 (전역 스위프는 60초마다 돌며, interval이 지난 테이블만 실행) |
 
 기간 값의 문법은 `<양의 정수><m|h|d>` (분/시/일)입니다. 알 수 없는 키, 규칙 위반(JSON 오류,
-`hot_window < chunk_window`, `cold_window <= hot_window`, 쿼럼 미만 CL 등)은
-`ALTER TABLE`/실행 시점에 거부됩니다.
+`hot_window < chunk_window`, `cold_window <= hot_window`, 쿼럼 미만 CL 등)은 **`ALTER TABLE`에서는
+거부되지 않습니다** — 정책은 그대로 저장되고, 재인코딩 사이클이 그 테이블을 건너뛰며 ERROR 로그를
+남깁니다(§1.2). 정책을 건 뒤에는 `system_views.timeseries_tiering`의 `last_error`가 비어 있는지
+확인하십시오.
 
 ### 2.2 코덱
 
@@ -238,8 +244,8 @@ ALTER TABLE pp.tm_tag_point WITH extensions = {
 
 > **페이로드 포맷은 v4 하나입니다** ([chunk-format-v4.md](chunk-format-v4.md)). 제거된 포맷
 > (v1 Gorilla, v2 Chimp128, v3 컬럼 지향)의 페이로드를 만나면 `SELECT`는 조용히 건너뛰지 않고
-> `UnsupportedChunkFormatException`으로 **실패합니다** — 손상 청크와 달리 전 청크에 해당하는
-> 계통적 문제라, 건너뛰면 쿼리가 성공하면서 과거 데이터만 빠진 결과를 계속 돌려주게 됩니다.
+> `UnsupportedChunkFormatException`으로 **실패합니다** — 그 창 하나에 그치는 손상 청크와 달리 전
+> 청크에 해당하는 계통적 문제라, 건너뛰면 쿼리가 성공하면서 과거 데이터만 빠진 결과를 계속 돌려주게 됩니다.
 > 그런 청크 테이블은 `DROP`하고 계층화를 다시 돌리는 것 외에 방법이 없습니다 — 인코딩 시점에
 > 베이스 행이 이미 삭제됐으므로 **그 데이터는 복구되지 않습니다.** (v3→v4 변환 도구는 의도적으로
 > 만들지 않았습니다 — [chunk-format-v4.md §10](chunk-format-v4.md).)
@@ -618,14 +624,19 @@ static 컬럼(`site_id`, `tag_name`, …)에 대한 쓰기·삭제는 이 규칙
    있습니다. `cold_window`를 정할 때 `chunk_window`만큼의 여유를 두세요.
 2. **서버측 write timestamp 가정**: 설계는 행 writetime이 서버가 찍는 현재 시각이라는 전제 위에
    있습니다. 클라이언트가 `USING TIMESTAMP`로 **이미 스윕된 maxWt 이하의** writetime을 지정해 행을
-   넣으면, 그 행은 기존 레인지 톰스톤보다 오래된 것으로 취급되어 재인코딩 없이 사라질 수 있습니다.
-   계층화 대상 테이블에는 클라이언트 지정 타임스탬프를 쓰지 마세요.
+   넣으면, 그 행은 기존 레인지 톰스톤에 가려져 재인코딩 없이 사라집니다(재현:
+   `TieredStorageColumnsTest.aLateRowStampedBelowItsWindowsMaxWritetimeIsLostWithoutTheGuard`).
+   측정 시각을 writetime으로 찍는 수집기의 늦은 데이터가 정확히 이 형태라, 이제 쓰기 가드가 막습니다:
+   클러스터링이 `now - hot_window`보다 오래됐고 writetime도 그보다 오래된 쓰기는
+   `InvalidRequestException`으로 **거부**됩니다(`cold_writes_refused`로 집계). 조용히 사라지는 대신
+   시끄럽게 실패하므로, 수집기는 거부된 데이터를 보관했다가 `USING TIMESTAMP` 없이 다시 보내면 됩니다
+   — 다음 주기에 청크로 병합됩니다. 근본 해결(툼스톤 없이 원본을 회수)은 후속 과제입니다.
 3. ~~**베이스 행이 전부 사라진 태그의 청크 만료**~~ — **해결됨.** `cold_window` 만료는 베이스
    테이블이 아니라 **청크 테이블**에서 태그를 열거하므로, 모든 행이 재인코딩·삭제된 뒤 새 쓰기가
    없는 태그의 콜드 청크도 정상 만료됩니다. (인코딩 쪽 태그 열거는 여전히 베이스 테이블
    `DISTINCT` 스캔이지만, 인코딩할 행이 없는 태그에는 할 일도 없습니다.)
-4. **잘못된 정책 JSON**: 파싱에 실패하는 정책이 걸린 테이블은 고칠 때까지 60초 스위프마다 ERROR
-   로그를 남깁니다 (조용히 무시되어 잊히는 것보다 시끄러운 쪽을 선택).
+4. **잘못된 정책 JSON**: 파싱에 실패하는 정책이 걸린 테이블은 고칠 때까지 ERROR 로그를 남깁니다
+   (최대 10분에 한 번으로 제한, `TieredStorageService`). 가상 테이블의 `last_error`에도 남습니다.
 5. **동명 테이블 DROP + CREATE**: 실행 통계가 `keyspace.table` 이름 키의 인메모리 맵이라, 같은
    이름으로 다시 만든 테이블은 첫 실행 전까지 이전 테이블의 통계가 가상 테이블/`tieringstatus`에
    잠깐 보입니다.

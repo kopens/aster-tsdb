@@ -122,10 +122,14 @@ git rev-parse HEAD:modules/accord :modules/accord upstream/cassandra-6.0:modules
 The fork does not carry its own Accord changes, so take upstream's pointer when they differ, then
 `git submodule update --init --recursive`.
 
-**Fork feature touchpoints** — `SelectStatement.java` (gap-fill wiring), `db/compaction/TimeSeries*.java`,
+**Fork feature touchpoints** — `SelectStatement.java` (gap-fill wiring, and the
+`TransparentReads.guardRangeRead` call in `getRangeCommand` that refuses range scans reaching chunked
+data), `db/compaction/TimeSeries*.java`,
 `FreezeCompactionTask.java`, `db/compaction/timeseries/`, `TableAttributes.java`, `CassandraDaemon.java`,
 `SystemViewsKeyspace.java`, `NodetoolCommand.java`, `NodeProbe.java`, `DataResolver.java`/`DigestResolver.java`,
-`ColumnFamilyStore.java`/`ColumnFamilyStoreMBean.java`. These usually auto-merge. When they don't, the
+`ColumnFamilyStore.java`/`ColumnFamilyStoreMBean.java`, `metrics/CassandraMetricsRegistry.java` (one line in
+the static `metricGroups` list declaring `TieringMetrics.TYPE_NAME`; without it every node fails tiering
+with "Unknown metric group: TimeSeriesTiering"). These usually auto-merge. When they don't, the
 rule is *keep both*: upstream's fix and the fork's feature. Never resolve one of these by taking a
 side wholesale without reading the hunk.
 

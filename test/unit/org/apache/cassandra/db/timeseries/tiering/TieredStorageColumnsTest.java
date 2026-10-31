@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,6 +66,16 @@ import static org.junit.Assert.fail;
  */
 public class TieredStorageColumnsTest extends CQLTester
 {
+    /**
+     * These fixtures pin results with tiny explicit writetimes on 1970 clusterings, the shape the
+     * past-timestamp guard refuses on a tiered table; see TieredWrites#acceptPastTimestampsIntoColdDataForTesting.
+     */
+    @BeforeClass
+    public static void acceptPastTimestampFixtures()
+    {
+        TieredWrites.acceptPastTimestampsIntoColdDataForTesting = true;
+    }
+
     private static final Logger logger = LoggerFactory.getLogger(TieredStorageColumnsTest.class);
 
     private static final long HOUR = 3_600_000L;
@@ -377,6 +388,7 @@ public class TieredStorageColumnsTest extends CQLTester
     /** Asserts {@code query} is refused as an attempt to mutate chunked (cold) data. */
     private void assertRejectedAsColdWrite(String query, Object... values) throws Throwable
     {
+        long refusedBefore = TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.COLD_WRITE_REFUSED);
         try
         {
             execute(query, values);
@@ -387,6 +399,8 @@ public class TieredStorageColumnsTest extends CQLTester
             assertTrue(e.getMessage(), e.getMessage().contains("immutable"));
             assertTrue(e.getMessage(), e.getMessage().contains("cold_window"));
         }
+        assertEquals("each refused cold write is counted", refusedBefore + 1,
+                     TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.COLD_WRITE_REFUSED));
     }
 
     @Test
@@ -450,6 +464,94 @@ public class TieredStorageColumnsTest extends CQLTester
         // IsRejected` (above) still holds -- that is the shape whose purpose is to un-write.
         chunkOneRow();
         execute("INSERT INTO %s (tag, ts, value) VALUES ('t', ?, ?) USING TIMESTAMP 300", new Date(0L), null);
+    }
+
+    /**
+     * What the accepted null of an INSERT actually does to a chunked cell, pinned because
+     * production-rollout.md §3.2.1 tells operators: it is merged as "no value", so it does not erase
+     * what the chunk holds -- once the next cycle has merged the late row, the chunk's value is what
+     * reads see again. An INSERT binding null is therefore not a way to clear cold data.
+     */
+    @Test
+    public void anInsertedNullDoesNotEraseAChunkedValue() throws Throwable
+    {
+        chunkOneRow();
+        execute("INSERT INTO %s (tag, ts, value, quality) VALUES ('t', ?, ?, 7) USING TIMESTAMP 300",
+                new Date(0L), null);
+        // Until the late row is merged its tombstone is newer than the chunk's cell, so reads see null...
+        assertFalse(execute("SELECT value FROM %s WHERE tag = 't' AND ts = ?", new Date(0L)).one().has("value"));
+        new TieredStorageService().runOnce(KEYSPACE, currentTable(), 5 * HOUR);
+
+        // ...and after it, the chunk's value again.
+        UntypedResultSet.Row row = execute("SELECT value, quality FROM %s WHERE tag = 't' AND ts = ?", new Date(0L)).one();
+        assertEquals("the chunk's value survives the null once merged", 1.5, row.getDouble("value"), 0.0);
+        assertEquals("the live column of the late row is merged", 7, row.getInt("quality"));
+    }
+
+    /**
+     * The loss the past-timestamp guard exists for, reproduced with the guard off (this class's
+     * fixtures run with it off anyway). Window [0, 1h) is encoded and its rows range-deleted at its
+     * max writetime, 100. A late row for that window stamped with its measurement time -- 50, below
+     * 100 -- is shadowed by that tombstone the moment it lands: no read ever shows it, and the next
+     * cycle never sees it to encode. No error anywhere. With server timestamps this cannot happen.
+     */
+    @Test
+    public void aLateRowStampedBelowItsWindowsMaxWritetimeIsLostWithoutTheGuard() throws Throwable
+    {
+        chunkOneRow();
+        execute("INSERT INTO %s (tag, ts, value) VALUES ('t', ?, 2.5) USING TIMESTAMP 50", new Date(30 * 60_000L));
+
+        assertEquals("shadowed the moment it lands", 0,
+                     execute("SELECT value FROM %s WHERE tag = 't' AND ts = ?", new Date(30 * 60_000L)).size());
+        new TieredStorageService().runOnce(KEYSPACE, currentTable(), 5 * HOUR);
+        assertEquals("and never encoded by the next cycle", 0,
+                     execute("SELECT value FROM %s WHERE tag = 't' AND ts = ?", new Date(30 * 60_000L)).size());
+    }
+
+    /**
+     * With the guard on, that write is refused instead of lost, and counted. The same row resent
+     * without the explicit timestamp is accepted and merged by the next cycle; a measurement-time
+     * stamp on hot data (ordinary collection) is untouched.
+     */
+    @Test
+    public void aPastTimestampIntoColdDataIsRefusedRatherThanLost() throws Throwable
+    {
+        chunkOneRow();
+        TieredWrites.acceptPastTimestampsIntoColdDataForTesting = false;
+        try
+        {
+            long refusedBefore = TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.COLD_WRITE_REFUSED);
+            for (String write : new String[]{ "INSERT INTO %s (tag, ts, value) VALUES ('t', ?, 2.5) USING TIMESTAMP 50",
+                                              "UPDATE %s USING TIMESTAMP 50 SET value = 2.5 WHERE tag = 't' AND ts = ?" })
+            {
+                try
+                {
+                    execute(write, new Date(30 * 60_000L));
+                    fail("expected the past-timestamped cold write to be refused rather than shadowed: " + write);
+                }
+                catch (InvalidRequestException e)
+                {
+                    assertTrue(e.getMessage(), e.getMessage().contains("USING TIMESTAMP"));
+                }
+            }
+            assertEquals(refusedBefore + 2,
+                         TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.COLD_WRITE_REFUSED));
+
+            execute("INSERT INTO %s (tag, ts, value) VALUES ('t', ?, 2.5)", new Date(30 * 60_000L));
+            new TieredStorageService().runOnce(KEYSPACE, currentTable(), 5 * HOUR);
+            assertEquals("resent with the server's timestamp, it survives and is merged", 2.5,
+                         execute("SELECT value FROM %s WHERE tag = 't' AND ts = ?", new Date(30 * 60_000L))
+                         .one().getDouble("value"), 0.0);
+
+            long recent = System.currentTimeMillis() - 60_000L;
+            execute("INSERT INTO %s (tag, ts, value) VALUES ('t', ?, 3.5) USING TIMESTAMP ?", new Date(recent), recent * 1000);
+            assertEquals(3.5, execute("SELECT value FROM %s WHERE tag = 't' AND ts = ?", new Date(recent))
+                              .one().getDouble("value"), 0.0);
+        }
+        finally
+        {
+            TieredWrites.acceptPastTimestampsIntoColdDataForTesting = true;
+        }
     }
 
     @Test
@@ -680,7 +782,10 @@ public class TieredStorageColumnsTest extends CQLTester
     {
         execute("DROP TABLE " + KEYSPACE + ".\"" + ChunkTables.coverageTableName(currentTable()) + '"');
         ChunkCoverage.invalidateAll();
+        long failuresBefore = TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.COVERAGE_READ_FAILURE);
         assertFalse("precondition: coverage must be unknowable", ChunkCoverage.forTable(baseMetadata(), null).known());
+        assertEquals("an unreadable ledger is counted", failuresBefore + 1,
+                     TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.COVERAGE_READ_FAILURE));
     }
 
     private TableMetadata baseMetadata()
@@ -713,10 +818,13 @@ public class TieredStorageColumnsTest extends CQLTester
         assertEquals(7, execute("SELECT quality FROM %s WHERE tag = 't' AND ts = ?", new Date(7 * HOUR))
                         .one().getInt("quality"));
 
-        // Assigning a whole non-frozen collection: a complex deletion, and nothing more.
-        execute("UPDATE %s USING TIMESTAMP 401 SET attrs = {'unit': 'C'} WHERE tag = 't' AND ts = ?",
-                new Date(7 * HOUR));
-        assertEquals(1, execute("SELECT attrs FROM %s WHERE tag = 't' AND ts = ?", new Date(7 * HOUR))
+        // Assigning a whole non-frozen collection: a complex deletion, and nothing more. At a current
+        // timestamp -- an UPDATE's complex deletion below the cold floor is refused like any other
+        // un-write (anUnknowableLedgerStillRefusesUnwritingAChunkedColumn), exactly as it is on a
+        // readable ledger.
+        Date now = new Date(System.currentTimeMillis());
+        execute("UPDATE %s SET attrs = {'unit': 'C'} WHERE tag = 't' AND ts = ?", now);
+        assertEquals(1, execute("SELECT attrs FROM %s WHERE tag = 't' AND ts = ?", now)
                         .one().getMap("attrs", UTF8Type.instance, UTF8Type.instance).size());
 
         // The unambiguous shapes are still refused, on the same unreadable ledger.
@@ -724,6 +832,38 @@ public class TieredStorageColumnsTest extends CQLTester
         assertRejectedAsColdWrite("DELETE FROM %s USING TIMESTAMP 500 WHERE tag = 't' AND ts >= ? AND ts < ?",
                                   new Date(0L), new Date(HOUR));
         assertRejectedAsColdWrite("DELETE FROM %s USING TIMESTAMP 500 WHERE tag = 't'");
+    }
+
+    /**
+     * The hole that leaves open: {@code UPDATE ... SET col = null} and {@code DELETE col} against a
+     * chunked clustering are cell tombstones too, so while the ledger was unreadable they were let
+     * through. The re-encoder keeps the chunk's value for a cell it reads as absent, so such a
+     * tombstone only masked the chunk until {@code gc_grace_seconds} purged it and the value came back.
+     * <p>
+     * An unreadable ledger still leaves a floor that is known: everything older than
+     * {@code now - hot_window} is cold whatever the ledger says, and current-timestamp writes all sit
+     * above it. Below that floor the un-writing shapes are refused; an INSERT binding null still is not
+     * (see {@code insertingWithANullBindingIsAllowed}).
+     */
+    @Test
+    public void anUnknowableLedgerStillRefusesUnwritingAChunkedColumn() throws Throwable
+    {
+        chunkOneRow();
+        makeCoverageUnknowable();
+
+        assertRejectedAsColdWrite("UPDATE %s USING TIMESTAMP 500 SET value = null WHERE tag = 't' AND ts = ?",
+                                  new Date(0L));
+        assertRejectedAsColdWrite("DELETE value FROM %s USING TIMESTAMP 500 WHERE tag = 't' AND ts = ?",
+                                  new Date(0L));
+        // A backlogged writer replaying a cold point with one null column is still accepted.
+        execute("INSERT INTO %s (tag, ts, value, quality) VALUES ('t', ?, ?, 7) USING TIMESTAMP 500",
+                new Date(0L), null);
+
+        // And above the floor, current data stays fully writable on the same unreadable ledger.
+        Date now = new Date(System.currentTimeMillis());
+        execute("INSERT INTO %s (tag, ts, value, quality) VALUES ('t', ?, 1.0, 7)", now);
+        execute("UPDATE %s SET value = null WHERE tag = 't' AND ts = ?", now);
+        execute("DELETE quality FROM %s WHERE tag = 't' AND ts = ?", now);
     }
 
     /**

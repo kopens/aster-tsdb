@@ -83,6 +83,15 @@ ALTER TABLE pp.tm_tag_point WITH compaction = {
 
 엣지 장비가 통신 두절 뒤 며칠치를 밀어 넣어도, 그 행들이 **현재 창을 오염시키지 않습니다.**
 
+> **창은 쓰기 타임스탬프(writetime) 축입니다 — 클러스터링 `ts` 축이 아닙니다.** SSTable은 셀의
+> 최대 writetime으로 창에 배정되고(`TimeSeriesCompactionStrategy`), 분할도 writetime 기준입니다
+> (`WindowRoutingIterator`). 따라서 아래의 "자기 과거 창으로 격리"는 **writetime이 이벤트 시각을
+> 따르는 쓰기**(클라이언트 `USING TIMESTAMP`, 또는 오래된 writetime을 그대로 가진 스트리밍·repair
+> 데이터)에 해당합니다. 서버 타임스탬프로 들어온 백필은 이벤트 시각이 과거여도 **현재 창**에 들어가고,
+> `retention`도 적재 시점부터 셉니다. 계층화 테이블에서는 `USING TIMESTAMP`를 쓰지 마십시오
+> ([tiered-storage.md](tiered-storage.md) — 재인코더의 범위 삭제에 가려질 수 있습니다). 계층화의
+> 핫/콜드 경계는 반대로 클러스터링 `ts` 축이라, 서버 타임스탬프 백필도 콜드 구간이면 청크로 병합됩니다.
+
 - **flush 시점**: 메모테이블이 여러 창에 걸치면 창 경계에서 **쪼개서** 씁니다
   ([`TimeWindowSplittingMultiWriter`](../../src/java/org/apache/cassandra/db/compaction/timeseries/TimeWindowSplittingMultiWriter.java)).
   결과적으로 모든 SSTable이 정확히 한 창에 속합니다.

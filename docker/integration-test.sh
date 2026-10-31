@@ -640,6 +640,20 @@ check "a whole-partition DELETE is rejected (it has no clustering bound at all)"
 check "the rejected deletes changed nothing (all 5 rows still there)" \
     "SELECT count(*) FROM it.tm_tag_point WHERE tag_id='TAG-001';" \
     '^ *5'
+# Each refusal is counted, so an operator sees it without a log search -- and this run can tell a
+# refusal that was counted from one that only reached the log.
+check "system_views.timeseries_tiering counts the three refused cold writes" \
+    "SELECT cold_writes_refused FROM system_views.timeseries_tiering WHERE keyspace_name='it' AND table_name='tm_tag_point';" \
+    '^ *3 *$'
+
+# A range scan cannot merge chunks. It used to answer from the hot rows alone, as a success: a
+# full-scan count(*) over this table would have reported the hot rows and no cold ones. Refused now.
+check "a full-scan count(*) on a tiered table is refused, not answered from hot rows" \
+    "SELECT count(*) FROM it.tm_tag_point;" \
+    'range scan'
+check "...and the refusal is counted" \
+    "SELECT range_scans_refused FROM system_views.timeseries_tiering WHERE keyspace_name='it' AND table_name='tm_tag_point';" \
+    '^ *1 *$'
 
 # ...and a write inside the hot window is untouched by the rule. Two rows, because the interesting
 # one is not the obvious one.
