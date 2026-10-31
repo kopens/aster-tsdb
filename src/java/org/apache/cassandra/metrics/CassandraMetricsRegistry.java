@@ -160,6 +160,8 @@ public class CassandraMetricsRegistry extends MetricRegistry
                                    .add(TrieMemtableMetricsView.TYPE_NAME)
                                    .add(UnweightedCacheMetrics.TYPE_NAME)
                                    .add(AutoRepairMetrics.TYPE_NAME)
+                                   // Aster fork: tiered storage's own metrics (see TieringMetrics).
+                                   .add(org.apache.cassandra.db.timeseries.tiering.TieringMetrics.TYPE_NAME)
                                    .build();
     }
 

@@ -20,12 +20,15 @@ package org.apache.cassandra.db.virtual;
 import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.timeseries.tiering.TieredStorageService;
+import org.apache.cassandra.db.timeseries.tiering.TieringMetrics.Event;
 import org.apache.cassandra.db.timeseries.tiering.TieringPolicy;
 import org.apache.cassandra.dht.LocalPartitioner;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
+
+import static org.apache.cassandra.db.timeseries.tiering.TieringMetrics.count;
 
 /**
  * {@code system_views.timeseries_tiering}: one row per table with a {@code timeseries_tiering} policy
@@ -49,6 +52,12 @@ final class TimeseriesTieringTable extends AbstractVirtualTable
     private static final String LAST_ATTEMPT_AT = "last_attempt_at";
     private static final String CONSECUTIVE_FAILURES = "consecutive_failures";
     private static final String LAST_ERROR = "last_error";
+    // Counted since this node started (TieringMetrics), unlike the per-cycle columns above.
+    private static final String TAGS_SKIPPED_TOTAL = "tags_skipped_total";
+    private static final String RANGE_SCANS_REFUSED = "range_scans_refused";
+    private static final String CORRUPT_CHUNK_READS = "corrupt_chunk_reads";
+    private static final String COVERAGE_READ_FAILURES = "coverage_read_failures";
+    private static final String COLD_WRITES_REFUSED = "cold_writes_refused";
 
     TimeseriesTieringTable(String keyspace)
     {
@@ -71,6 +80,11 @@ final class TimeseriesTieringTable extends AbstractVirtualTable
                            .addRegularColumn(LAST_ATTEMPT_AT, LongType.instance)
                            .addRegularColumn(CONSECUTIVE_FAILURES, LongType.instance)
                            .addRegularColumn(LAST_ERROR, UTF8Type.instance)
+                           .addRegularColumn(TAGS_SKIPPED_TOTAL, LongType.instance)
+                           .addRegularColumn(RANGE_SCANS_REFUSED, LongType.instance)
+                           .addRegularColumn(CORRUPT_CHUNK_READS, LongType.instance)
+                           .addRegularColumn(COVERAGE_READ_FAILURES, LongType.instance)
+                           .addRegularColumn(COLD_WRITES_REFUSED, LongType.instance)
                            .build());
     }
 
@@ -122,7 +136,16 @@ final class TimeseriesTieringTable extends AbstractVirtualTable
                       // moves on runs that complete, so it alone just looks stale.
                       .column(CONSECUTIVE_FAILURES,
                               (long) TieredStorageService.instance.consecutiveFailures(keyspace.name, table.name))
-                      .column(LAST_ERROR, TieredStorageService.instance.lastError(keyspace.name, table.name));
+                      .column(LAST_ERROR, TieredStorageService.instance.lastError(keyspace.name, table.name))
+                      .column(TAGS_SKIPPED_TOTAL, count(keyspace.name, table.name, Event.TAG_SKIPPED))
+                      // A client hit a limit of tiered storage: a full scan, aggregate, DISTINCT or
+                      // Spark read without the partition key. Find which application.
+                      .column(RANGE_SCANS_REFUSED, count(keyspace.name, table.name, Event.RANGE_SCAN_REFUSED))
+                      // Non-zero is an incident: a window's only copy does not decode.
+                      .column(CORRUPT_CHUNK_READS, count(keyspace.name, table.name, Event.CORRUPT_CHUNK_READ))
+                      .column(COVERAGE_READ_FAILURES, count(keyspace.name, table.name, Event.COVERAGE_READ_FAILURE))
+                      // Something is trying to delete or null out data that is already chunked.
+                      .column(COLD_WRITES_REFUSED, count(keyspace.name, table.name, Event.COLD_WRITE_REFUSED));
             }
         }
 
