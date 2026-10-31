@@ -59,12 +59,12 @@ import org.apache.cassandra.schema.TableMetadata;
  * <p>
  * When coverage cannot be established at all the guard still <b>rejects</b> (see
  * {@link ColdBoundary#coldBelowMs}) -- a wrongly refused write is loud and fixable in the moment, a
- * wrongly accepted one is silent until gc_grace -- but only the shapes that are unambiguously
- * deletions: a partition, range or row deletion. Cell-level tombstones are let through, because they
- * are indistinguishable from what an ordinary live write emits (assigning any non-frozen collection
- * or UDT produces a complex deletion; binding {@code null} in a prepared statement produces a cell
- * tombstone), and refusing every one of those while the ledger is unreadable would break plain
- * current-timestamp {@code INSERT}s -- an outage larger than the one being prevented.
+ * wrongly accepted one is silent until gc_grace. Partition, range and row deletions are refused
+ * outright. Cell-level tombstones are refused only below the boundary that is still provable without
+ * the ledger (the hot boundary, or the newest coverage this node saw established), because above it
+ * they are indistinguishable from what an ordinary live write emits (assigning any non-frozen
+ * collection or UDT produces a complex deletion) and refusing them while the ledger is unreadable
+ * would break plain current-timestamp writes -- an outage larger than the one being prevented.
  * <p>
  * <b>Not</b> rejected: anything confined to the hot window (ordinary current-data deletes are
  * untouched), and writes of real values to cold clusterings -- a late {@code UPDATE ... SET x = 1}
@@ -194,17 +194,33 @@ public final class TieredWrites
         if (tombstones.lowestRowDeleteMs < coldBelowMs)
             throw reject(metadata, "a row DELETE", describeBoundary(coldBelowMs));
 
-        // Cell-level tombstones are refused only against a coverage that was actually established.
-        // When it could not be, coldBelowMs is Long.MAX_VALUE -- EVERY clustering is nominally cold
-        // -- and this shape is not evidence of an attempt to remove anything: a complex deletion is
-        // what assigning any non-frozen collection or UDT emits, and a cell tombstone is what binding
-        // null in a prepared INSERT emits. Refusing those would reject ordinary current-timestamp
-        // writes for as long as the ledger stayed unreadable, which is a worse outage than the one it
-        // guards against. The unambiguously destructive shapes above are still refused, so an actual
-        // DELETE never slips through an unreadable ledger.
-        if (coverage.known() && tombstones.lowestCellMs < coldBelowMs)
+        // Cell-level tombstones. When coverage could not be established, coldBelowMs is
+        // Long.MAX_VALUE -- EVERY clustering is nominally cold -- and refusing this shape against that
+        // would reject ordinary current-timestamp writes (a complex deletion is what assigning any
+        // non-frozen collection or UDT emits) for as long as the ledger stayed unreadable. But letting
+        // every cell tombstone through was wider than that needed: an UPDATE ... SET col = null or a
+        // DELETE col against a chunked clustering got through too, and the re-encoder keeps a chunk's
+        // value for a cell it reads as absent, so the tombstone only masked the chunk until gc_grace
+        // purged it and the value came back. So against an unknown coverage the boundary is the one
+        // still provable without the ledger (provablyColdBelowMs): current-timestamp writes all sit
+        // above it, and nothing below it is a live write's business. (An INSERT's null never gets
+        // here -- fromInsertOnly -- so a backlogged writer is unaffected either way.)
+        long cellColdBelowMs = coverage.known() ? coldBelowMs : provablyColdBelowMs(metadata, policy);
+        if (tombstones.lowestCellMs < cellColdBelowMs)
             throw reject(metadata, "deleting a column (or writing a null value into one)",
                          describeBoundary(coldBelowMs));
+    }
+
+    /**
+     * Where cold data provably begins without reading the ledger: the later of the newest top this
+     * node has seen established (the ledger only widens, so what was chunked then is chunked still)
+     * and, with a policy installed, the hot boundary (nothing older can still be hot). Without either
+     * there is nothing provable, and {@link Long#MIN_VALUE} lets the cell tombstone through as before.
+     */
+    private static long provablyColdBelowMs(TableMetadata metadata, TieringPolicy policy)
+    {
+        long lastKnownTop = ChunkCoverage.lastKnownTopExclusiveMs(metadata);
+        return policy == null ? lastKnownTop : Math.max(lastKnownTop, ColdBoundary.hotBoundaryMs(policy));
     }
 
     /**
@@ -300,12 +316,15 @@ public final class TieredWrites
 
     private static InvalidRequestException reject(TableMetadata metadata, String what, String why)
     {
+        TieringMetrics.record(metadata, TieringMetrics.Event.COLD_WRITE_REFUSED);
         return new InvalidRequestException(
             String.format("%s is not allowed on %s.%s: %s, and data older than the hot window is immutable once " +
                           "timeseries_tiering has encoded it into %s (the base rows are gone, so a tombstone would " +
                           "only mask the chunk's copy until gc_grace_seconds purged it, after which the deleted data " +
-                          "would silently reappear). Use the policy's cold_window to expire cold data; to remove a " +
-                          "partition outright, delete it from %s as well.",
+                          "would silently reappear). Use the policy's cold_window to expire cold data. A whole " +
+                          "partition cannot be deleted from a tiered table at all -- the chunk coverage only ever " +
+                          "widens -- so remove one by letting cold_window expire it, or TRUNCATE the table (which " +
+                          "cascades to %s).",
                           what, metadata.keyspace, metadata.name, why,
                           ChunkTables.chunkTableName(metadata.name), ChunkTables.chunkTableName(metadata.name)));
     }

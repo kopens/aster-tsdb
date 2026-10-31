@@ -114,7 +114,7 @@ ORDER BY timestamp ASC;
 >
 > **A query inside `hot_window` costs nothing** — a query starting above the cold boundary skips the merge entirely and returns the hot iterator unchanged. The figures above are the maximum-load case, with the whole range forced cold.
 >
-> **Two caveats.** A full-scan aggregate with no partition key returns wrong answers on a tiered table — that path does not merge chunks (see [the benchmark's caveats](doc/timeseries/tiering-benchmark.md)). And the storage saving depends on shape — a minimal shape with no constant or all-null columns to fold (one high-entropy `double`) has not been re-measured on v4, so measure your own table before committing.
+> **Two caveats.** On a tiered table, a full scan with no partition key (aggregates, `DISTINCT` and Spark's full-table read included) cannot merge chunks, so it is **refused** rather than answered wrongly — query by partition key instead ([production checklist §3.1](doc/timeseries/production-rollout.md)). And the storage saving depends on shape — a minimal shape with no constant or all-null columns to fold (one high-entropy `double`) has not been re-measured on v4, so measure your own table before committing.
 
 **4. Compaction and retention that fit time series.** SSTables are ordered by time window and frozen one-per-window; windows past their retention are dropped whole, without compacting. Late backfill from edge devices is isolated into its own window automatically.
 
@@ -669,7 +669,7 @@ SELECT count(*) FROM pp.tm_tag_point
 SELECT site_id, tag_name, type FROM pp.tm_tag_point WHERE tag_id='TAG-001' LIMIT 1;
 ```
 
-> When counting to confirm tiering, **always include a clustering range.** An unrestricted `count(*)` on a partition with no clustering rows left still returns `1`, for the static-only row. And a full-scan `SELECT count(*)` with no partition key does not merge at all (a range scan sees only hot rows), so it returns **0** on a fully-chunked table.
+> When counting to confirm tiering, **always include a clustering range.** An unrestricted `count(*)` on a partition with no clustering rows left still returns `1`, for the static-only row. And a full-scan `SELECT count(*)` with no partition key cannot merge chunks at all, so on a tiered table it is refused — count per tag, with the partition key.
 
 ### 12.3 Policy fields
 

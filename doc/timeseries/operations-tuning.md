@@ -173,8 +173,8 @@ SELECT site_id, tag_name, type FROM pp.tm_tag_point WHERE tag_id='TAG_...' LIMIT
 
 > **세어서 확인할 때의 함정 둘.** ① 클러스터링 범위 없이 `count(*)`를 하면, 그 태그의 행이 전부
 > 청크로 옮겨지고 청크까지 만료된 상태에서도 **1**이 나옵니다 — static만 있는 행이 남기 때문입니다.
-> ② 파티션 키 없는 풀스캔 `SELECT count(*)`는 병합하지 않습니다(범위 스캔은 핫 로우만 봅니다).
-> 전량 청크화된 테이블에서 **0**이 나오는 것이 정상이며, 계층화가 데이터를 잃은 것이 아닙니다.
+> ② 파티션 키 없는 풀스캔 `SELECT count(*)`는 청크를 병합할 수 없어 **거부됩니다**
+> ([프로덕션 체크리스트 §3.1](production-rollout.md)). 확인은 태그별로, 파티션 키를 지정해 세십시오.
 ```bash
 nodetool tieringstatus                                  # 테이블별 정책·마지막 실행·누적 통계
 nodetool retier <ks> <table>                            # 수동 1사이클 (동기)
