@@ -36,6 +36,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.ColumnIdentifier;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.ResultSet;
@@ -344,7 +345,7 @@ final class ChunkRowSource
                     if (exhausted)
                         return endOfData();
 
-                    QueryOptions options = QueryOptions.create(cl, values, false, TieredStorageService.PAGE_SIZE,
+                    QueryOptions options = QueryOptions.create(cl, values, false, PageSize.inRows(TieredStorageService.PAGE_SIZE),
                                                                pagingState, null, ProtocolVersion.CURRENT, null);
                     ResultMessage result = QueryProcessor.instance.process(statement, queryState, options,
                                                                            Dispatcher.RequestTime.forImmediateExecution());
@@ -405,7 +406,7 @@ final class ChunkRowSource
             // QueryProcessor's internal-statement cache, and pagedRows is pagedSelectLazy with the
             // per-page re-parse taken out (see prepare and pagedRows).
             rows = cl == null
-                   ? QueryProcessor.executeInternalWithPaging(windowSelect, TieredStorageService.PAGE_SIZE,
+                   ? QueryProcessor.executeInternalWithPaging(windowSelect, PageSize.inRows(TieredStorageService.PAGE_SIZE),
                                                               values.toArray()).iterator()
                    : pagedRows(windowStatement(), values);
         }
