@@ -41,7 +41,8 @@ NAME="cassandra-upgrade-boot-$$"
 NET="upgrade-boot-net-${IP%.*}"
 NET="${NET//./-}"
 WORK="$(mktemp -d)"
-trap 'docker rm -f "$NAME" >/dev/null 2>&1; rm -rf "$WORK"' EXIT
+# UPGRADE_BOOT_LOG=<file> keeps the node's log after the run, for reading a FAIL.
+trap 'docker logs "$NAME" > "${UPGRADE_BOOT_LOG:-/dev/null}" 2>&1; docker rm -f "$NAME" >/dev/null 2>&1; rm -rf "$WORK"' EXIT
 
 mkdir -p "$WORK/cassandra/commitlog" "$WORK/cassandra/hints" "$WORK/cassandra/saved_caches" "$WORK/cassandra/cdc_raw"
 cp -a "$META" "$WORK/cassandra/data"
@@ -80,11 +81,14 @@ fi
 echo "ok   first boot on the existing metadata"
 # Here-strings, not `docker logs | grep -q`: under pipefail, grep -q exiting early SIGPIPEs the writer and
 # turns a match into a failure -- the false FAILs the integration test showed on 2026-11-01.
-grep -q 'legacy Accord layout' <<< "$(docker logs "$NAME" 2>&1)" && echo "     (read a snapshot in the pre-4da20e07e8 layout)"
+# The WARN MetadataSnapshots logs when it had to read the old layout; not the bare phrase "legacy Accord layout",
+# which the rewrite's own INFO line also contains.
+LEGACY_READ='written by a build before upstream 4da20e07e8'
+grep -q "$LEGACY_READ" <<< "$(docker logs "$NAME" 2>&1)" && echo "     (read a snapshot in the pre-4da20e07e8 layout)"
 
 # A legacy snapshot is rewritten by the node itself once startup has progressed
 # (LegacyAccordLayout.rewriteSnapshotIfLegacyWasRead) -- no operator step. Wait for that, then restart.
-if grep -q 'legacy Accord layout' <<< "$(docker logs "$NAME" 2>&1)"; then
+if grep -q "$LEGACY_READ" <<< "$(docker logs "$NAME" 2>&1)"; then
     for _ in $(seq 1 24); do
         grep -q 'Rewrote the cluster metadata snapshot' <<< "$(docker logs "$NAME" 2>&1)" && break
         sleep 5
@@ -99,7 +103,7 @@ if ! wait_boot 2; then
     docker logs "$NAME" 2>&1 | grep -A12 'Exception encountered during startup' | tail -20
     exit 1
 fi
-if [ "$(docker logs "$NAME" 2>&1 | grep -c 'legacy Accord layout')" -gt 1 ]; then
+if [ "$(docker logs "$NAME" 2>&1 | grep -c "$LEGACY_READ")" -gt 1 ]; then
     echo "FAIL: the second boot still needed the legacy layout -- the snapshot was not rewritten"
     exit 1
 fi
