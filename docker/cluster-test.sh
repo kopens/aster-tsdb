@@ -201,7 +201,7 @@ record() {
 check_at() {
     local node="$1" desc="$2" query="$3" expect="$4" out status t0 t1 ms flat
     t0=$(date +%s%3N); out=$(cql_at "$node" "$query"); t1=$(date +%s%3N); ms=$((t1 - t0))
-    if printf '%s' "$out" | grep -qE -- "$expect"; then PASS=$((PASS + 1)); status="ok  "
+    if grep -qE -- "$expect" <<< "$out"; then PASS=$((PASS + 1)); status="ok  "
     else FAIL=$((FAIL + 1)); status="FAIL"; fi
     flat="node$node cqlsh> $(printf '%s' "$query" | tr '\n' ' ' | tr -s ' ')"
     record "$status" "$desc" "$flat" "$out" "$ms" "$expect"
@@ -216,7 +216,7 @@ check_nodetool_at() {
     local node="$1" desc="$2" expect="$3"; shift 3
     local out rc status t0 t1 ms flat
     t0=$(date +%s%3N); out=$(ntool_at "$node" "$@"); rc=$?; t1=$(date +%s%3N); ms=$((t1 - t0))
-    if [ "$rc" -eq 0 ] && { [ -z "$expect" ] || printf '%s' "$out" | grep -qE -- "$expect"; }; then
+    if [ "$rc" -eq 0 ] && { [ -z "$expect" ] || grep -qE -- "$expect" <<< "$out"; }; then
         PASS=$((PASS + 1)); status="ok  "
     else
         FAIL=$((FAIL + 1)); status="FAIL"
