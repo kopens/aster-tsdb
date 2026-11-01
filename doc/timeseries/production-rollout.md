@@ -89,7 +89,7 @@ v4 이전 빌드가 만든 청크(v1/v2/v3)는 읽을 때 `UnsupportedChunkForma
 | --- | --- | --- |
 | `lib/apache-cassandra-6.0.0.jar` | **예** — 포크 코드 전부가 여기 들어 있습니다 | **예** |
 | `bin/` (`nodetool`, `cassandra`, `cqlsh` …) | 아니오 | 아니오 |
-| `lib/` 의 다른 jar | 포크는 안 바꿉니다 — 다만 **업스트림 머지가 의존성 버전을 올리면 바뀝니다** | **머지마다 확인** (아래) |
+| `lib/` 의 다른 jar | 업스트림 머지가 의존성 버전을 올리면 바뀝니다. **r4는 포크가 직접 올렸습니다**(아래 r4 절) | **머지·릴리스마다 확인** (아래) |
 | `conf/cassandra.yaml` | 주석 처리된 가이드레일 설명 7줄뿐 | 아니오 |
 
 **업스트림 머지 뒤에는 의존성 버전이 올라갔는지 먼저 확인하십시오.** 포크는 `lib/`를 건드리지
@@ -112,6 +112,22 @@ diff /tmp/want.txt /tmp/have.txt     # 버전이 다른 항목이 곧 함께 교
 
 버전이 올라간 jar은 **새 것을 넣고 낡은 것을 반드시 지우십시오** — 둘 다 두면 클래스패스에 함께
 올라가고 어느 쪽이 이길지는 순서에 달립니다(0.5 주의 1번과 같은 함정).
+
+### r4로 올릴 때 — jar 여러 개, 그리고 r3 이하로 롤백 불가
+
+- **함께 교체할 `lib/` jar (r4가 올린 의존성):** netty 4.1.139.Final(`netty-all`,
+  `netty-transport-native-epoll`), `netty-tcnative-boringssl-static` 2.0.84.Final, `snappy-java` 1.1.10.12,
+  `guava` 33.7.2-jre, jackson 2.21.8(`jackson-core`, `jackson-databind`, `jackson-datatype-jsr310`,
+  `jackson-dataformat-yaml`; `jackson-annotations`는 2.21), `lz4-java` 1.11.4, logback 1.5.38(`logback-core`,
+  `logback-classic`). 위 `diff`가 정답지입니다 — 낡은 버전 파일은 반드시 지우십시오.
+- **TCM 메타데이터:** r4는 업스트림 `4da20e07e8` 이전 빌드(r3 이하)가 쓴 메타데이터 스냅샷을 읽고, 기동
+  직후 스스로 새 형식 스냅샷을 찍습니다(로그 `Rewrote the cluster metadata snapshot in the current
+  layout`). 운영자 조치는 없습니다. 다음 기동부터는 옛 형식 리더를 쓰지 않습니다.
+- **⚠️ 되돌릴 수 없는 지점:** r4로 한 번 기동한 노드는 **r3 이하 jar로 되돌리면 기동하지 못합니다** — r3는
+  새 형식을 읽지 못합니다(자동 재작성이 없어도 `metadata_snapshot_frequency`마다 새 형식 스냅샷이 쌓입니다).
+  jar 롤백을 가능하게 하려면 **교체 전에 `<data>/system_cluster_metadata` 디렉터리를 복사해 두고**, 롤백할
+  때 jar와 함께 그 사본으로 되돌리십시오(그 사이의 스키마·토폴로지 변경은 잃습니다).
+  검증은 [`docker/upgrade-boot-test.sh`](../../docker/upgrade-boot-test.sh)로 노드의 메타데이터 사본에서 먼저 합니다.
 
 `nodetool`은 셸 스크립트이고 `retier`/`tieringstatus` 클래스는 메인 jar 안에 있습니다
 (`org/apache/cassandra/tools/nodetool/Retier.class` 확인). 그래서 스크립트는 건드릴 필요가 없습니다.
@@ -155,8 +171,11 @@ nodetool version && nodetool status              # 올라왔는지, 링에 붙�
 >   | grep -E 'Implementation-(Git-SHA|Build-Date)'
 > ```
 >
-> 새 빌드를 넣는 일은 **컨테이너 이미지 쪽 작업이므로 플랫폼 소관**입니다. 이 문서는 카산드라 쪽
-> 결론만 적는다: 호스트 jar 교체로 배포했다고 판단하지 말 것.
+> 새 빌드를 넣는 정규 경로는 **컨테이너 이미지 쪽 작업이므로 플랫폼 소관**입니다. 호스트 jar 교체로
+> 배포했다고 판단하지 말 것. **2026-11-02 운영자 결정:** 이미지 재빌드를 기다리지 않고 jar(와 바뀐 lib jar)를
+> `docker cp`로 컨테이너 안 `$C/lib/`에 넣고 카산드라만 재시작해도 됩니다. 이 변경은 `docker restart`에는
+> 남지만 **이미지로 컨테이너를 다시 만들면 사라집니다** — 플랫폼에 알려 다음 이미지에 같은 빌드를 넣게 하십시오.
+> 교체 전 `system_cluster_metadata` 사본(§0.5 r4 절)과 기존 jar를 컨테이너 안에 남겨 롤백에 씁니다.
 >
 > **컨테이너 구성에서의 운영 접근법** (nodetool은 호스트에서 치면 9042/7000을 docker-proxy가
 > 점유하고 있어 JMX 스택트레이스만 나옵니다):
@@ -284,24 +303,27 @@ cold_window  : 목표 보존 기간 (예: 10y)
 
 ## 3. 애플리케이션 영향 — 코드 확인이 필요한 것들
 
-### 3.1 콜드 구간까지 닿는 레인지 스캔은 거부됩니다
+### 3.1 레인지 스캔은 r4부터 청크를 병합합니다 — 일부 형태만 거부
 
-레인지 스캔(파티션 키를 지정하지 않은 조회)은 청크를 병합하지 못합니다. 예전에는 경고만 남기고 핫
-행만 돌려줬습니다 — 전부 계층화된 테이블에서 `SELECT count(*)`가 실제 행 수 대신 **태그 수**를
-돌려줬고(실측 3,000만 행 테이블에서 `600`, static이 없으면 `0`), 대부분의 드라이버는 그 경고를
-노출하지 않았습니다. 성공 응답으로 돌아오는 오답이라 지금은 **거부**합니다(`InvalidRequestException`).
+레인지 스캔(파티션 키를 지정하지 않은 조회)은 r3까지 청크를 병합하지 못했습니다. 그 전에는 경고만 남기고
+핫 행만 돌려줘서, 전부 계층화된 테이블에서 `SELECT count(*)`가 실제 행 수 대신 **태그 수**를 돌려줬습니다
+(실측 3,000만 행 테이블에서 `600`). 그래서 r3는 이를 거부했고, **r4는 코디네이터에서 청크를 병합합니다**
+([range-scan-merge-design.md](range-scan-merge-design.md)) — 결과는 같은 데이터의 비계층 테이블과 행 단위로
+같습니다(`TransparentRangeReadTest`).
 
-| 조회 | 결과 |
+| 조회 | r4 결과 |
 | --- | --- |
-| `SELECT ... FROM t WHERE tag_id = ?` (파티션 키 지정) | ✅ 핫·콜드 병합, 정상 |
-| `SELECT count(*) FROM t`, `SELECT DISTINCT tag_id FROM t`, `SELECT * FROM t` | ❌ 거부 |
-| `WHERE token(tag_id) > ? AND token(tag_id) <= ?` — **Spark 커넥터의 전체 테이블 읽기** | ❌ 거부 |
-| `WHERE timestamp >= <hot_window 안쪽> ALLOW FILTERING` | ✅ 허용 — 청크가 닿지 않으므로 답이 완전함 |
+| `SELECT count(*) FROM t`, `SELECT DISTINCT tag_id FROM t`, `SELECT * FROM t`, `LIMIT`/페이징 | ✅ 핫·콜드 병합 |
+| `WHERE token(tag_id) > ? AND token(tag_id) <= ?` — **Spark 커넥터의 전체 테이블 읽기** | ✅ 병합 |
+| `WHERE timestamp ... ALLOW FILTERING` (클러스터링 시간 범위) | ✅ 병합 |
+| `WHERE value > ? ALLOW FILTERING` 등 **일반 컬럼 필터**, 인덱스 사용 | ❌ 거부 — 청크 행에 필터를 적용할 수 없음 |
+| `transactional_mode`가 `off`가 아닌 테이블 | ❌ 거부 (§3.3) |
 
-청크가 한 번도 만들어지지 않은 테이블과 계층화하지 않은 테이블은 영향이 없습니다. 레인지 스캔에서도
-청크를 병합하는 작업은 후속 릴리스 과제입니다. 그때까지 애플리케이션·배치·모니터링·Spark 작업에
-파티션 키 없는 조회가 있다면 투입 전에 찾아 파티션 키 조회로 바꾸십시오. Spark는 `tag_id` 필터를
-걸면 파티션 단위 조회를 보내므로 정상 동작합니다.
+- **끄는 법:** 테이블별로 정책에 `"range_scan": "refuse"`(r3 동작). 노드 전체 비상 스위치는 JMX
+  `org.apache.cassandra.db:type=TieredStorage` 의 `RangeScanMergeEnabled=false`(재시작하면 다시 켜짐).
+- **비용:** 전체 스캔은 범위 안의 모든 청크를 디코드합니다. 청크 쪽 읽기는 사용자 CL이 쿼럼보다 약하면 정책의
+  `consistency`로 올려 읽습니다.
+- **관측:** `system_views.timeseries_tiering`의 `range_scans_merged` / `range_scans_refused`.
 
 ### 3.2 콜드 구간에서 값을 지우는 쓰기는 거부됩니다
 
@@ -348,8 +370,17 @@ TSCS만 쓰는 테이블에서는 이것이 오히려 의도된 방식입니다(
       다시 보내면 다음 주기에 청크로 병합됩니다.
 - [ ] **알림**: `system_views.timeseries_tiering.cold_writes_refused`(또는 JMX
       `TimeSeriesTiering.ColdWritesRefused`) 증가.
-- [ ] **수집기는 `QUORUM`/`LOCAL_QUORUM`으로 쓴다** — 재인코더는 쿼럼으로 읽고 레인지 삭제하므로,
-      한 복제본에만 있는 행은 읽지 못한 채 지워질 수 있습니다(재현 테스트 예정).
+- [ ] **수집기는 `QUORUM`/`LOCAL_QUORUM`으로 쓴다** — 재인코더는 쿼럼으로 읽고 레인지 삭제하므로, 한
+      복제본에만 있는 행은 읽지 못한 채 지워질 수 있습니다(`TieredStorageDefectReproTest` s1에서 재현).
+      **r4부터 RF > 1 인 계층화 테이블에 쿼럼 미만(`ONE`, `LOCAL_ONE`, `TWO` …) 쓰기는 거부됩니다**(단건·배치).
+      RF 1(노드 41)은 해당 없습니다.
+
+### 3.2.3 콜드 클러스터링에 대한 조건부 쓰기(LWT)는 거부됩니다 (r4)
+
+`IF NOT EXISTS`, `IF EXISTS`, `IF col = ...`의 조건은 Paxos 읽기로 판정하는데, 그 읽기는 청크를 보지
+못합니다. r3까지는 청크에만 있는 행을 "없음"으로 판정해 `IF NOT EXISTS`가 적용되고 `IF EXISTS`가 false를
+돌려줬습니다. r4는 `hot_window`보다 오래된 클러스터링의 조건부 쓰기를 Paxos 전에 거부합니다. 조건 없는
+일반 쓰기(늦은 정정·백필)는 그대로 허용됩니다.
 
 ### 3.3 `transactional_mode`을 켜지 마십시오
 
