@@ -61,8 +61,48 @@ public interface MetadataSnapshots
         if (serialized == null)
             return null;
 
-        return VerboseMetadataSerializer.deserialize(ClusterMetadata.serializer,
-                                                     new DataInputBuffer(serialized, false));
+        // Aster fork: a snapshot is exactly one serialized ClusterMetadata, so the current layout must consume
+        // it to the last byte. If it does not -- or throws -- the snapshot may have been written before upstream
+        // 4da20e07e8 changed the Accord sections without a Version bump (LegacyAccordLayout); read it in that
+        // layout instead, and accept the result only if that reading consumes every byte too. Neither fitting
+        // fails as before: a reading that merely does not throw is not evidence of a correct one.
+        Throwable current;
+        try
+        {
+            DataInputBuffer in = new DataInputBuffer(serialized.duplicate(), false);
+            ClusterMetadata metadata = VerboseMetadataSerializer.deserialize(ClusterMetadata.serializer, in);
+            if (in.available() == 0)
+                return metadata;
+            current = new IOException(in.available() + " byte(s) left after reading the snapshot in the current layout");
+        }
+        catch (IOException | RuntimeException e)
+        {
+            current = e;
+        }
+
+        DataInputBuffer in = new DataInputBuffer(serialized.duplicate(), false);
+        Version version = Version.fromInt(in.readUnsignedVInt32());
+        ClusterMetadata legacy;
+        try
+        {
+            legacy = ClusterMetadata.serializer.deserializeLegacyAccordLayout(in, version);
+        }
+        catch (IOException | RuntimeException e)
+        {
+            e.addSuppressed(current);
+            throw e;
+        }
+        if (in.available() != 0)
+        {
+            IOException e = new IOException("Cluster metadata snapshot fits neither the current nor the pre-4da20e07e8 " +
+                                            "Accord layout (" + in.available() + " byte(s) left in the latter)");
+            e.addSuppressed(current);
+            throw e;
+        }
+        logger.warn("Read a cluster metadata snapshot at epoch {} written by a build before upstream 4da20e07e8 " +
+                    "(legacy Accord layout, version {}). It is rewritten in the current layout by the next snapshot; " +
+                    "`nodetool cms snapshot` takes one now.", legacy.epoch, version);
+        return legacy;
     }
 
     MetadataSnapshots NO_OP = new NoOp();

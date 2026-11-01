@@ -75,6 +75,26 @@ Run it on a machine with the headroom, once, before any release that touches com
 repair or tiering. It leaves its three containers up on purpose so a failure can be inspected;
 `docker rm -f cassandra-ts-cluster-{1,2,3}` when done.
 
+## 2.5 The upgrade boot test — required before any release that a running node will take
+
+```bash
+# a read-only copy of node 41's system metadata (never the data itself)
+ssh root@192.168.0.41 'cd /data1/docker-data/volumes/pp-data/_data/cassandra/data && \
+  tar cf - system system_schema system_cluster_metadata system_auth system_distributed' | tar xf - -C /tmp/meta41
+docker exec plantpulse-datalake cat .../db/cassandra/conf/cassandra.yaml > /tmp/meta41.yaml   # 41's own config
+./docker/upgrade-boot-test.sh aster-tsdb:<tag> /tmp/meta41 /tmp/meta41.yaml 10.99.0.100
+```
+
+Every other gate starts **fresh** clusters. On 2026-11-01 `v6.0.0-r2` passed all of them and then could
+not start on node 41: upstream `4da20e07e8` had changed the TCM `ClusterMetadata` layout without a version
+bump, and only metadata an earlier build wrote shows that. The script boots the candidate on a copy of an
+existing node's metadata with that node's IP and `cassandra.yaml` (isolated docker network, nothing
+published), takes `nodetool cms snapshot`, and restarts -- so it proves both "reads the old layout" and
+"reads what it writes". It must FAIL for `aster-tsdb:local-2cdd586a72` (r2) and PASS for the candidate.
+Note that the data volume on 41 is `/data1/docker-data/volumes/pp-data/_data`, not the host's
+`/data1/pp-data` (a stale directory). The golden fixtures under `test/data/tcm/` cover the same class of
+break in CI (`LegacyAccordLayoutSnapshotTest`); add one per release that writes metadata in a new layout.
+
 ## 3. The performance gate — `.build/sh/ci-perf`
 
 ```bash

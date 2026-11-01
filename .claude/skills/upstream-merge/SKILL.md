@@ -129,7 +129,10 @@ cluster: upstream `4da20e07e8` (Accord rebootstrap) changed TCM `ClusterMetadata
 `Version`, so metadata written by earlier builds fails to deserialize
 (`IllegalArgumentException: No enum constant ...MultiStepOperation.Kind.`, exit 3). Node 41 failed exactly
 so on 2026-11-01. `main` was then reset to the content of `v6.0.0-r3` (the fork fixes without that merge)
-by the commit whose subject starts `[정리] main 에서 2026-11 업스트림 머지를 뺀다`. Git still records the
+by the commit whose subject starts `[정리] main 에서 2026-11 업스트림 머지를 뺀다`; r4 reverted that
+back-out and added a read-side fallback for the old layout (`LegacyAccordLayout`, used only by
+`MetadataSnapshots.fromBytes`), so the 58 commits are in again. The paragraph below stays as the rule for the
+next merge. Git still records the
 upstream commits as merged, so a plain re-merge brings them back **without** those 58 commits. The next
 upstream merge (planned at Cassandra 6.0 GA) must first `git revert` that backing-out commit, then merge.
 Before it ships, boot the candidate against a copy of node 41's system metadata (system, system_schema,

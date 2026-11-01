@@ -71,6 +71,7 @@ import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.service.accord.topology.AccordNodeInfos;
 import org.apache.cassandra.service.accord.topology.AccordNodeInfos.AccordNodeInfo;
 import org.apache.cassandra.service.accord.topology.AccordTopology;
+import org.apache.cassandra.service.accord.topology.LegacyAccordLayout;
 import org.apache.cassandra.service.consensus.migration.ConsensusMigrationState;
 import org.apache.cassandra.service.consensus.migration.TableMigrationState;
 import org.apache.cassandra.tcm.extensions.ExtensionKey;
@@ -1384,6 +1385,21 @@ public class ClusterMetadata
         @Override
         public ClusterMetadata deserialize(DataInputPlus in, Version version) throws IOException
         {
+            return deserialize(in, version, false);
+        }
+
+        /**
+         * Aster fork: reads metadata whose Accord sections use the layout of builds before upstream 4da20e07e8,
+         * which changed it without a {@link Version} bump. See {@link LegacyAccordLayout}; only
+         * {@link MetadataSnapshots} calls this, after the current layout failed to read a snapshot cleanly.
+         */
+        public ClusterMetadata deserializeLegacyAccordLayout(DataInputPlus in, Version version) throws IOException
+        {
+            return deserialize(in, version, true);
+        }
+
+        private ClusterMetadata deserialize(DataInputPlus in, Version version, boolean legacyAccordLayout) throws IOException
+        {
             IPartitioner partitioner = null;
             if (version.isAtLeast(Version.V1))
                 partitioner = FBUtilities.newPartitioner(in.readUTF());
@@ -1410,7 +1426,13 @@ public class ClusterMetadata
             AccordNodeInfos accordNodeInfos;
             ConsensusMigrationState consensusMigrationState;
 
-            if (version.isAtLeast(MIN_ACCORD_VERSION))
+            if (version.isAtLeast(MIN_ACCORD_VERSION) && legacyAccordLayout)
+            {
+                accordNodeInfos = LegacyAccordLayout.readFastPath(in, version);
+                consensusMigrationState = ConsensusMigrationState.serializer.deserialize(in, version);
+                LegacyAccordLayout.skipStaleReplicas(in, version);
+            }
+            else if (version.isAtLeast(MIN_ACCORD_VERSION))
             {
                 accordNodeInfos = AccordNodeInfos.serializer.deserialize(in, version);
                 consensusMigrationState = ConsensusMigrationState.serializer.deserialize(in, version);
