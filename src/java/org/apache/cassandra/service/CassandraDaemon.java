@@ -444,6 +444,8 @@ public class CassandraDaemon
             JVMStabilityInspector.inspectThrowable(t);
             logger.warn("Unable to start tiered storage service", t);
         }
+        // Aster fork: a metadata snapshot read in the pre-4da20e07e8 layout at startup is rewritten in the current one.
+        org.apache.cassandra.service.accord.topology.LegacyAccordLayout.rewriteSnapshotIfLegacyWasRead();
 
         // schedule periodic background compaction task submission. this is simply a backstop against compactions stalling
         // due to scheduling errors or race conditions

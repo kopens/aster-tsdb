@@ -100,8 +100,9 @@ public interface MetadataSnapshots
             throw e;
         }
         logger.warn("Read a cluster metadata snapshot at epoch {} written by a build before upstream 4da20e07e8 " +
-                    "(legacy Accord layout, version {}). It is rewritten in the current layout by the next snapshot; " +
-                    "`nodetool cms snapshot` takes one now.", legacy.epoch, version);
+                    "(legacy Accord layout, version {}). A snapshot in the current layout is taken once startup " +
+                    "has progressed (LegacyAccordLayout.rewriteSnapshotIfLegacyWasRead).", legacy.epoch, version);
+        org.apache.cassandra.service.accord.topology.LegacyAccordLayout.noteLegacySnapshotRead();
         return legacy;
     }
 

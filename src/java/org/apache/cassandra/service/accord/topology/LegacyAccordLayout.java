@@ -19,12 +19,18 @@
 package org.apache.cassandra.service.accord.topology;
 
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.agrona.collections.Int2ObjectHashMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.io.util.DataInputPlus;
+import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.tcm.serialization.Version;
+import org.apache.cassandra.utils.JVMStabilityInspector;
 
 /**
  * Aster fork: reads the Accord sections of {@code ClusterMetadata} as builds before upstream
@@ -43,12 +49,52 @@ import org.apache.cassandra.tcm.serialization.Version;
  * converted, since a wrong conversion would be written back into the cluster's metadata.
  * <p>
  * Read-only by design: everything is written in upstream's layout, so the fork stays wire- and disk-compatible
- * with upstream. Removable once no deployment still holds a snapshot written before {@code 4da20e07e8}.
+ * with upstream. A node that read a legacy snapshot at startup takes a fresh one through upstream's own path
+ * ({@link #rewriteSnapshotIfLegacyWasRead}, what {@code nodetool cms snapshot} does), so it needs this reader
+ * for exactly one boot. Removable once every deployment has booted a build carrying it -- for this fork, once
+ * node 41 has booted r4.
  */
 public final class LegacyAccordLayout
 {
+    private static final Logger logger = LoggerFactory.getLogger(LegacyAccordLayout.class);
+
+    private static final AtomicBoolean legacySnapshotRead = new AtomicBoolean();
+
     private LegacyAccordLayout()
     {
+    }
+
+    /** Called by {@code MetadataSnapshots.fromBytes} when it had to read a snapshot in this layout. */
+    public static void noteLegacySnapshotRead()
+    {
+        legacySnapshotRead.set(true);
+    }
+
+    /**
+     * Startup hook: if a snapshot was read in the legacy layout, take a new one now, in the current layout, so the
+     * next boot does not need this class. Asynchronous and best-effort -- committing the snapshot transformation
+     * goes through the CMS, and a CMS that cannot be reached right now must not hold up or fail the boot; the
+     * legacy snapshot stays readable either way, so the cost of failing is only that this runs again next boot.
+     */
+    public static void rewriteSnapshotIfLegacyWasRead()
+    {
+        if (!legacySnapshotRead.get())
+            return;
+        ScheduledExecutors.optionalTasks.execute(() -> {
+            try
+            {
+                Epoch epoch = ClusterMetadataService.instance().triggerSnapshot().epoch;
+                legacySnapshotRead.set(false);
+                logger.info("Rewrote the cluster metadata snapshot in the current layout at epoch {}; the legacy " +
+                            "Accord layout is no longer needed to start this node", epoch);
+            }
+            catch (Throwable t)
+            {
+                JVMStabilityInspector.inspectThrowable(t);
+                logger.warn("Could not rewrite the cluster metadata snapshot read in the legacy Accord layout; it will " +
+                            "be retried at the next start, or run `nodetool cms snapshot`", t);
+            }
+        });
     }
 
     /** Reads a pre-{@code 4da20e07e8} {@code AccordFastPath} section as the empty {@link AccordNodeInfos} it is. */
