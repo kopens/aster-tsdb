@@ -49,6 +49,10 @@ to undo than an uncommitted one.
 `README.ko.md` is the Korean one, and a change to either belongs in both). Upstream keeps editing
 `README.asc`, producing a modify/delete conflict. Delete it again: `git rm README.asc`.
 
+**`.github/workflows/code-check.yaml`, `build-scripts.yaml`** — the fork runs the GitHub mirror's checks on
+JDK 21 only (one `ant-check-jdk21` job); upstream's `ant-check-jdk11`/`-jdk17` jobs fail on fork code that
+uses post-11 APIs. Keep the fork's side; take upstream's other edits to these files.
+
 **`build.xml`** — upstream resets `base.version` to an alpha/beta (e.g. `6.0-alpha3`). The fork's
 versioning rule requires `6.0.0`, because the build must produce `build/apache-cassandra-6.0.0.jar`
 and the release pipeline renames from that exact path. Keep `<property name="base.version" value="6.0.0"/>`.
