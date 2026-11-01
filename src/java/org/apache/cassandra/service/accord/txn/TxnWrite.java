@@ -31,6 +31,7 @@ import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import accord.api.AsyncExecutor;
 import accord.api.Write;
 import accord.local.CommandStore;
 import accord.local.SafeCommandStore;
@@ -138,6 +139,15 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
                    "key=" + key +
                    ", index=" + index +
                    '}';
+        }
+
+        public AsyncChain<Void> write(AsyncExecutor executor, TableMetadatas tables, boolean preserveTimestamps, long timestamp)
+        {
+            PartitionUpdate update = deserialize(tables);
+            if (!preserveTimestamps)
+                update = new PartitionUpdate.Builder(update, 0).updateAllTimestamp(timestamp).build();
+            Mutation mutation = new Mutation(update, PotentialTxnConflicts.ALLOW);
+            return executor.continuationChain(() -> mutation.apply(false, false));
         }
 
         @Override
@@ -280,10 +290,15 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
             return referenceOps.isEmpty();
         }
 
-        public PartitionUpdate complete(AccordUpdateParameters parameters)
+        public Update toUpdate(TableMetadatas tables)
+        {
+            return new Update(key, index, baseUpdate, tables);
+        }
+
+        public Update complete(AccordUpdateParameters parameters, TableMetadatas tables)
         {
             if (isComplete())
-                return baseUpdate;
+                return toUpdate(tables);
 
             DecoratedKey key = baseUpdate.partitionKey();
             PartitionUpdate.Builder updateBuilder = new PartitionUpdate.Builder(baseUpdate.metadata(),
@@ -307,12 +322,7 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
                     updateBuilder.add(row);
             }
 
-            return updateBuilder.build();
-        }
-
-        public Update completeSerialized(AccordUpdateParameters parameters, TableMetadatas tables)
-        {
-            return new Update(key, index, complete(parameters), tables);
+            return new Update(this.key, index, updateBuilder.build(), tables);
         }
 
         private static Columns columns(Columns current, List<TxnReferenceOperation> referenceOps)
@@ -483,32 +493,28 @@ public class TxnWrite extends AbstractKeySorted<TxnWrite.Update> implements Writ
         long timestamp = executeAt.uniqueHlc();
 
         // TODO (expected): optimise for the common single update case; lots of lists allocated
-        List<PartitionUpdate> updates = new ArrayList<>(1);
+        List<AsyncChain<Void>> results = new ArrayList<>();
         if (!conditionalBlockBitSet.isEmpty())
         {
+            AccordExecutor executor = ((AccordCommandStore) commandStore).executor();
+            boolean preserveTimestamps = txnUpdate.preserveTimestamps().preserve;
             // Apply updates not specified fully by the client but built from fragments completed by data from reads.
             // This occurs, for example, when an UPDATE statement uses a value assigned by a LET statement.
-            forEachWithKey(key, write -> updates.add(write.deserialize(tables)));
+            forEachWithKey(key, write -> results.add(write.write(executor, tables, preserveTimestamps, timestamp)));
             // Apply updates that are fully specified by the client and not reliant on data from reads.
             // ex. INSERT INTO tbl (a, b, c) VALUES (1, 2, 3)
             // These updates are persisted only in TxnUpdate and not in TxnWrite to avoid duplication.
-            txnUpdate.completeUpdatesForKey(updates, conditionalBlockBitSet, (RoutableKey) key, tables);
+            List<Update> updates = txnUpdate.completeUpdatesForKey(conditionalBlockBitSet, (RoutableKey) key);
+            updates.forEach(write -> results.add(write.write(executor, tables, preserveTimestamps, timestamp)));
         }
 
-        if (updates.isEmpty())
+        if (results.isEmpty())
             return AsyncChains.success(null);
 
-        PartitionUpdate update;
-        {
-            boolean preserveTimestamps = txnUpdate.preserveTimestamps().preserve;
-            PartitionUpdate tmp = updates.size() == 1 ? updates.get(0) : PartitionUpdate.merge(updates);
-            if (!preserveTimestamps)
-                tmp = new PartitionUpdate.Builder(tmp, 0).updateAllTimestamp(timestamp).build();
-            update = tmp;
-        }
+        if (results.size() == 1)
+            return results.get(0).mapToNull();
 
-        AccordExecutor executor = ((AccordCommandStore) commandStore).executor();
-        return executor.continuationChain(() -> new Mutation(update, PotentialTxnConflicts.ALLOW).apply(false, false));
+        return AsyncChains.reduce(results, (i1, i2) -> null, null);
     }
 
     public long estimatedSizeOnHeap()

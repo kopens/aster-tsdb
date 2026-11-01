@@ -70,7 +70,6 @@ class HintsWriter implements AutoCloseable
         File file = descriptor.file(directory);
 
         FileChannel channel = FileChannel.open(file.toPath(), StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
-        SyncUtil.trySyncDir(directory);
         int fd = NativeLibrary.getfd(channel);
 
         CRC32 crc = new CRC32();

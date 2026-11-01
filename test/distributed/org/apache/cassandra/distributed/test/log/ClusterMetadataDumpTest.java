@@ -166,11 +166,10 @@ public class ClusterMetadataDumpTest extends TestBaseImpl
         try (Cluster cluster = init(builder().withNodes(3)
                                              .start()))
         {
-            // --epoch alone must fail, the three dump options go together or not at all
+            // Providing only --epoch without --transform-epoch and --serialization-version
+            // should be rejected by picocli since all three are required together via @ArgGroup
             NodeToolResult res = cluster.get(1).nodetoolResult("cms", "dump", "--epoch", "1");
-            res.asserts()
-               .failure()
-               .stdoutContains("Options --epoch, --transform-epoch and --serialization-version must be set together or not at all");
+            res.asserts().failure();
         }
     }
 }

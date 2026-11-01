@@ -84,12 +84,11 @@ if [ "$?" = "1" ] ; then # [X] to prevent ccm from replacing this line
 fi
 
 # Check what parameters were defined on jvm-server.options file to avoid conflicts
-# Match whole options only: JVM_OPTS also holds paths (e.g. the gc log) which may contain these strings
-echo $JVM_OPTS | grep -qE '(^| )-Xmn'
+echo $JVM_OPTS | grep -q Xmn
 DEFINED_XMN=$?
-echo $JVM_OPTS | grep -qE '(^| )-Xmx'
+echo $JVM_OPTS | grep -q Xmx
 DEFINED_XMX=$?
-echo $JVM_OPTS | grep -qE '(^| )-Xms'
+echo $JVM_OPTS | grep -q Xms
 DEFINED_XMS=$?
 echo $JVM_OPTS | grep -q MaxDirectMemorySize
 DEFINED_MAX_DIRECT_MEMORY_SIZE=$?

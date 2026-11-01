@@ -49,7 +49,6 @@ import org.apache.cassandra.auth.CassandraRoleManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.db.ConsistencyLevel;
@@ -562,7 +561,7 @@ public abstract class GuardrailTester extends CQLTester
         QueryOptions options = QueryOptions.create(cl,
                                                    Collections.emptyList(),
                                                    false,
-                                                   PageSize.inRows(10),
+                                                   10,
                                                    null,
                                                    serialCl,
                                                    ProtocolVersion.CURRENT,

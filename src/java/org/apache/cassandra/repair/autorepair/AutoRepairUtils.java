@@ -51,7 +51,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
@@ -1144,7 +1143,7 @@ public class AutoRepairUtils
             ByteBufferUtil.bytes(startTime),
             ByteBufferUtil.bytes(finishTime),
             ByteBufferUtil.bytes(currentTimeMillis())
-            ), false, PageSize.NONE, null, cl, ProtocolVersion.CURRENT, SchemaConstants.DISTRIBUTED_KEYSPACE_NAME),
+            ), false, -1, null, cl, ProtocolVersion.CURRENT, SchemaConstants.DISTRIBUTED_KEYSPACE_NAME),
             Dispatcher.RequestTime.forImmediateExecution());
             resultSet = UntypedResultSet.create(resultMessage.result);
             boolean applied = resultSet.one().getBoolean(ModificationStatement.CAS_RESULT_COLUMN.toString());

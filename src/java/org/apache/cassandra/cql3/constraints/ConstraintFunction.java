@@ -99,12 +99,6 @@ public abstract class ConstraintFunction
         maybeThrowOnNonEmptyArguments(name);
     }
 
-    /** Pre-computes state derived from the term. */
-    public void prepare(String term) throws InvalidConstraintDefinitionException
-    {
-        // Do nothing
-    }
-
     /**
      * Return operators this function supports. By default, it returns an empty list, modelling unary function.
      *

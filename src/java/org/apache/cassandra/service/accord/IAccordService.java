@@ -40,7 +40,6 @@ import accord.local.Node;
 import accord.local.Node.Id;
 import accord.local.RedundantBefore;
 import accord.local.durability.DurabilityService.SyncLocal;
-import accord.local.durability.DurabilityService.SyncReadable;
 import accord.local.durability.DurabilityService.SyncRemote;
 import accord.messages.Reply;
 import accord.messages.Request;
@@ -65,7 +64,7 @@ import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.service.accord.api.AccordScheduler;
 import org.apache.cassandra.service.accord.api.AccordTopologySorter;
 import org.apache.cassandra.service.accord.execution.AccordExecutor;
-import org.apache.cassandra.service.accord.topology.AccordEndpointMap;
+import org.apache.cassandra.service.accord.topology.AccordEndpointMapper;
 import org.apache.cassandra.service.accord.topology.AccordSyncPropagator;
 import org.apache.cassandra.service.accord.topology.AccordSyncPropagator.Notification;
 import org.apache.cassandra.service.accord.topology.AccordTopologyService;
@@ -89,8 +88,8 @@ public interface IAccordService
     IVerbHandler<? extends Request> requestHandler();
     IVerbHandler<? extends Reply> responseHandler();
 
-    AsyncResult<?> sync(Object requestedBy, @Nullable TxnId minBound, Ranges ranges, @Nullable Collection<Id> include, Collection<Id> exclude, SyncLocal syncLocal, SyncRemote syncRemote, SyncReadable readable, long timeout, TimeUnit timeoutUnits);
-    AsyncChain<?> syncKeysForMigration(@Nullable TxnId minBound, Keys keys, SyncLocal syncLocal, SyncRemote syncRemote);
+    AsyncResult<Void> sync(Object requestedBy, @Nullable TxnId minBound, Ranges ranges, @Nullable Collection<Id> include, SyncLocal syncLocal, SyncRemote syncRemote, long timeout, TimeUnit timeoutUnits);
+    AsyncChain<Void> sync(@Nullable TxnId minBound, Keys keys, SyncLocal syncLocal, SyncRemote syncRemote);
     AsyncChain<Timestamp> maxConflict(Ranges ranges);
 
     @Nonnull
@@ -187,7 +186,7 @@ public interface IAccordService
 
     void awaitDone(TableId id, long epoch);
 
-    AccordEndpointMap endpointMapper();
+    AccordEndpointMapper endpointMapper();
 
     AccordTopologyService topologyService();
 
@@ -219,13 +218,13 @@ public interface IAccordService
         }
 
         @Override
-        public AsyncResult<Void> sync(Object requestedBy, @Nullable TxnId onOrAfter, Ranges ranges, @Nullable Collection<Id> include, Collection<Id> exclude, SyncLocal syncLocal, SyncRemote syncRemote, SyncReadable readable, long timeout, TimeUnit timeoutUnits)
+        public AsyncResult<Void> sync(Object requestedBy, @Nullable TxnId onOrAfter, Ranges ranges, @Nullable Collection<Id> include, SyncLocal syncLocal, SyncRemote syncRemote, long timeout, TimeUnit timeoutUnits)
         {
             throw new UnsupportedOperationException("No accord transaction should be executed when accord.enabled = false in cassandra.yaml");
         }
 
         @Override
-        public AsyncChain<Void> syncKeysForMigration(@Nullable TxnId onOrAfter, Keys keys, SyncLocal syncLocal, SyncRemote syncRemote)
+        public AsyncChain<Void> sync(@Nullable TxnId onOrAfter, Keys keys, SyncLocal syncLocal, SyncRemote syncRemote)
         {
             throw new UnsupportedOperationException("No accord transaction should be executed when accord.enabled = false in cassandra.yaml");
         }
@@ -351,7 +350,7 @@ public interface IAccordService
         }
 
         @Override
-        public AccordEndpointMap endpointMapper()
+        public AccordEndpointMapper endpointMapper()
         {
             throw new UnsupportedOperationException();
         }
@@ -403,15 +402,15 @@ public interface IAccordService
         }
 
         @Override
-        public AsyncResult<?> sync(Object requestedBy, @Nullable TxnId onOrAfter, Ranges ranges, @Nullable Collection<Id> include, Collection<Id> exclude, SyncLocal syncLocal, SyncRemote syncRemote, SyncReadable readable, long timeout, TimeUnit timeoutUnits)
+        public AsyncResult<Void> sync(Object requestedBy, @Nullable TxnId onOrAfter, Ranges ranges, @Nullable Collection<Id> include, SyncLocal syncLocal, SyncRemote syncRemote, long timeout, TimeUnit timeoutUnits)
         {
-            return delegate.sync(requestedBy, onOrAfter, ranges, include, exclude, syncLocal, syncRemote, readable, timeout, timeoutUnits);
+            return delegate.sync(requestedBy, onOrAfter, ranges, include, syncLocal, syncRemote, timeout, timeoutUnits);
         }
 
         @Override
-        public AsyncChain<?> syncKeysForMigration(@Nullable TxnId onOrAfter, Keys keys, SyncLocal syncLocal, SyncRemote syncRemote)
+        public AsyncChain<Void> sync(@Nullable TxnId onOrAfter, Keys keys, SyncLocal syncLocal, SyncRemote syncRemote)
         {
-            return delegate.syncKeysForMigration(onOrAfter, keys, syncLocal, syncRemote);
+            return delegate.sync(onOrAfter, keys, syncLocal, syncRemote);
         }
 
         @Override
@@ -421,7 +420,7 @@ public interface IAccordService
         }
 
         @Override
-        public AccordEndpointMap endpointMapper()
+        public AccordEndpointMapper endpointMapper()
         {
             return delegate.endpointMapper();
         }

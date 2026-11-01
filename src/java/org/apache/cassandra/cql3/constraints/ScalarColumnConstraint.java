@@ -96,6 +96,7 @@ public class ScalarColumnConstraint extends AbstractFunctionConstraint<ScalarCol
     }
 
     private ByteBuffer value;
+    private AbstractType<?> returnType;
 
     private ScalarColumnConstraint(ColumnIdentifier columnName, Operator relationType, String term)
     {
@@ -124,23 +125,20 @@ public class ScalarColumnConstraint extends AbstractFunctionConstraint<ScalarCol
     }
 
     @Override
-    public void prepare(AbstractType<?> columnType)
+    public void validate(ColumnMetadata columnMetadata) throws InvalidConstraintDefinitionException
     {
+        returnType = columnMetadata.type;
+
+        validateTypes(columnMetadata);
+
         try
         {
-            value = columnType.fromString(ParseUtils.unquote(term));
+            value = returnType.fromString(ParseUtils.unquote(term));
         }
         catch (Throwable t)
         {
             throw new ConstraintViolationException("Cannot parse constraint value from " + term + " for column '" + columnName + '\'');
         }
-    }
-
-    @Override
-    public void validate(ColumnMetadata columnMetadata) throws InvalidConstraintDefinitionException
-    {
-        validateTypes(columnMetadata);
-        prepare(columnMetadata.type);
     }
 
     @Override
@@ -152,7 +150,7 @@ public class ScalarColumnConstraint extends AbstractFunctionConstraint<ScalarCol
     @Override
     public String toString()
     {
-        return columnName.toCQLString() + " " + relationType + " " + term;
+        return columnName + " " + relationType + " " + term;
     }
 
     @Override
@@ -194,9 +192,9 @@ public class ScalarColumnConstraint extends AbstractFunctionConstraint<ScalarCol
         @Override
         public long serializedSize(ScalarColumnConstraint columnConstraint, Version version)
         {
-            return TypeSizes.sizeof(columnConstraint.columnName.toCQLString())
+            return TypeSizes.sizeof(columnConstraint.term)
                    + Operator.serializedSize()
-                   + TypeSizes.sizeof(columnConstraint.term);
+                   + TypeSizes.sizeof(columnConstraint.columnName.toString());
         }
     }
 

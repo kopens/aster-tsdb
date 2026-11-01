@@ -201,9 +201,7 @@ public class AccordResult<V> extends AsyncFuture<V> implements BiConsumer<V, Thr
         }
         else
         {
-            AccordAgent.handleException(fail);
-            if (!AccordAgent.expectedException(fail))
-                logger.error("Unexpected exception", fail);
+            logger.error("Unexpected exception", fail);
             JVMStabilityInspector.inspectThrowable(fail);
             report = bookkeeping.newFailed(txnId, keysOrRanges);
         }

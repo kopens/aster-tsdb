@@ -115,7 +115,6 @@ public class AccordLoadTest extends AccordTestBase
                   .set("accord.shard_durability_target_splits", "8")
                   .set("accord.shard_durability_max_splits", "16")
                   .set("accord.shard_durability_cycle", "1m")
-                  .set("accord.durability_flush_interval", "10s")
                   .set("accord.queue_submission_model", "SIGNAL")
                   .set("accord.command_store_shard_count", "8")
                   .set("accord.queue_thread_count", "4")
@@ -840,7 +839,7 @@ public class AccordLoadTest extends AccordTestBase
                                 {
                                     CommandStore commandStore = service.node().commandStores().forId(storeId.get());
                                     List<List<String>> result = AccordService.getBlocking(commandStore.submit(ExecutionContext.unsequenced(candidate, "LoadTest"), safeStore -> {
-                                        SafeCommand safeCommand = safeStore.unsafeTryGet(candidate);
+                                        SafeCommand safeCommand = safeStore.unsafeGet(candidate);
                                         PartialDeps deps = safeCommand.current().partialDeps();
                                         if (deps == null)
                                             return null;
@@ -863,7 +862,7 @@ public class AccordLoadTest extends AccordTestBase
                                         {
                                             TxnId txnId = TxnId.parse(info.get(0));
                                             AccordService.getBlocking(commandStore.execute(ExecutionContext.unsequenced(txnId, "LoadTest"), safeStore -> {
-                                                SafeCommand safeCommand = safeStore.unsafeTryGet(txnId);
+                                                SafeCommand safeCommand = safeStore.unsafeGet(txnId);
                                                 if (safeCommand.current().executeAt != null)
                                                     info.add(safeCommand.current().executeAt.toString());
                                             }));

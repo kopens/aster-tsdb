@@ -38,6 +38,7 @@ import accord.impl.AbstractFetchCoordinator;
 import accord.local.CommandStore;
 import accord.local.Node;
 import accord.local.SafeCommandStore;
+import accord.primitives.PartialDeps;
 import accord.primitives.PartialTxn;
 import accord.primitives.Participants;
 import accord.primitives.Range;
@@ -45,12 +46,12 @@ import accord.primitives.Ranges;
 import accord.primitives.Routable;
 import accord.primitives.Seekable;
 import accord.primitives.Seekables;
+import accord.primitives.SyncPoint;
 import accord.primitives.Timestamp;
 import accord.primitives.Txn;
 import accord.primitives.TxnId;
 import accord.topology.TopologyException;
 import accord.utils.Invariants;
-import accord.utils.SortedArrays.SortedArrayList;
 import accord.utils.async.AsyncChain;
 import accord.utils.async.AsyncChains;
 
@@ -394,9 +395,9 @@ public class AccordFetchCoordinator extends AbstractFetchCoordinator implements 
 
     private final Map<TimeUUID, IncomingStream> streams = new HashMap<>();
 
-    public AccordFetchCoordinator(Node node, Ranges ranges, TxnId atLeast, SortedArrayList<Node.Id> readable, DataStore.FetchRanges fetchRanges, CommandStore commandStore) throws TopologyException
+    public AccordFetchCoordinator(Node node, Ranges ranges, SyncPoint syncPoint, DataStore.FetchRanges fetchRanges, CommandStore commandStore) throws TopologyException
     {
-        super(node, node.someExclusiveExecutor(), ranges, atLeast, readable, fetchRanges, commandStore);
+        super(node, node.someExclusiveExecutor(), ranges, syncPoint, fetchRanges, commandStore);
     }
 
     @Override
@@ -431,6 +432,13 @@ public class AccordFetchCoordinator extends AbstractFetchCoordinator implements 
     }
 
     @Override
+    protected PartialTxn rangeReadTxn(Ranges ranges)
+    {
+        StreamingRead read = new StreamingRead(FBUtilities.getBroadcastAddressAndPort(), ranges);
+        return new PartialTxn.InMemory(Txn.Kind.Read, ranges, read, noopQuery, null, TableMetadatasAndKeys.none(Routable.Domain.Range));
+    }
+
+    @Override
     protected synchronized void onReadOk(Node.Id from, CommandStore commandStore, Data data, Ranges received)
     {
         if (data == null)
@@ -455,22 +463,24 @@ public class AccordFetchCoordinator extends AbstractFetchCoordinator implements 
 
     public static class AccordFetchRequest extends FetchRequest
     {
-        public AccordFetchRequest(long sourceEpoch, TxnId syncId, Ranges ranges, PartialTxn partialTxn)
+        public AccordFetchRequest(long sourceEpoch, TxnId syncId, Ranges ranges, PartialDeps partialDeps, PartialTxn partialTxn)
         {
-            super(sourceEpoch, syncId, ranges, partialTxn);
+            super(sourceEpoch, syncId, ranges, partialDeps, partialTxn);
+        }
+
+        @Override
+        protected AsyncChain<Data> beginRead(SafeCommandStore safeStore, Timestamp executeAt, PartialTxn txn, Participants<?> execute)
+        {
+            AsyncChain<Data> result = super.beginRead(safeStore, executeAt, txn, execute);
+            // TODO (required): verify that streaming snapshots have all been created by now, so we won't stream any data that arrives after this
+            readStarted(safeStore);
+            return result;
         }
     }
 
     @Override
-    protected FetchRequest newFetchRequest(long sourceEpoch, TxnId syncId, Ranges ranges)
+    protected FetchRequest newFetchRequest(long sourceEpoch, TxnId syncId, Ranges ranges, PartialDeps partialDeps, PartialTxn partialTxn)
     {
-        return new AccordFetchRequest(sourceEpoch, syncId, ranges, rangeReadTxn(ranges));
+        return new AccordFetchRequest(sourceEpoch, syncId, ranges, partialDeps, partialTxn);
     }
-
-    private PartialTxn rangeReadTxn(Ranges ranges)
-    {
-        StreamingRead read = new StreamingRead(FBUtilities.getBroadcastAddressAndPort(), ranges);
-        return new PartialTxn.InMemory(Txn.Kind.Read, ranges, read, noopQuery, null, TableMetadatasAndKeys.none(Routable.Domain.Range));
-    }
-
 }

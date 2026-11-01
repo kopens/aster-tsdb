@@ -305,12 +305,6 @@ public class RowWithSource implements Row
     }
 
     @Override
-    public int liveDataSize(long nowInSec)
-    {
-        return row.liveDataSize(nowInSec);
-    }
-
-    @Override
     public long unsharedHeapSize()
     {
         return row.unsharedHeapSize() + EMPTY_SIZE;

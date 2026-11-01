@@ -35,7 +35,6 @@ import accord.api.ExclusiveAsyncExecutor;
 import accord.api.ProgressLog;
 import accord.api.Result;
 import accord.api.RoutingKey;
-import accord.api.Scheduler;
 import accord.coordinate.Coordinations;
 import accord.impl.DefaultLocalListeners;
 import accord.impl.DefaultLocalListeners.NotifySink;
@@ -77,7 +76,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 /**
- * This test has been authored entirely by LLM.
+ * This test has been authored entirely by Claude.
  *
  * A non-{@link SafeTask} consequence is ordinarily left alone when its submitter fails while running, because plain work
  * is not necessarily part of what the submitter was doing and may have nowhere to report a cancellation - see
@@ -330,7 +329,6 @@ public class AccordExecutorContinuationCancellationTest
             @Override public long elapsed(TimeUnit units) { return elapsed.applyAsLong(units); }
             @Override public TopologyManager topology() { throw new UnsupportedOperationException(); }
             @Override public Coordinations coordinations() { return new Coordinations(); }
-            @Override public Scheduler scheduler() { return null; }
             @Override public long currentStamp() { return stamp; }
             @Override public void updateStamp() { ++stamp; }
             @Override public boolean isReplaying() { return false; }

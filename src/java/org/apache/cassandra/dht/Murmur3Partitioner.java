@@ -278,12 +278,6 @@ public class Murmur3Partitioner implements IPartitioner
             return new LongToken(token + 1);
         }
 
-        @Override
-        public LongToken prevValidToken()
-        {
-            return new LongToken(token - 1);    // wraparound to MAXIMUM if token is MINIMUM
-        }
-
         public LongToken decreaseSlightly()
         {
             // CASSANDRA-17109 Added the below checks, but paxos tests were not updated, rather than fix

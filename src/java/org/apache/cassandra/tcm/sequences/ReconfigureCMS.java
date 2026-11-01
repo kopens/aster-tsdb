@@ -153,11 +153,7 @@ public class ReconfigureCMS extends MultiStepOperation<AdvanceCMSReconfiguration
     @Override
     public Set<NodeId> affectedPeers(Directory directory)
     {
-        Set<NodeId> affected = new HashSet<>(next.diff.additions);
-        affected.addAll(next.diff.removals);
-        if (next.activeTransition != null)
-            affected.add(next.activeTransition.nodeId);
-        return affected;
+        return Set.of();
     }
 
     @Override

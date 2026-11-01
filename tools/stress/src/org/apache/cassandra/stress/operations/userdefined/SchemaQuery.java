@@ -99,7 +99,7 @@ public class SchemaQuery extends SchemaStatement
                     int argIndex = argumentIndex[i];
                     bindBuffer[i] = randomBuffer[argIndex < 0 ? 0 : random.nextInt(c)][i];
                 }
-                return binder.bind(bindBuffer);
+                return statement.bind(bindBuffer);
             case SAMEROW:
                 return bindRow(partitions.get(0).next());
             default:

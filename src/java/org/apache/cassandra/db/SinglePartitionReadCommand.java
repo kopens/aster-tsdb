@@ -477,9 +477,6 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
     @Override
     public SinglePartitionReadCommand withUpdatedLimit(DataLimits newLimits)
     {
-        if (limits().equals(newLimits))
-            return this;
-
         return create(serializedAtEpoch(),
                       isDigestQuery(),
                       digestVersion(),

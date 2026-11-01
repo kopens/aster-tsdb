@@ -37,9 +37,9 @@ abstract class Plain extends Task implements Cancellable
         this.executor = executor;
     }
 
-    Plain(AccordExecutor executor, GlobalGroup global, ExclusiveGroup group)
+    Plain(AccordExecutor executor, ExclusiveGroup group)
     {
-        super(global, group);
+        super(group);
         this.executor = executor;
     }
 
@@ -48,14 +48,14 @@ abstract class Plain extends Task implements Cancellable
     @Override
     public final void cancel()
     {
-        executor.submit(self -> { self.tryCancelExclusive(new CancellationException()); }, CancelTask::new, this);
+        executor.submit(Task::tryCancelExclusive, CancelTask::new, this);
     }
 
     @Override
-    final void tryCancelExclusive(CancellationException cancelled)
+    final void tryCancelExclusive()
     {
         if (!isContinuation())
-            tryFailAndCompleteUnexecutedExclusive(cancelled, CANCELLED);
+            tryFailAndCompleteUnexecutedExclusive(new CancellationException(), CANCELLED);
     }
 
     @Override

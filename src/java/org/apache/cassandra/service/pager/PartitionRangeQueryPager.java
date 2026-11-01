@@ -17,9 +17,6 @@
  */
 package org.apache.cassandra.service.pager;
 
-import java.util.StringJoiner;
-
-import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.DecoratedKey;
@@ -67,7 +64,6 @@ public class PartitionRangeQueryPager extends AbstractQueryPager<PartitionRangeR
         restoreState(lastReturnedKey, remaining, remainingInPartition);
     }
 
-    @Override
     public PartitionRangeQueryPager withUpdatedLimit(DataLimits newLimits)
     {
         return new PartitionRangeQueryPager(query.withUpdatedLimit(newLimits),
@@ -86,15 +82,15 @@ public class PartitionRangeQueryPager extends AbstractQueryPager<PartitionRangeR
     }
 
     @Override
-    protected PartitionRangeReadQuery nextPageReadQuery(PageSize pageSize, DataLimits limits)
+    protected PartitionRangeReadQuery nextPageReadQuery(int pageSize)
     {
+        DataLimits limits;
         DataRange fullRange = query.dataRange();
         DataRange pageRange;
-        // if it is the first page
         if (lastReturnedKey == null)
         {
             pageRange = fullRange;
-            limits = limits.forPaging(pageSize);
+            limits = query.limits().forPaging(pageSize);
         }
         // if the last key was the one of the end of the range we know that we are done
         else if (lastReturnedKey.equals(fullRange.keyRange().right) && remainingInPartition() == 0 && lastReturnedRow == null)
@@ -109,12 +105,12 @@ public class PartitionRangeQueryPager extends AbstractQueryPager<PartitionRangeR
             if (includeLastKey)
             {
                 pageRange = fullRange.forPaging(bounds, query.metadata().comparator, lastReturnedRow.clustering(query.metadata()), false);
-                limits = limits.forPaging(pageSize, lastReturnedKey.getKey(), remainingInPartition());
+                limits = query.limits().forPaging(pageSize, lastReturnedKey.getKey(), remainingInPartition());
             }
             else
             {
                 pageRange = fullRange.forSubRange(bounds);
-                limits = limits.forPaging(pageSize);
+                limits = query.limits().forPaging(pageSize);
             }
         }
 
@@ -141,9 +137,11 @@ public class PartitionRangeQueryPager extends AbstractQueryPager<PartitionRangeR
     {
         AbstractBounds<PartitionPosition> bounds = query.dataRange().keyRange();
         if (bounds instanceof Range || bounds instanceof Bounds)
+        {
             return includeLastKey
                  ? new Bounds<>(lastReturnedKey, bounds.right)
                  : new Range<>(lastReturnedKey, bounds.right);
+        }
 
         return includeLastKey
              ? new IncludingExcludingBounds<>(lastReturnedKey, bounds.right)
@@ -154,15 +152,5 @@ public class PartitionRangeQueryPager extends AbstractQueryPager<PartitionRangeR
     public boolean isTopK()
     {
         return query.isTopK();
-    }
-
-    @Override
-    public String toString()
-    {
-        return new StringJoiner(", ", PartitionRangeQueryPager.class.getSimpleName() + "[", "]")
-               .add("super=" + super.toString())
-               .add("lastReturnedKey=" + lastReturnedKey)
-               .add("lastReturnedRow=" + (lastReturnedRow != null ? lastReturnedRow.clustering(query.metadata()).toString(query.metadata()) : null))
-               .toString();
     }
 }

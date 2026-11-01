@@ -580,14 +580,6 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         }
     }
 
-    /**
-     * @return the thread-safe, per-descriptor coordination status between SAI index rebuilds and entire-SSTable streaming
-     */
-    public SSTableStreamRebuildState streamRebuildState()
-    {
-        return tidy.global.streamRebuildState;
-    }
-
     public void setReplaced()
     {
         synchronized (tidy.global)
@@ -1453,25 +1445,19 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         return openDataReaderInternal(diskAccessMode, null, true);
     }
 
-    public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode, RateLimiter limiter)
-    {
-        assert limiter != null;
-        return openDataReaderInternal(diskAccessMode, limiter, true);
-    }
-
     private RandomAccessReader openDataReaderInternal(@Nullable DiskAccessMode diskAccessMode,
                                                       @Nullable RateLimiter limiter,
-                                                      boolean isScan)
+                                                      boolean forScan)
     {
         if (canReuseDfile(diskAccessMode))
-            return dfile.createReader(limiter, isScan, OnReaderClose.RETAIN_FILE_OPEN);
+            return dfile.createReader(limiter, forScan, OnReaderClose.RETAIN_FILE_OPEN);
 
         FileHandle handle = dfile.toBuilder()
                                  .withDiskAccessMode(diskAccessMode)
                                  .complete();
         try
         {
-            return handle.createReader(limiter, isScan, OnReaderClose.CLOSE_FILE);
+            return handle.createReader(limiter, forScan, OnReaderClose.CLOSE_FILE);
         }
         catch (Throwable t)
         {
@@ -1721,8 +1707,6 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         private WeakReference<ScheduledFuture<?>> readMeterSyncFuture = NULL;
         // shared state managing if the logical sstable has been compacted; this is used in cleanup
         private volatile Runnable obsoletion;
-        // Coordination state for SAI index rebuilds and ZCS for this SSTable.
-        final SSTableStreamRebuildState streamRebuildState = new SSTableStreamRebuildState();
 
         GlobalTidy(final SSTableReader reader)
         {

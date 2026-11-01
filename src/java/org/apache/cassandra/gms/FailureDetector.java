@@ -312,7 +312,7 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
         return DatabaseDescriptor.getPhiConvictThreshold();
     }
 
-    private boolean isAlive(InetAddressAndPort ep, boolean ifShutdownThenNotAlive)
+    public boolean isAlive(InetAddressAndPort ep)
     {
         if (ep.equals(FBUtilities.getBroadcastAddressAndPort()))
             return true;
@@ -336,17 +336,7 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
             if (!metadata.directory.allJoinedEndpoints().contains(ep) && !metadata.fullCMSMembers().contains(ep))
                 logger.error("Unknown endpoint: " + ep, new UnknownEndpointException(ep));
         }
-        return epState != null && epState.isAlive() && !(ifShutdownThenNotAlive && Gossiper.isShutdown(epState));
-    }
-
-    public boolean isAlive(InetAddressAndPort ep)
-    {
-        return isAlive(ep, false);
-    }
-
-    public boolean isAliveAndNotShutdown(InetAddressAndPort ep)
-    {
-        return isAlive(ep, true);
+        return epState != null && epState.isAlive();
     }
 
     public void report(InetAddressAndPort ep)
@@ -393,7 +383,7 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
             return;
         }
 
-        if (!isAliveAndNotShutdown(ep))
+        if (!isAlive(ep))
             return; // don't convict nodes that are already down - this helps Accord on startup which doesn't report itself alive in Gossip until ready to serve traffic
 
         double phi = hbWnd.phi(now);

@@ -962,16 +962,8 @@ public abstract class AbstractCluster<I extends IInstance> implements ICluster<I
                 if (reportFrom == reportTo || reportFrom.isShutdown())
                     continue;
 
-                try
-                {
-                    int minVersion = Math.min(reportFrom.getMessagingVersion(), reportTo.getMessagingVersion());
-                    reportTo.setMessagingVersion(reportFrom.broadcastAddress(), minVersion);
-                }
-                catch (IllegalStateException e)
-                {
-                    if (!!e.getMessage().contains("Can't use shutdown node") && !reportFrom.isShutdown() && !reportTo.isShutdown())
-                        throw e;
-                }
+                int minVersion = Math.min(reportFrom.getMessagingVersion(), reportTo.getMessagingVersion());
+                reportTo.setMessagingVersion(reportFrom.broadcastAddress(), minVersion);
             }
         }
     }

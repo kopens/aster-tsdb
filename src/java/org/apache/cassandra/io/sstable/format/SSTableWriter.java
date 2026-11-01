@@ -59,7 +59,6 @@ import org.apache.cassandra.io.sstable.metadata.MetadataComponent;
 import org.apache.cassandra.io.sstable.metadata.MetadataType;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.util.MmappedRegionsCache;
-import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.utils.Throwables;
 import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.concurrent.Transactional;
@@ -455,7 +454,6 @@ public abstract class SSTableWriter extends SSTable implements Transactional
         private List<Index.Group> indexGroups;
         @Nullable
         private CompressionDictionaryManager compressionDictionaryManager;
-        private CompressionParams compressionParams;
 
         public B setMetadataCollector(MetadataCollector metadataCollector)
         {
@@ -493,27 +491,13 @@ public abstract class SSTableWriter extends SSTable implements Transactional
             return (B) this;
         }
 
-        /**
-         * The components of the sstable, CompressionInfo or CRC, and the writer of its data, compressing or not, have
-         * to agree. An ALTER TABLE can change the compression of the table between the two, e.g. while a flush or a
-         * compaction builds a writer, so the compression is read from the table metadata only once.
-         *
-         * @return the compression of the sstable
-         */
-        public CompressionParams getCompressionParams()
-        {
-            if (compressionParams == null)
-                compressionParams = getTableMetadataRef().getLocal().params.compression;
-            return compressionParams;
-        }
-
         public B addDefaultComponents(Collection<Index.Group> indexGroups)
         {
             checkNotNull(getTableMetadataRef());
 
             addComponents(ImmutableSet.of(Components.DATA, Components.STATS, Components.DIGEST, Components.TOC));
 
-            if (getCompressionParams().isEnabled())
+            if (getTableMetadataRef().getLocal().params.compression.isEnabled())
             {
                 addComponents(ImmutableSet.of(Components.COMPRESSION_INFO));
             }

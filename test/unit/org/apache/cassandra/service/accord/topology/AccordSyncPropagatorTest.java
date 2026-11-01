@@ -230,7 +230,7 @@ public class AccordSyncPropagatorTest
         return cluster.instances.values().stream().anyMatch(i -> i.propagator.hasPending());
     }
 
-    private static class Cluster implements AccordEndpointMap
+    private static class Cluster implements AccordEndpointMapper
     {
         private final ImmutableBiMap<Node.Id, InetAddressAndPort> nodeToAddress;
         private final ImmutableMap<Node.Id, Instance> instances;
@@ -306,6 +306,11 @@ public class AccordSyncPropagatorTest
             return nodeToAddress.get(id);
         }
 
+        @Override
+        public Map<Node.Id, Long> removedNodes()
+        {
+            return Map.of();
+        }
 
         @Override
         public NodeStatus nodeStatus(Node.Id id)
@@ -399,13 +404,13 @@ public class AccordSyncPropagatorTest
             }
         }
 
-        private class FailureWrapper implements AccordEndpointMap
+        private class FailureWrapper implements AccordEndpointMapper
         {
-            private final AccordEndpointMap wrapped;
+            private final AccordEndpointMapper wrapped;
             private final Node.Id self;
             private final Map<Node.Id, Gen<Boolean>> nodeRuns = new HashMap<>();
 
-            private FailureWrapper(AccordEndpointMap wrapped, Node.Id self)
+            private FailureWrapper(AccordEndpointMapper wrapped, Node.Id self)
             {
                 this.wrapped = wrapped;
                 this.self = self;
@@ -430,9 +435,14 @@ public class AccordSyncPropagatorTest
             {
                 if (self.equals(id)) return NodeStatus.HEALTHY;
 
-                return !nodeRuns.computeIfAbsent(id, ignore -> Gens.bools().biasedRepeatingRuns(.01, rs.nextInt(3, 15))).next(rs) ? NodeStatus.HEALTHY : NodeStatus.UNAVAILABLE;
+                return !nodeRuns.computeIfAbsent(id, ignore -> Gens.bools().biasedRepeatingRuns(.01, rs.nextInt(3, 15))).next(rs) ? NodeStatus.HEALTHY : NodeStatus.UNHEALTHY;
             }
 
+            @Override
+            public Map<Node.Id, Long> removedNodes()
+            {
+                return Map.of();
+            }
         }
 
         private static class Listener implements AccordSyncPropagator.TestListener, TopologyListener

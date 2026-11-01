@@ -67,7 +67,7 @@ public class Directory implements MetadataValue<Directory>, EndpointLookup, Node
 
     public static Directory EMPTY = new Directory();
 
-    public final int nextId;
+    private final int nextId;
     private final Epoch lastModified;
     private final BTreeBiMap<NodeId, InetAddressAndPort> peers;
     private final BTreeSet<RemovedNode> removedNodes;

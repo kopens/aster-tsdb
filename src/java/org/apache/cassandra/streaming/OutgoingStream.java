@@ -45,13 +45,6 @@ public interface OutgoingStream
      */
     void finish();
 
-    /**
-     * Release any coordination status this stream reserved at construction.
-     */
-    default void releaseStreamRebuildStatus()
-    {
-    }
-
     long getRepairedAt();
     TimeUUID getPendingRepair();
 

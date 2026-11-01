@@ -34,13 +34,11 @@ import org.slf4j.Logger;
 import org.slf4j.helpers.SubstituteLogger;
 
 import org.apache.cassandra.distributed.shared.WithProperties;
-import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.utils.NoSpamLogger.Level;
 import org.apache.cassandra.utils.NoSpamLogger.NoDuplicateSpamLogStatement;
 import org.apache.cassandra.utils.NoSpamLogger.NoSpamLogStatement;
 
 import static org.apache.cassandra.config.CassandraRelevantProperties.NOSPAM_LOGGER_MAX_STATEMENTS_PER_LOGGER;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -89,11 +87,13 @@ public class NoSpamLoggerTest
     static final String statement = "swizzle{}";
     static final String param = "";
     static long now;
+   static long tickerTime;
 
     @BeforeClass
     public static void setUpClass() throws Exception
     {
         NoSpamLogger.unsafeSetClock(() -> now);
+        NoSpamLogger.TICKER = () -> tickerTime;
     }
 
     @Before
@@ -327,56 +327,35 @@ public class NoSpamLoggerTest
     @Test
     public void testNoSpamLogStatementCacheBounded()
     {
-        long maxStatementsPerLogger = NoSpamLogger.parseMaxStatementsPerLogger();
-        now = 5;
-        NoSpamLogger logger = NoSpamLogger.wrap(mock, 5, TimeUnit.NANOSECONDS);
-
-        // Create more unique log statements than the cache can hold
-        long numberOfLogStatements = (long) (maxStatementsPerLogger * 1.5);
-        for (long i = 0; i < numberOfLogStatements; i++)
+        int maxStatementsPerLogger = 10;
+        try (WithProperties properties = new WithProperties().set(NOSPAM_LOGGER_MAX_STATEMENTS_PER_LOGGER,
+                                                                  String.valueOf(maxStatementsPerLogger)))
         {
-            String uniqueStatement = "statement" + i + "{}";
-            assertTrue("First occurrence of statement " + i + " should succeed",
-                      logger.info(uniqueStatement, param));
-        }
+            now = 5;
+            NoSpamLogger logger = NoSpamLogger.getLogger(mock, 5, TimeUnit.NANOSECONDS);
 
-        assertEquals(numberOfLogStatements, logged.get(Level.INFO).size());
-
-        // Force cache cleanup to ensure eviction has completed
-        logger.cleanUpStatementsForTest();
-
-        // Verify the cache size is bounded to the configured maximum
-        assertTrue("Cache size should be at most " + maxStatementsPerLogger, logger.getStatementsCount() <= maxStatementsPerLogger);
-    }
-
-    @Test
-    public void testNonPositiveMaxStatementsPerLoggerIsRejected()
-    {
-        for (String invalid : new String[]{ "0", "-1" })
-        {
-            try (WithProperties ignored = new WithProperties().set(NOSPAM_LOGGER_MAX_STATEMENTS_PER_LOGGER, invalid))
+            // Create more unique log statements than the cache can hold
+            int numberOfLogStatements = (int) (maxStatementsPerLogger * 1.5);
+            for (int i = 0; i < numberOfLogStatements; i++)
             {
-                assertThatThrownBy(NoSpamLogger::parseMaxStatementsPerLogger)
-                .isInstanceOf(ConfigurationException.class)
-                .hasMessageContaining("Invalid value for system property cassandra.nospam_logger.max_statements_per_logger: expected a positive value but got " + invalid);
+                String uniqueStatement = "statement" + i + "{}";
+                assertTrue("First occurrence of statement " + i + " should succeed",
+                          logger.info(uniqueStatement, param));
+                now += 10; // Advance time so each statement can log
             }
-        }
-    }
 
-    @Test
-    public void testPositiveMaxStatementsPerLoggerIsAccepted()
-    {
-        try (WithProperties ignored = new WithProperties().set(NOSPAM_LOGGER_MAX_STATEMENTS_PER_LOGGER, "7"))
+            assertEquals(numberOfLogStatements, logged.get(Level.INFO).size());
+
+            // Force cache cleanup to ensure eviction has completed
+            logger.cleanUpStatementsForTest();
+
+            // Verify the cache size is bounded to the configured maximum
+            assertTrue("Cache size should be at most " + maxStatementsPerLogger, logger.getStatementsCount() <= maxStatementsPerLogger);
+        }
+        finally
         {
-            assertEquals(7, NoSpamLogger.parseMaxStatementsPerLogger());
+            NoSpamLogger.clearWrappedLoggersForTest();
         }
-    }
-
-    @Test
-    public void testConfiguredMaxStatementsPerLoggerBoundsTheCache()
-    {
-        NoSpamLogger logger = NoSpamLogger.wrap(mock, 5, TimeUnit.NANOSECONDS);
-        assertEquals(NoSpamLogger.parseMaxStatementsPerLogger(), logger.getMaxStatementsCount());
     }
 
     /**
@@ -390,6 +369,7 @@ public class NoSpamLoggerTest
             int minIntervalInseconds = 10;
             NoSpamLogger.clearWrappedLoggersForTest();
             now = 0;
+            tickerTime = 0;
             NoSpamLogger logger = NoSpamLogger.getLogger(mock, minIntervalInseconds, TimeUnit.SECONDS);
 
             assertTrue(logger.info("test{}", param));
@@ -401,9 +381,12 @@ public class NoSpamLoggerTest
             assertEquals(1, logged.get(Level.INFO).size());
             assertEquals("Cache should still contain 1 statement", 1, logger.getStatementsCount());
 
-            // Advance past `minIntervalInseconds`, which drives both rate limiting and cache expiration
+            // Advance BOTH clocks by more than `minIntervalInseconds` seconds
+            // `now` is used for rate limiting (NoSpamLogger.CLOCK)
+            // `tickerTime` is used for cache expiration (Caffeine's Ticker)
             long advanceTime = TimeUnit.SECONDS.toNanos(minIntervalInseconds + 1);
             now += advanceTime;
+            tickerTime += advanceTime;
 
             // Trigger cache cleanup to process expired entries
             logger.cleanUpStatementsForTest();
@@ -511,6 +494,7 @@ public class NoSpamLoggerTest
     {
         NoSpamLogger.clearWrappedLoggersForTest();
         now = 0;
+        tickerTime = 0;
 
         // Create three NoSpamLogger instances with different intervals
         int[] intervals = { 2, 5, 10 };
@@ -546,6 +530,7 @@ public class NoSpamLoggerTest
             for (int j = 1; j <= logMessagesPerLogger; j++)
             {
                 assertTrue(loggers[i].info("message" + j));
+                now += intervals[i] * 1_000_000_000L + 1; // Advance past the interval to allow next log
             }
             assertEquals(logMessagesPerLogger, loggers[i].getStatementsCount());
         }
@@ -553,7 +538,7 @@ public class NoSpamLoggerTest
         assertEquals(logMessagesPerLogger * intervals.length, logged.get(Level.INFO).size());
 
         // Test expiry at different time points
-        // Entries were created at now=0, so they expire at their interval time
+        // Entries were created at tickerTime=0, so they expire at their interval time
         int[] checkTimes = new int[intervals.length];
         for (int i = 0; i < intervals.length; i++)
         {
@@ -563,14 +548,14 @@ public class NoSpamLoggerTest
 
         for (int timeIdx = 0; timeIdx < checkTimes.length; timeIdx++)
         {
-            now = TimeUnit.SECONDS.toNanos(checkTimes[timeIdx]);
+            tickerTime = TimeUnit.SECONDS.toNanos(checkTimes[timeIdx]);
 
             for (int i = 0; i < loggers.length; i++)
             {
                 loggers[i].cleanUpStatementsForTest();
 
                 // Entries expire at (creation_time + interval), created at time 0
-                // So they expire when now > interval
+                // So they expire when tickerTime > interval
                 int expected = (intervals[i] < checkTimes[timeIdx]) ? 0 : logMessagesPerLogger;
                 assertEquals(String.format("After %ds, %d-second logger should have %d statements",
                                            checkTimes[timeIdx], intervals[i], expected),
@@ -579,7 +564,7 @@ public class NoSpamLoggerTest
         }
     }
 
-    // BELOW TESTS WERE AUTHORED BY LLM
+    // BELOW TESTS WERE AUTHORED BY CLAUDE
     // ---------------------------------------------------------------------------------------------------------------
     // NoDuplicateSpamLogStatement: per-identity rate limiting. The state it keeps to recognise a duplicate must be
     // bounded (it is fed by error storms), and recognising a duplicate must be cheap (it is on the storm path).

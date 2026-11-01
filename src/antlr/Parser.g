@@ -29,6 +29,8 @@ options {
 
     // enables parsing txn specific syntax when true
     protected boolean isParsingTxn = false;
+    // tracks whether a txn has conditional updates
+    protected boolean isTxnConditional = false;
 
     protected List<RowDataReference.Raw> references;
 
@@ -781,32 +783,19 @@ batchTxnStatement returns [TransactionStatement.Parsed expr]
         List<SelectStatement.RawStatement> assignments = new ArrayList<>();
         SelectStatement.RawStatement select = null;
         List<RowDataReference.Raw> returning = null;
-        List<List<ConditionStatement.Raw>> conditions = new ArrayList<>();
-        List<List<ModificationStatement.Parsed>> updates = new ArrayList<>();
+        List<ModificationStatement.Parsed> updates = new ArrayList<>();
     }
     : K_BEGIN K_TRANSACTION
       ( let=letStatement ';' { assignments.add(let); })*
       ( ( (selectStatement) => s=selectStatement ';' { select = s; }) | ( K_SELECT drs=rowDataReferences ';' { returning = drs; }) )?
-      (
-          K_IF c=txnConditions K_THEN u=updateStatements { conditions.add(c); if (!u.isEmpty()) updates.add(u); else throw new SyntaxException(TransactionStatement.MISSING_BODY_BLOCK_MESSAGE); }
-          ( K_ELSE K_IF c=txnConditions K_THEN u=updateStatements { conditions.add(c); if (!u.isEmpty()) updates.add(u); else throw new SyntaxException(TransactionStatement.MISSING_BODY_BLOCK_MESSAGE); } )*
-          ( K_ELSE u=updateStatements { conditions.add(Collections.singletonList(new ConditionStatement.Raw(null, ConditionStatement.Kind.ELSE, null))); if (!u.isEmpty()) updates.add(u); else throw new SyntaxException(TransactionStatement.MISSING_BODY_BLOCK_MESSAGE); } )?
-          K_END K_IF
-      )?
-      ( u=updateStatements { if (!u.isEmpty()) updates.add(u); } )
-      (K_COMMIT K_TRANSACTION)
+      ( K_IF conditions=txnConditions K_THEN { isTxnConditional = true; } )?
+      ( upd=batchStatementObjective ';' { updates.add(upd); } )*
+      ( {!isTxnConditional}? (K_COMMIT K_TRANSACTION) | {isTxnConditional}? (K_END K_IF K_COMMIT K_TRANSACTION))
     {
         $expr = new TransactionStatement.Parsed(assignments, select, returning, updates, conditions, references);
     }
     ;
     finally { isParsingTxn = false; }
-
-updateStatements returns [List<ModificationStatement.Parsed> updates]
-    @init {
-        updates = new ArrayList<ModificationStatement.Parsed>();
-    }
-    : (upd=batchStatementObjective ';' { updates.add(upd); })*
-    ;
 
 rowDataReferences returns [List<RowDataReference.Raw> refs]
     : r1=rowDataReference { refs = new ArrayList<RowDataReference.Raw>(); refs.add(r1); } (',' rN=rowDataReference { refs.add(rN); })*
@@ -1880,14 +1869,9 @@ indexName returns [QualifiedName name]
     : (ksName[name] '.')? idxName[name]
     ;
 
-indexNameOrWildcard returns [QualifiedName name]
-    : n=indexName { $name = n; }
-    | '\*'        { $name = QualifiedName.WILDCARD; }
-    ;
-
-indexNamesOrWildcards returns [Set<QualifiedName> names]
+indexNames returns [Set<QualifiedName> names]
     @init { $names = new HashSet<QualifiedName>(); }
-    : '{' ( t1=indexNameOrWildcard { names.add(t1); } ( ',' tn=indexNameOrWildcard { names.add(tn); } )* )? '}'
+    : '{' ( t1=indexName { names.add(t1); } ( ',' tn=indexName { names.add(tn); } )* )? '}'
     ;
 
 columnFamilyName returns [QualifiedName name]
@@ -2202,7 +2186,7 @@ indexProperty returns [String s]
 property[PropertyDefinitions props]
     : k=noncol_ident '=' simple=propertyValue { try { $props.addProperty(k.toString(), simple); } catch (SyntaxException e) { addRecognitionError(e.getMessage()); } }
     | k=noncol_ident '=' map=fullMapLiteral { try { $props.addProperty(k.toString(), convertPropertyMap(map)); } catch (SyntaxException e) { addRecognitionError(e.getMessage()); } }
-    | s=indexProperty '=' names=indexNamesOrWildcards { try { $props.addProperty(s, names); } catch (SyntaxException e) { addRecognitionError(e.getMessage()); } }
+    | s=indexProperty '=' names=indexNames { try { $props.addProperty(s, names); } catch (SyntaxException e) { addRecognitionError(e.getMessage()); } }
     ;
 
 propertyValue returns [String str]
@@ -2491,7 +2475,6 @@ basic_unreserved_keyword returns [String str]
         | K_END
         | K_LET
         | K_THEN
-        | K_ELSE
         | K_TRANSACTION
         | K_COMMENT
         | K_COMMENTS

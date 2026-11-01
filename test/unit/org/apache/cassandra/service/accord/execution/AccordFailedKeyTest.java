@@ -62,7 +62,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 /**
- * This test has been authored entirely by LLM.
+ * This test has been authored entirely by Claude.
  *
  * The failure semantics of an incremental ({@code INCR}) fan-out: a key whose load fails does not abandon the fan-out.
  * The task keeps going with its remaining batches, the failing key is marked FAILED so that no future operation uses
@@ -187,7 +187,7 @@ public class AccordFailedKeyTest
                             AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(key);
                             if (entry == null)
                                 continue;
-                            if (entry.isUnsafeToRead())
+                            if (entry.isInconsistent())
                                 poisonedKeys.add(key);
                             else if (!entry.hasNoTasks())
                                 claimed = entry.toString();
@@ -290,7 +290,7 @@ public class AccordFailedKeyTest
             await(() -> {
                 executor.executeDirectlyWithLock(() -> {
                     AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(failing);
-                    inconsistent.set(entry != null && entry.isUnsafeToRead());
+                    inconsistent.set(entry != null && entry.isInconsistent());
                     references.set(entry == null ? 0 : entry.references());
                 });
                 return inconsistent.get() && references.get() > 0;
@@ -412,7 +412,7 @@ public class AccordFailedKeyTest
             await(() -> {
                 executor.executeDirectlyWithLock(() -> {
                     AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(failing);
-                    poisoned.set(entry != null && entry.isUnsafeToRead());
+                    poisoned.set(entry != null && entry.isInconsistent());
                 });
                 return !poisoned.get();
             });
@@ -552,7 +552,7 @@ public class AccordFailedKeyTest
                         AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(k);
                         if (entry == null)
                             continue;
-                        if (entry.isUnsafeToRead())
+                        if (entry.isInconsistent())
                             inconsistent.add(k);
                         references.put(k, entry.references());
                     }
@@ -669,7 +669,7 @@ public class AccordFailedKeyTest
                         AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(k);
                         if (entry == null)
                             continue;
-                        if (entry.isUnsafeToRead())
+                        if (entry.isInconsistent())
                             inconsistent.add(k);
                         references.put(k, entry.references());
                     }
@@ -807,7 +807,7 @@ public class AccordFailedKeyTest
                        await(() -> {
                            executor.executeDirectlyWithLock(() -> {
                                AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(blocked);
-                               stillClaimed.set(entry != null && entry.isUnsafeToRead() && entry.references() > 0
+                               stillClaimed.set(entry != null && entry.isInconsistent() && entry.references() > 0
                                                 && !entry.hasNoTasks());
                            });
                            return Boolean.TRUE.equals(stillClaimed.get());
@@ -906,7 +906,7 @@ public class AccordFailedKeyTest
                         AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(k);
                         if (entry == null)
                             continue;
-                        if (entry.isUnsafeToRead())
+                        if (entry.isInconsistent())
                             inconsistent.add(k);
                         if (!entry.hasNoTasks())
                             claimed.add(k);
@@ -1004,7 +1004,7 @@ public class AccordFailedKeyTest
                                    AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(k);
                                    if (entry == null)
                                        continue;
-                                   if (entry.isUnsafeToRead())
+                                   if (entry.isInconsistent())
                                        inconsistent.add(k);
                                    if (!entry.hasNoTasks())
                                        claimed.add(k);
@@ -1107,7 +1107,7 @@ public class AccordFailedKeyTest
                     for (RoutingKey k : keys)
                     {
                         AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(k);
-                        if (entry != null && entry.isUnsafeToRead())
+                        if (entry != null && entry.isInconsistent())
                             poisoned.add(k);
                     }
                     stalledOn.set(anyInconsistentIntersecting(store, null));
@@ -1195,7 +1195,7 @@ public class AccordFailedKeyTest
                         AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(k);
                         if (entry == null)
                             continue;
-                        if (entry.isUnsafeToRead())
+                        if (entry.isInconsistent())
                             inconsistent.add(k);
                         references.put(k, entry.references());
                     }
@@ -1303,7 +1303,7 @@ public class AccordFailedKeyTest
                     AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(k);
                     if (entry == null)
                         continue;
-                    if (entry.isUnsafeToRead())
+                    if (entry.isInconsistent())
                         marked.add(k);
                     if (!entry.hasNoTasks())
                         claimed.add(k);
@@ -1394,7 +1394,7 @@ public class AccordFailedKeyTest
                 for (RoutingKey k : new RoutingKey[]{ ok, failing })
                 {
                     AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(k);
-                    if (entry != null && entry.isUnsafeToRead())
+                    if (entry != null && entry.isInconsistent())
                         marked.add(k);
                 }
                 stalledOn.set(anyInconsistentIntersecting(store, null));
@@ -1510,7 +1510,7 @@ public class AccordFailedKeyTest
 
             executor.executeDirectlyWithLock(() -> {
                 AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(blocked);
-                stillClaimed.set(entry != null && entry.isUnsafeToRead() && !entry.hasNoTasks() && entry.references() > 0);
+                stillClaimed.set(entry != null && entry.isInconsistent() && !entry.hasNoTasks() && entry.references() > 0);
             });
         }
         finally
@@ -1925,13 +1925,13 @@ public class AccordFailedKeyTest
                             AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(key);
                             if (entry == null)
                                 continue;
-                            if (entry.isUnsafeToRead())
+                            if (entry.isInconsistent())
                                 poisoned.add(key);
                             if (!entry.hasNoTasks() || entry.references() > 0)
                                 stillClaimed.add(key);
                         }
                         AccordCacheEntry<?, ?, ?> command = store.cachesUnsafe().commands().getUnsafe(txnId);
-                        commandMarked.set(command != null && command.isUnsafeToRead());
+                        commandMarked.set(command != null && command.isInconsistent());
                     });
                     return poisoned.equals(unreached) && stillClaimed.equals(unreached) && commandMarked.get();
                 });

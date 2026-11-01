@@ -54,7 +54,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 /**
- * This test has been authored entirely by LLM.
+ * This test has been authored entirely by Claude.
  *
  * Abandoning a fan-out that has already run a round, which is what {@code ExclusiveExecutorTask.prepareTask}'s catch does
  * when a started task's prepare throws - an unrecoverable program bug, but one whose damage {@code SafeTask
@@ -177,7 +177,7 @@ public class AccordFailedKeyAbandonTest
                             AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(key);
                             if (entry == null)
                                 continue;
-                            if (entry.isUnsafeToRead())
+                            if (entry.isInconsistent())
                                 marked.add(key);
                             if (!entry.hasNoTasks() || entry.references() > 0)
                                 claimed.add(key);
@@ -200,7 +200,7 @@ public class AccordFailedKeyAbandonTest
                 landed = await(() -> {
                     executor.executeDirectlyWithLock(() -> {
                         AccordCacheEntry<?, ?, ?> entry = store.cachesUnsafe().commandsForKeys().getUnsafe(slow);
-                        slowSettled.set(entry != null && !entry.isLoading() && entry.isUnsafeToRead() && entry.references() > 0);
+                        slowSettled.set(entry != null && !entry.isLoading() && entry.isInconsistent() && entry.references() > 0);
                     });
                     return slowSettled.get();
                 });

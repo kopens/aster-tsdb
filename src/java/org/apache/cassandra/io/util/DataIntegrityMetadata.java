@@ -107,15 +107,7 @@ public class DataIntegrityMetadata
                  RandomAccessReader dataReader = RandomAccessReader.open(dataFile);
                  CheckedInputStream checkedInputStream = new CheckedInputStream(dataReader, checksum);)
             {
-                long storedDigestValue;
-                try
-                {
-                    storedDigestValue = Long.parseLong(digestReader.readLine());
-                }
-                catch (NumberFormatException e)
-                {
-                    throw new IOException(String.format("Corrupted file: invalid digest value in %s", digestFile), e);
-                }
+                long storedDigestValue = Long.parseLong(digestReader.readLine());
                 byte[] chunk = new byte[64 * 1024];
                 while (checkedInputStream.read(chunk) > 0) ;
                 long calculatedDigestValue = checkedInputStream.getChecksum().getValue();

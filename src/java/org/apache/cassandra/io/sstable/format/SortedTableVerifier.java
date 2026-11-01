@@ -37,7 +37,6 @@ import com.google.common.collect.ImmutableSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.compaction.CompactionController;
@@ -98,8 +97,8 @@ public abstract class SortedTableVerifier<R extends SSTableReaderWithFilter> imp
 
         this.fileAccessLock = new ReentrantReadWriteLock();
         this.dataFile = isOffline
-                        ? sstable.openDataReaderForScan(DatabaseDescriptor.getCompactionReadDiskAccessMode())
-                        : sstable.openDataReaderForScan(DatabaseDescriptor.getCompactionReadDiskAccessMode(), CompactionManager.instance.getRateLimiter());
+                        ? sstable.openDataReader()
+                        : sstable.openDataReader(CompactionManager.instance.getRateLimiter());
         this.verifyInfo = new VerifyInfo(dataFile, sstable, fileAccessLock.readLock());
         this.options = options;
         this.isOffline = isOffline;

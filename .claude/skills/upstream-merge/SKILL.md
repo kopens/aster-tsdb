@@ -122,6 +122,21 @@ git rev-parse HEAD:modules/accord :modules/accord upstream/cassandra-6.0:modules
 The fork does not carry its own Accord changes, so take upstream's pointer when they differ, then
 `git submodule update --init --recursive`.
 
+**The 2026-11 merge was backed out of `main` — revert the revert first.** The merge of upstream up to
+`c37fca619a` (fork commit `4855fd41ba`, shipped only in `v6.0.0-r2`) cannot start on an existing
+cluster: upstream `4da20e07e8` (Accord rebootstrap) changed TCM `ClusterMetadata` serialization
+(AccordFastPath → AccordNodeInfos, AccordStaleReplicas dropped) without bumping the TCM serialization
+`Version`, so metadata written by earlier builds fails to deserialize
+(`IllegalArgumentException: No enum constant ...MultiStepOperation.Kind.`, exit 3). Node 41 failed exactly
+so on 2026-11-01. `main` was then reset to the content of `v6.0.0-r3` (the fork fixes without that merge)
+by the commit whose subject starts `[정리] main 에서 2026-11 업스트림 머지를 뺀다`. Git still records the
+upstream commits as merged, so a plain re-merge brings them back **without** those 58 commits. The next
+upstream merge (planned at Cassandra 6.0 GA) must first `git revert` that backing-out commit, then merge.
+Before it ships, boot the candidate against a copy of node 41's system metadata (system, system_schema,
+system_cluster_metadata, system_auth, system_distributed) on an isolated docker network with 41's IP and
+`cassandra.yaml`; a fresh-cluster gate does not catch this class of break. If upstream still changes the
+format without a `Version` bump, add a version-gated reader in the fork (or revert `4da20e07e8`).
+
 **Fork feature touchpoints** — `SelectStatement.java` (gap-fill wiring, and the
 `TransparentReads.guardRangeRead` call in `getRangeCommand` that refuses range scans reaching chunked
 data), `db/compaction/TimeSeries*.java`,

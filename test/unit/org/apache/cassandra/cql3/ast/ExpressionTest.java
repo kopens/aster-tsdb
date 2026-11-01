@@ -27,7 +27,6 @@ import org.junit.Test;
 
 import accord.utils.Gen;
 import accord.utils.Gens;
-import accord.utils.RandomSource;
 
 import org.apache.cassandra.cql3.ast.Conditional.And;
 import org.apache.cassandra.cql3.ast.Conditional.Where;
@@ -38,7 +37,6 @@ import static accord.utils.Property.qt;
 public class ExpressionTest
 {
     private static final Visitor.CompositeVisitor COMPOSITE_VISITOR = Visitor.CompositeVisitor.of(StandardVisitors.BIND_TO_LITERAL);
-    private static final int MAX_DEPTH = 200;
 
     @Test
     public void simple()
@@ -93,21 +91,19 @@ public class ExpressionTest
                               .count()).isEqualTo(0);
     }
 
-    private static Gen<Conditional> conditionals(int depth)
+    private static Gen<Conditional> conditionals()
     {
         return rs -> {
-            if (depth >= MAX_DEPTH)
-                return Where.create(Where.Inequality.EQUAL, new Symbol("col", Int32Type.instance), literalOrBind(rs));
             // in / where / and
             switch (rs.nextInt(0, 2))
             {
                 case 0:
-                    return new Conditional.In(new Symbol("col", Int32Type.instance), Gens.lists(expressions(depth + 1, true)).ofSizeBetween(1, 3).next(rs));
+                    return new Conditional.In(new Symbol("col", Int32Type.instance), Gens.lists(expressions()).ofSizeBetween(1, 3).next(rs));
                 case 1:
-                    return Where.create(Where.Inequality.EQUAL, new Symbol("col", Int32Type.instance), expressions(depth + 1, true).next(rs));
+                    return Where.create(Where.Inequality.EQUAL, new Symbol("col", Int32Type.instance), expressions().next(rs));
                 case 2:
                 {
-                    var gen = conditionals(depth + 1);
+                    var gen = conditionals();
                     return new And(gen.next(rs), gen.next(rs));
                 }
                 default:
@@ -118,17 +114,8 @@ public class ExpressionTest
 
     private static Gen<Expression> expressions()
     {
-        return expressions(0, true);
-    }
-
-    private static Gen<Expression> expressions(int depth, boolean includeConditionals)
-    {
         return rs -> {
-            // the generator recurses, so bound it to stay within the test JVM's stack (-Xss384k)
-            if (depth >= MAX_DEPTH)
-                return literalOrBind(rs);
-            // conditionals are BooleanType, so they can't be operands of these Int32Type expressions
-            var subExpression = expressions(depth + 1, false);
+            var subExpression = expressions().filter(e -> e.type() == Int32Type.instance);
             if (rs.decide(.1))
             {
                 // operator
@@ -144,15 +131,10 @@ public class ExpressionTest
                 return new FunctionCall("fn", Gens.lists(subExpression).ofSizeBetween(1, 10).next(rs), Int32Type.instance);
             if (rs.decide(.1))
                 return new TypeHint(subExpression.next(rs));
-            if (includeConditionals && rs.decide(.1))
-                return conditionals(depth).next(rs);
-            return literalOrBind(rs);
+            if (rs.decide(.1))
+                return conditionals().next(rs);
+            int value = rs.nextInt();
+            return rs.nextBoolean() ? Literal.of(value) : Bind.of(value);
         };
-    }
-
-    private static Expression literalOrBind(RandomSource rs)
-    {
-        int value = rs.nextInt();
-        return rs.nextBoolean() ? Literal.of(value) : Bind.of(value);
     }
 }

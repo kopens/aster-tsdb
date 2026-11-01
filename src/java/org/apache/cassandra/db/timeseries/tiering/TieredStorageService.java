@@ -42,7 +42,6 @@ import org.apache.cassandra.concurrent.ScheduledExecutorPlus;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.ColumnIdentifier;
-import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.ResultSet;
@@ -1748,7 +1747,7 @@ public class TieredStorageService implements TieredStorageServiceMBean
                     if (exhausted)
                         return endOfData();
 
-                    QueryOptions options = QueryOptions.create(cl, values, false, PageSize.inRows(PAGE_SIZE), pagingState, null,
+                    QueryOptions options = QueryOptions.create(cl, values, false, PAGE_SIZE, pagingState, null,
                                                                ProtocolVersion.CURRENT, null);
                     CQLStatement statement = QueryProcessor.instance.parse(query, queryState, options);
                     ResultMessage result = QueryProcessor.instance.process(statement, queryState, options,
@@ -1793,7 +1792,7 @@ public class TieredStorageService implements TieredStorageServiceMBean
         PagingState pagingState = null;
         while (true)
         {
-            QueryOptions options = QueryOptions.create(cl, values, false, PageSize.inRows(pageSize), pagingState, null,
+            QueryOptions options = QueryOptions.create(cl, values, false, pageSize, pagingState, null,
                                                         ProtocolVersion.CURRENT, null);
             CQLStatement statement = QueryProcessor.instance.parse(query, queryState, options);
             ResultMessage result = QueryProcessor.instance.process(statement, queryState, options,

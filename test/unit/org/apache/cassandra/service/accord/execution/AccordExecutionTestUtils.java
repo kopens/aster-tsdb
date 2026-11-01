@@ -42,7 +42,7 @@ import static org.apache.cassandra.service.accord.execution.AccordCacheEntry.Loc
 
 
 /**
- * This class was authored by LLM
+ * This class was authored by Claude
  */
 public class AccordExecutionTestUtils
 {
@@ -59,7 +59,7 @@ public class AccordExecutionTestUtils
     {
         for (AccordCacheEntry<RoutingKey, CommandsForKey, ?> e : ((AccordCommandStore)commandStore).cachesUnsafe().commandsForKeys())
         {
-            if (e.isUnsafeToRead() && (ranges == null || ranges.contains(e.key())))
+            if (e.isInconsistent() && (ranges == null || ranges.contains(e.key())))
                 return e.key();
         }
         return null;
@@ -95,15 +95,15 @@ public class AccordExecutionTestUtils
     }
 
     /** test-only: mark an entry as holding state an update failed to reach, as a failed task's key would be */
-    public static void setUnsafeToRead(AccordCacheEntry<?, ?, ?> entry)
+    public static void setInconsistent(AccordCacheEntry<?, ?, ?> entry)
     {
-        entry.setUnsafeToRead();
+        entry.setInconsistent();
     }
 
     /** test-only: the update has been applied, so the entry is usable again */
-    public static void unsetUnsafeToRead(AccordCacheEntry<?, ?, ?> entry)
+    public static void unsetInconsistent(AccordCacheEntry<?, ?, ?> entry)
     {
-        entry.setConsistentAndSafeToRead();
+        entry.unsetInconsistent();
     }
 
     /**

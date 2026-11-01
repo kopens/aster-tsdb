@@ -144,7 +144,7 @@ public class AccordCacheEntryTest
         assertIllegalState(state::getExclusive);
     }
 
-    // The test methods below have been authored entirely by LLM.
+    // The test methods below have been authored entirely by Claude.
 
     // ---------------------------------------------------------------------------------------------------------------
     // R8: the queue union - null | SafeTask | AccordCacheEntryMiniQueue | AccordCacheEntryQueue.
@@ -404,7 +404,7 @@ public class AccordCacheEntryTest
         bare.addFifo(b0);
         bare.lockExclusive(b0, LockMode.RELEASE_QUEUE);
         assertMembers(bare, Collections.emptyList());
-        bare.setUnsafeToRead();
+        bare.setInconsistent();
         bare.reclaimFifoHead(b0);
         assertTrue("the retained claim is a HOLD_QUEUE lock", bare.isLockedHoldingQueue());
         assertMembers(bare, Arrays.asList(b0));
@@ -418,7 +418,7 @@ public class AccordCacheEntryTest
         mini.lockExclusive(m0, LockMode.RELEASE_QUEUE);
         assertSame(RunnableStatus.NEWLY_RUNNABLE, mini.addFifo(m1));
         assertMembers(mini, Arrays.asList(m1));
-        mini.setUnsafeToRead();
+        mini.setInconsistent();
         mini.reclaimFifoHead(m0);
         verify(m1).onChangeRunnableStatus(mini, RunnableStatus.NOT_RUNNABLE);
         assertTrue(mini.isLockedHoldingQueue());
@@ -436,7 +436,7 @@ public class AccordCacheEntryTest
         assertSame(RunnableStatus.NEWLY_RUNNABLE, full.addFifo(f1));
         assertSame(RunnableStatus.NOT_RUNNABLE, full.addFifo(f2));
         assertMembers(full, Arrays.asList(f1, f2));
-        full.setUnsafeToRead();
+        full.setInconsistent();
         full.reclaimFifoHead(f0);
         verify(f1).onChangeRunnableStatus(full, RunnableStatus.NOT_RUNNABLE);
         assertTrue(full.isLockedHoldingQueue());
@@ -467,7 +467,7 @@ public class AccordCacheEntryTest
         entry.addPrioritised(t0);
         entry.lockExclusive(t0, LockMode.RELEASE_QUEUE);
         assertSame(RunnableStatus.NEWLY_RUNNABLE, entry.addPrioritised(t1));
-        entry.setUnsafeToRead();
+        entry.setInconsistent();
         try
         {
             entry.reclaimFifoHead(t0);

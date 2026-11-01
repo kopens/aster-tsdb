@@ -90,21 +90,17 @@ public abstract class NativeProtocolLimitsTestBase extends CQLTester
     {
         try
         {
-            return clientBuilder().largeMessageThreshold(largeMessageThreshold)
-                                  .build()
-                                  .connect(false, throwOnOverload);
+            return SimpleClient.builder(nativeAddr.getHostAddress(), nativePort)
+                               .protocolVersion(version)
+                               .useBeta()
+                               .largeMessageThreshold(largeMessageThreshold)
+                               .build()
+                               .connect(false, throwOnOverload);
         }
         catch (IOException e)
         {
             throw new RuntimeException("Error initializing client", e);
         }
-    }
-
-    protected SimpleClient.Builder clientBuilder()
-    {
-        return SimpleClient.builder(nativeAddr.getHostAddress(), nativePort)
-                           .protocolVersion(version)
-                           .useBeta();
     }
 
     public void runClientLogic(ClientLogic clientLogic)

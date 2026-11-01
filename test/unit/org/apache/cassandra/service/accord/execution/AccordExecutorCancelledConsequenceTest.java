@@ -33,7 +33,6 @@ import accord.api.ExclusiveAsyncExecutor;
 import accord.api.ProgressLog;
 import accord.api.Result;
 import accord.api.RoutingKey;
-import accord.api.Scheduler;
 import accord.coordinate.Coordinations;
 import accord.impl.DefaultLocalListeners;
 import accord.impl.DefaultLocalListeners.NotifySink;
@@ -75,7 +74,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 /**
- * This test has been authored entirely by LLM.
+ * This test has been authored entirely by Claude.
  *
  * A task that is submitted from within another task running on the same command store inherits that task's references
  * ({@link SafeTask#preSetup}) instead of acquiring its own. {@link SafeTask#completePresetupExclusive} handles an
@@ -223,7 +222,6 @@ public class AccordExecutorCancelledConsequenceTest
             @Override public long elapsed(TimeUnit units) { return elapsed.applyAsLong(units); }
             @Override public TopologyManager topology() { throw new UnsupportedOperationException(); }
             @Override public Coordinations coordinations() { return new Coordinations(); }
-            @Override public Scheduler scheduler() { return null; }
             @Override public long currentStamp() { return stamp; }
             @Override public void updateStamp() { ++stamp; }
             @Override public boolean isReplaying() { return false; }

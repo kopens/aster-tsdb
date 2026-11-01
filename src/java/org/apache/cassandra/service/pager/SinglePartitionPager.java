@@ -18,12 +18,7 @@
 package org.apache.cassandra.service.pager;
 
 import java.nio.ByteBuffer;
-import java.util.StringJoiner;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.SinglePartitionReadQuery;
@@ -33,16 +28,11 @@ import org.apache.cassandra.transport.ProtocolVersion;
 
 /**
  * Common interface to single partition queries (by slice and by name).
- * <p>
+ *
  * For use by MultiPartitionPager.
  */
 public class SinglePartitionPager extends AbstractQueryPager<SinglePartitionReadQuery>
 {
-    private static final Logger logger = LoggerFactory.getLogger(SinglePartitionPager.class);
-
-    /**
-     * The last row returned on the last completed page
-     */
     private volatile PagingState.RowMark lastReturned;
 
     public SinglePartitionPager(SinglePartitionReadQuery query, PagingState state, ProtocolVersion protocolVersion)
@@ -82,50 +72,37 @@ public class SinglePartitionPager extends AbstractQueryPager<SinglePartitionRead
         return query.partitionKey().getKey();
     }
 
-    @Override
+    public DataLimits limits()
+    {
+        return query.limits();
+    }
+
     public PagingState state()
     {
         return lastReturned == null
-               ? null
-               : new PagingState(null, lastReturned, maxRemaining(), remainingInPartition());
+             ? null
+             : new PagingState(null, lastReturned, maxRemaining(), remainingInPartition());
     }
 
     @Override
-    protected SinglePartitionReadQuery nextPageReadQuery(PageSize pageSize, DataLimits limits)
+    protected SinglePartitionReadQuery nextPageReadQuery(int pageSize)
     {
         Clustering<?> clustering = lastReturned == null ? null : lastReturned.clustering(query.metadata());
-        limits = lastReturned == null
-                 ? limits.forPaging(pageSize)
-                 : limits.forPaging(pageSize, key(), remainingInPartition());
+        DataLimits limits = lastReturned == null
+                          ? limits().forPaging(pageSize)
+                          : limits().forPaging(pageSize, key(), remainingInPartition());
 
         return query.forPaging(clustering, limits);
     }
 
-    @Override
-    public boolean isExhausted()
-    {
-        return super.isExhausted() || remainingInPartition() == 0;
-    }
-
-    @Override
     protected void recordLast(DecoratedKey key, Row last)
     {
         if (last != null && last.clustering() != Clustering.STATIC_CLUSTERING)
             lastReturned = PagingState.RowMark.create(query.metadata(), last, protocolVersion);
     }
 
-    @Override
     protected boolean isPreviouslyReturnedPartition(DecoratedKey key)
     {
         return lastReturned != null;
-    }
-
-    @Override
-    public String toString()
-    {
-        return new StringJoiner(", ", SinglePartitionPager.class.getSimpleName() + "[", "]")
-               .add("super=" + super.toString())
-               .add("lastReturned=" + (lastReturned != null ? lastReturned.clustering(query.metadata()).toString(query.metadata()) : null))
-               .toString();
     }
 }

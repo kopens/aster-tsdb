@@ -29,7 +29,7 @@ import accord.utils.Invariants;
 import static org.apache.cassandra.service.accord.execution.Task.MAX_TRANCHE;
 
 /**
- * Tasks are separated into tranches based on when their originating task was submitted.
+ * Tasks are separated into tranches based on their position.
  * <p>
  * When we want to wait for all submitted tasks and their consequences to complete, we create a new tranche
  * and track the number of tasks still extant for all prior tranches - once these reach zero we can signal
@@ -83,11 +83,13 @@ final class Tranches
 
     int firstTranche;
     int firstIndex;
+    long[] mins = new long[8];
     int[] counts = new int[8];
     Runnable[] runs = new Runnable[8];
 
     // the next tranche, that all new work is being collected against
     // (and will move to the array accounting once a new wait is registered)
+    long nextMin;
     int nextTranche;
     int nextCount;
 
@@ -121,22 +123,25 @@ final class Tranches
         return counts.length;
     }
 
-    int addNew()
+    int addNew(long position)
     {
+        Invariants.require(position >= nextMin);
         ++nextCount;
         return nextTranche;
     }
 
-    void addInherited(int tranche)
+    void addInherited(int tranche, long position)
     {
         if (tranche == nextTranche)
         {
+            Invariants.require(position >= nextMin);
             ++nextCount;
         }
         else
         {
             int index = trancheToIndex(tranche);
             Invariants.require(counts[index] > 0);
+            Invariants.require(mins[index] <= position);
             ++counts[index];
         }
     }
@@ -170,12 +175,12 @@ final class Tranches
         }
     }
 
-    public void finishAll()
+    public void finishAll(long nextPosition)
     {
         while (firstTranche != nextTranche)
         {
-            logger.warn("{} processed all pending tasks but found {} waiting for tranche {}", this,
-                                       counts[firstIndex], firstTranche);
+            logger.warn("{} processed all pending tasks (<{}) but found {} waiting for {}", this,
+                                       nextPosition, counts[firstIndex], size() == 1 ? nextMin : mins[firstIndex + 1]);
             advance();
         }
     }
@@ -213,8 +218,10 @@ final class Tranches
             growOrCompact();
 
         int index = firstIndex + size();
+        mins[index] = nextMin;
         counts[index] = nextCount;
         runs[index] = run;
+        nextMin = owner.minPosition = owner.nextPosition;
         nextCount = 0;
         nextTranche = newNextTranche;
     }
@@ -225,8 +232,9 @@ final class Tranches
         if (size <= capacity() / 4 && capacity() > 8) resize(capacity() / 2);
         else
         {
-            compact(counts, runs);
+            compact(mins, counts, runs);
             Arrays.fill(runs, size, runs.length, null);
+            Arrays.fill(mins, size, mins.length, 0);
             Arrays.fill(counts, size, counts.length, 0);
         }
     }
@@ -240,16 +248,19 @@ final class Tranches
     private void resize(int newSize)
     {
         Invariants.require(newSize > 0);
+        long[] newMins = new long[newSize];
         int[] newCounts = new int[newSize];
         Runnable[] newRuns = new Runnable[newSize];
-        compact(newCounts, newRuns);
+        compact(newMins, newCounts, newRuns);
+        mins = newMins;
         counts = newCounts;
         runs = newRuns;
     }
 
-    private void compact(int[] newCounts, Runnable[] newRuns)
+    private void compact(long[] newMins, int[] newCounts, Runnable[] newRuns)
     {
         int size = size();
+        System.arraycopy(mins, firstIndex, newMins, 0, size);
         System.arraycopy(counts, firstIndex, newCounts, 0, size);
         System.arraycopy(runs, firstIndex, newRuns, 0, size);
         firstIndex = 0;

@@ -52,7 +52,7 @@ public class RowMapping
     public static final RowMapping DUMMY = new RowMapping()
     {
         @Override
-        public Iterator<Pair<ByteComparable, LongArrayList>> merge(MemtableIndex index, PrimaryKey minKey, PrimaryKey maxKey) { return Collections.emptyIterator(); }
+        public Iterator<Pair<ByteComparable, LongArrayList>> merge(MemtableIndex index) { return Collections.emptyIterator(); }
 
         @Override
         public void complete() {}
@@ -99,13 +99,11 @@ public class RowMapping
      *
      * @return an iterator of term -> postings list {@link Pair}s
      */
-    public Iterator<Pair<ByteComparable, LongArrayList>> merge(MemtableIndex index,
-                                                               PrimaryKey minKey,
-                                                               PrimaryKey maxKey)
+    public Iterator<Pair<ByteComparable, LongArrayList>> merge(MemtableIndex index)
     {
         assert complete : "RowMapping is not built.";
 
-        Iterator<Pair<ByteComparable, Iterator<PrimaryKey>>> iterator = index.iterator(minKey.partitionKey(), maxKey.partitionKey());
+        Iterator<Pair<ByteComparable, PrimaryKeys>> iterator = index.iterator();
         return new AbstractGuavaIterator<>()
         {
             @Override
@@ -113,10 +111,10 @@ public class RowMapping
             {
                 while (iterator.hasNext())
                 {
-                    Pair<ByteComparable, Iterator<PrimaryKey>> pair = iterator.next();
+                    Pair<ByteComparable, PrimaryKeys> pair = iterator.next();
 
                     LongArrayList postings = null;
-                    Iterator<PrimaryKey> primaryKeys = pair.right;
+                    Iterator<PrimaryKey> primaryKeys = pair.right.iterator();
 
                     while (primaryKeys.hasNext())
                     {

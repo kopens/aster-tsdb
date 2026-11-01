@@ -105,8 +105,6 @@ public abstract class LocalLog implements Closeable
 
     private final AtomicBoolean paused = new AtomicBoolean();
 
-    private volatile boolean closed = false;
-
     public static LogSpec logSpec()
     {
         return new LogSpec();
@@ -345,20 +343,6 @@ public abstract class LocalLog implements Closeable
         }
         return false;
     }
-
-    public boolean isClosed()
-    {
-        return closed;
-    }
-
-    @Override
-    public final void close()
-    {
-        closed = true;
-        closeInternal();
-    }
-
-    protected abstract void closeInternal();
 
     public Optional<Epoch> highestPending()
     {
@@ -809,7 +793,7 @@ public abstract class LocalLog implements Closeable
         }
 
         @Override
-        protected void closeInternal()
+        public void close()
         {
             executor.shutdownNow();
 
@@ -947,7 +931,7 @@ public abstract class LocalLog implements Closeable
             return metadata();
         }
 
-        protected void closeInternal()
+        public void close()
         {
         }
     }

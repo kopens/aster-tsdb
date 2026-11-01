@@ -53,7 +53,7 @@ class IOTaskSave extends IOTask
     }
 
     @Override
-    void reportFailureMayThrow(Throwable t, boolean isExclusive)
+    void reportFailureMayThrow(Throwable t)
     {
         failure = t;
     }

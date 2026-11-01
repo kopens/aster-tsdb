@@ -65,7 +65,7 @@ import static org.apache.cassandra.service.accord.execution.AccordExecutor.Mode.
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * This test has been authored entirely by LLM.
+ * This test has been authored entirely by Claude.
  *
  * Lifecycle tests for {@link Task} and its interaction with {@link AccordExecutor}, covering the invariants the
  * executor's callers rely on:
@@ -491,7 +491,7 @@ public class TaskLifecycleTest
 
         TestTask(AccordExecutor executor, ExclusiveExecutor exclusiveExecutor, RuntimeException failPrepareWith, CountDownLatch notified)
         {
-            super(executor, GlobalGroup.OTHER, ExclusiveGroup.OTHER);
+            super(executor, ExclusiveGroup.OTHER);
             this.exclusiveExecutor = exclusiveExecutor;
             this.failPrepareWith = failPrepareWith;
             this.notified = notified;
@@ -521,7 +521,7 @@ public class TaskLifecycleTest
         }
 
         @Override
-        void reportFailureMayThrow(Throwable fail, boolean isExclusive)
+        void reportFailureMayThrow(Throwable fail)
         {
             failure = fail;
             notified.decrement();
