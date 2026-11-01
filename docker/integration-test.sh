@@ -17,7 +17,10 @@ set -uo pipefail
 
 IMAGE="${1:-aster-tsdb:6.0.0}"
 RUNTIME="${CONTAINER_RUNTIME:-}"
-CONTAINER="cassandra-ts-it-$$"
+# CI_JOB_ID, not just $$: in a CI job container the shell PID is small and the same from job to job,
+# and concurrent jobs share the host docker daemon -- two pipelines collided on "cassandra-ts-it-43"
+# (2026-11-01) and the second never started its node.
+CONTAINER="cassandra-ts-it-${CI_JOB_ID:-$$}"
 READY_TIMEOUT="${READY_TIMEOUT:-300}"
 
 if [ -z "$RUNTIME" ]; then
@@ -89,7 +92,7 @@ check() {
     t0=$(date +%s%3N)
     out=$(cql "$query")
     t1=$(date +%s%3N); ms=$((t1 - t0))
-    if printf '%s' "$out" | grep -qE -- "$expect"; then
+    if grep -qE -- "$expect" <<< "$out"; then
         PASS=$((PASS + 1)); status="ok  "
     else
         FAIL=$((FAIL + 1)); status="FAIL"
@@ -128,7 +131,7 @@ check_nodetool() {
     t0=$(date +%s%3N)
     out=$(ntool "$@"); rc=$?
     t1=$(date +%s%3N); ms=$((t1 - t0))
-    if [ "$rc" -eq 0 ] && { [ -z "$expect" ] || printf '%s' "$out" | grep -qE -- "$expect"; }; then
+    if [ "$rc" -eq 0 ] && { [ -z "$expect" ] || grep -qE -- "$expect" <<< "$out"; }; then
         PASS=$((PASS + 1)); status="ok  "
     else
         FAIL=$((FAIL + 1)); status="FAIL"
