@@ -53,6 +53,8 @@ public final class TieringMetrics
     public enum Event
     {
         RANGE_SCAN_REFUSED("RangeScansRefused"),
+        /** Counted per coordinator sub-range resolve that merged chunk keys into a range scan. */
+        RANGE_SCAN_MERGED("RangeScansMerged"),
         CORRUPT_CHUNK_READ("CorruptChunkReads"),
         COVERAGE_READ_FAILURE("CoverageReadFailures"),
         COLD_WRITE_REFUSED("ColdWritesRefused"),

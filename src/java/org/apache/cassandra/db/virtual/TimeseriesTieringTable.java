@@ -55,6 +55,7 @@ final class TimeseriesTieringTable extends AbstractVirtualTable
     // Counted since this node started (TieringMetrics), unlike the per-cycle columns above.
     private static final String TAGS_SKIPPED_TOTAL = "tags_skipped_total";
     private static final String RANGE_SCANS_REFUSED = "range_scans_refused";
+    private static final String RANGE_SCANS_MERGED = "range_scans_merged";
     private static final String CORRUPT_CHUNK_READS = "corrupt_chunk_reads";
     private static final String COVERAGE_READ_FAILURES = "coverage_read_failures";
     private static final String COLD_WRITES_REFUSED = "cold_writes_refused";
@@ -82,6 +83,7 @@ final class TimeseriesTieringTable extends AbstractVirtualTable
                            .addRegularColumn(LAST_ERROR, UTF8Type.instance)
                            .addRegularColumn(TAGS_SKIPPED_TOTAL, LongType.instance)
                            .addRegularColumn(RANGE_SCANS_REFUSED, LongType.instance)
+                           .addRegularColumn(RANGE_SCANS_MERGED, LongType.instance)
                            .addRegularColumn(CORRUPT_CHUNK_READS, LongType.instance)
                            .addRegularColumn(COVERAGE_READ_FAILURES, LongType.instance)
                            .addRegularColumn(COLD_WRITES_REFUSED, LongType.instance)
@@ -141,6 +143,7 @@ final class TimeseriesTieringTable extends AbstractVirtualTable
                       // A client hit a limit of tiered storage: a full scan, aggregate, DISTINCT or
                       // Spark read without the partition key. Find which application.
                       .column(RANGE_SCANS_REFUSED, count(keyspace.name, table.name, Event.RANGE_SCAN_REFUSED))
+                      .column(RANGE_SCANS_MERGED, count(keyspace.name, table.name, Event.RANGE_SCAN_MERGED))
                       // Non-zero is an incident: a window's only copy does not decode.
                       .column(CORRUPT_CHUNK_READS, count(keyspace.name, table.name, Event.CORRUPT_CHUNK_READ))
                       .column(COVERAGE_READ_FAILURES, count(keyspace.name, table.name, Event.COVERAGE_READ_FAILURE))

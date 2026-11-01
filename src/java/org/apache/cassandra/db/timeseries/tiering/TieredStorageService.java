@@ -609,6 +609,19 @@ public class TieredStorageService implements TieredStorageServiceMBean
     }
 
     @Override
+    public boolean isRangeScanMergeEnabled()
+    {
+        return TransparentReads.isRangeScanMergeEnabled();
+    }
+
+    @Override
+    public void setRangeScanMergeEnabled(boolean enabled)
+    {
+        logger.warn("Range-scan chunk merge {} on this node by JMX", enabled ? "enabled" : "disabled");
+        TransparentReads.setRangeScanMergeEnabled(enabled);
+    }
+
+    @Override
     public List<String> statusRows()
     {
         List<String> rows = new ArrayList<>();

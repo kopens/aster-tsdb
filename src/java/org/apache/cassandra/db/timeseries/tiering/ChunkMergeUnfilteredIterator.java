@@ -165,25 +165,8 @@ public final class ChunkMergeUnfilteredIterator implements UnfilteredPartitionIt
                 if (peekedHot != null && !pendingKeys.contains(peekedHot.partitionKey()))
                     throw outOfOrder(peekedHot.partitionKey());
 
-                CloseableIterator<Row> synthetic = chunkRows.apply(expected);
-                boolean handedOn = false;
-                try
-                {
-                    // hasNext() is what fetches and decodes the first window, so it is also where a
-                    // chunk read fails. Either way the iterator is this method's to release until it
-                    // is handed to a partition iterator that will close it.
-                    if (synthetic.hasNext())
-                    {
-                        next = synthetic(metadata, expected, reversed, synthetic);
-                        handedOn = true;
-                    }
-                    // else: no hot rows and no chunks for this key - nothing to emit, try the next key
-                }
-                finally
-                {
-                    if (!handedOn)
-                        synthetic.close();
-                }
+                next = syntheticOrNull(metadata, expected, reversed, chunkRows.apply(expected));
+                // null: no hot rows and no chunks for this key - nothing to emit, try the next key
             }
         }
         return true;
@@ -249,7 +232,17 @@ public final class ChunkMergeUnfilteredIterator implements UnfilteredPartitionIt
 
     private UnfilteredRowIterator merge(UnfilteredRowIterator hotPartition, DecoratedKey key)
     {
-        CloseableIterator<Row> synthetic = chunkRows.apply(key);
+        return mergeWith(hotPartition, chunkRows.apply(key), metadata);
+    }
+
+    /**
+     * {@code hotPartition} with {@code synthetic}'s chunk rows merged in, or {@code hotPartition} itself
+     * when there are none. Takes ownership of {@code synthetic} on every path, the throwing ones
+     * included. Shared with {@link ChunkRangeMergeIterator}.
+     */
+    static UnfilteredRowIterator mergeWith(UnfilteredRowIterator hotPartition, CloseableIterator<Row> synthetic,
+                                           TableMetadata metadata)
+    {
         boolean handedOn = false;
         try
         {
@@ -269,6 +262,31 @@ public final class ChunkMergeUnfilteredIterator implements UnfilteredPartitionIt
         {
             if (!handedOn)
                 synthetic.close();
+        }
+    }
+
+    /**
+     * A chunk-only partition for {@code key}, or {@code null} when {@code rows} turns out to be empty.
+     * Takes ownership of {@code rows} on every path. Shared with {@link ChunkRangeMergeIterator}.
+     */
+    static UnfilteredRowIterator syntheticOrNull(TableMetadata metadata, DecoratedKey key, boolean reversed,
+                                                 CloseableIterator<Row> rows)
+    {
+        boolean handedOn = false;
+        try
+        {
+            // hasNext() is what fetches and decodes the first window, so it is also where a chunk read
+            // fails. Either way the iterator is this method's to release until it is handed on.
+            if (!rows.hasNext())
+                return null;
+            UnfilteredRowIterator partition = synthetic(metadata, key, reversed, rows);
+            handedOn = true;
+            return partition;
+        }
+        finally
+        {
+            if (!handedOn)
+                rows.close();
         }
     }
 

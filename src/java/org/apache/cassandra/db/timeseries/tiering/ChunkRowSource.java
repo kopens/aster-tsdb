@@ -44,12 +44,16 @@ import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.Slices;
+import org.apache.cassandra.db.marshal.ByteBufferAccessor;
 import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.db.marshal.TimestampType;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.timeseries.CorruptChunkException;
 import org.apache.cassandra.db.timeseries.UnsupportedChunkFormatException;
+import org.apache.cassandra.dht.AbstractBounds;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.QueryState;
@@ -167,6 +171,13 @@ final class ChunkRowSource
      * i.e. {@code O(windows)} per query, and it must stay {@code O(statements)}. Invisible in a
      * query's results, so only a counter can hold it. See {@code TransparentReadTest}.
      */
+    /**
+     * Partition keys pulled from the chunk table's key enumeration by a range scan's merge
+     * ({@link #keysIn}): one per chunked partition in the scanned sub-range, never one per hot key.
+     */
+    @VisibleForTesting
+    static final AtomicLong chunkKeysListed = new AtomicLong();
+
     @VisibleForTesting
     static final AtomicLong statementPreparations = new AtomicLong();
 
@@ -375,6 +386,115 @@ final class ChunkRowSource
     }
 
     /**
+     * The partition keys within {@code range} that hold at least one chunk window able to reach this
+     * query's time range, in token order, enumerated lazily a page at a time -- the chunk side of
+     * {@link ChunkRangeMergeIterator}'s join.
+     * <p>
+     * The token restriction is inclusive at both ends and the exact bound semantics of {@code range}
+     * (a {@code Range}, {@code Bounds}, a paging range starting AT a key...) are applied per key with
+     * {@link AbstractBounds#contains}, so over-fetching a boundary token never lets a key in that the
+     * range excludes. A minimum-token bound is left off: it is "unbounded" on that side.
+     * <p>
+     * Only on the coordinated path ({@code cl != null}): the range merge is wired into the
+     * coordinator's resolve and nowhere else.
+     */
+    Iterator<DecoratedKey> keysIn(AbstractBounds<PartitionPosition> range)
+    {
+        // The coordinator unwraps every range before resolving it (RangeCommandIterator), and a
+        // wrapping one would read as "left <= token <= right" = nothing: fail rather than miss keys.
+        if (AbstractBounds.strictlyWrapsAround(range.left, range.right))
+            throw new IllegalStateException("Tiered range scan of " + metadata.keyspace + '.' + metadata.name +
+                                            ": cannot enumerate chunk keys of a wrapping range " + range);
+        List<ByteBuffer> values = new ArrayList<>(4);
+        StringBuilder where = new StringBuilder();
+        String token = tokenOf(metadata);
+        Token left = range.left.getToken();
+        Token right = range.right.getToken();
+        Token.TokenFactory tokens = metadata.partitioner.getTokenFactory();
+        if (!left.isMinimum())
+        {
+            where.append(token).append(" >= ? AND ");
+            values.add(tokens.toByteArray(left));
+        }
+        if (!right.isMinimum())
+        {
+            where.append(token).append(" <= ? AND ");
+            values.add(tokens.toByteArray(right));
+        }
+        values.add(TimestampType.instance.decompose(new Date(windowLow())));
+        values.add(TimestampType.instance.decompose(new Date(windowHigh())));
+        String cql = format("SELECT %s FROM %s WHERE %swindow_start >= ? AND window_start < ? " +
+                            "PER PARTITION LIMIT 1 ALLOW FILTERING",
+                            partitionKeyList(metadata), chunkRef(metadata), where);
+
+        Iterator<UntypedResultSet.Row> rows;
+        try
+        {
+            rows = pagedRows(prepare(cql), values);
+        }
+        catch (RuntimeException e)
+        {
+            throw chunkReadFailed(e);
+        }
+
+        List<ColumnMetadata> keyColumns = metadata.partitionKeyColumns();
+        return new AbstractIterator<DecoratedKey>()
+        {
+            @Override
+            protected DecoratedKey computeNext()
+            {
+                try
+                {
+                    while (rows.hasNext())
+                    {
+                        UntypedResultSet.Row row = rows.next();
+                        ByteBuffer key;
+                        if (keyColumns.size() == 1)
+                        {
+                            key = row.getBytes(keyColumns.get(0).name.toString());
+                        }
+                        else
+                        {
+                            ByteBuffer[] components = new ByteBuffer[keyColumns.size()];
+                            for (int i = 0; i < components.length; i++)
+                                components[i] = row.getBytes(keyColumns.get(i).name.toString());
+                            key = CompositeType.build(ByteBufferAccessor.instance, components);
+                        }
+                        DecoratedKey decorated = metadata.partitioner.decorateKey(key);
+                        if (range.contains(decorated))
+                        {
+                            chunkKeysListed.incrementAndGet();
+                            return decorated;
+                        }
+                    }
+                    return endOfData();
+                }
+                catch (RuntimeException e)
+                {
+                    throw chunkReadFailed(e);
+                }
+            }
+        };
+    }
+
+    private static String tokenOf(TableMetadata base)
+    {
+        return "token(" + partitionKeyList(base) + ')';
+    }
+
+    private static String partitionKeyList(TableMetadata base)
+    {
+        StringBuilder names = new StringBuilder();
+        for (ColumnMetadata column : base.partitionKeyColumns())
+        {
+            if (names.length() > 0)
+                names.append(", ");
+            names.append(column.name.toCQLString());
+        }
+        return names.toString();
+    }
+
+    /**
      * The windows whose data can reach into this query's range, in emission order — ascending
      * {@code window_start}, or descending when the query emits newest-first.
      *
@@ -388,18 +508,10 @@ final class ChunkRowSource
         // range iff S > startMs - W. Unbounded slice ends arrive as Long.MIN/MAX_VALUE - clamp to
         // +/-2^62 BEFORE subtracting so the arithmetic cannot wrap (the clamped bounds are still
         // ~146M years away from any real timestamp, and W is capped at 31 days).
-        long safeStart = Math.max(startMs, -(1L << 62));
-        // "+ 1" is the strict ">" above: a chunk starting exactly at startMs - W ends at startMs - 1,
-        // whatever its width up to W. Listing it anyway was harmless while a chunk that failed to
-        // decode was skipped; now that a corrupt one fails the query, it would fail every query that
-        // starts at the next window boundary without reaching the corrupt window at all.
-        long windowLow = safeStart - lookbackMs + 1;
-        long windowHigh = Math.min(endMsExcl, 1L << 62);
-
         List<ByteBuffer> values = new ArrayList<>(tagValues.size() + 2);
         values.addAll(tagValues);
-        values.add(TimestampType.instance.decompose(new Date(windowLow)));
-        values.add(TimestampType.instance.decompose(new Date(windowHigh)));
+        values.add(TimestampType.instance.decompose(new Date(windowLow())));
+        values.add(TimestampType.instance.decompose(new Date(windowHigh())));
 
         Iterator<UntypedResultSet.Row> rows;
         try
@@ -442,6 +554,24 @@ final class ChunkRowSource
                 }
             }
         };
+    }
+
+    /** The lowest {@code window_start} that can reach into this query's range (see {@link #windows}). */
+    private long windowLow()
+    {
+        long safeStart = Math.max(startMs, -(1L << 62));
+        // A chunk of width W starting at S reaches the range iff S > startMs - W; "+ 1" is that strict
+        // ">": a chunk starting exactly at startMs - W ends at startMs - 1,
+        // whatever its width up to W. Listing it anyway was harmless while a chunk that failed to
+        // decode was skipped; now that a corrupt one fails the query, it would fail every query that
+        // starts at the next window boundary without reaching the corrupt window at all.
+        return safeStart - lookbackMs + 1;
+    }
+
+    /** The exclusive upper {@code window_start} bound, clamped like {@link #windowLow}. */
+    private long windowHigh()
+    {
+        return Math.min(endMsExcl, 1L << 62);
     }
 
     /**

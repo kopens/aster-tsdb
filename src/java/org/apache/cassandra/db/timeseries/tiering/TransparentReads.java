@@ -21,15 +21,21 @@ package org.apache.cassandra.db.timeseries.tiering;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.NavigableSet;
+import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 
 import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ConsistencyLevel;
+import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.PartitionRangeReadCommand;
 import org.apache.cassandra.db.ReadQuery;
 import org.apache.cassandra.db.SinglePartitionReadQuery;
 import org.apache.cassandra.db.Slice;
@@ -38,13 +44,18 @@ import org.apache.cassandra.db.filter.ClusteringIndexFilter;
 import org.apache.cassandra.db.filter.ClusteringIndexNamesFilter;
 import org.apache.cassandra.db.filter.ClusteringIndexSliceFilter;
 import org.apache.cassandra.db.filter.ColumnFilter;
+import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
+import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.ClientWarn;
+import org.apache.cassandra.service.consensus.TransactionalMode;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.CloseableIterator;
 
 /**
  * SP3 transparent reads (design spec section 3.3.1): decides whether a SELECT on a tiering-enabled
@@ -92,8 +103,25 @@ public final class TransparentReads
      */
     private static final ThreadLocal<Integer> INTERNAL_BYPASS = ThreadLocal.withInitial(() -> 0);
 
+    /**
+     * The node-wide emergency switch for the range merge (JMX: {@link TieredStorageServiceMBean#setRangeScanMergeEnabled}).
+     * Off makes every range scan that could reach chunked data refuse, as before r4, whatever the
+     * table's {@code range_scan} says. Not persisted.
+     */
+    private static volatile boolean rangeScanMergeEnabled = true;
+
     private TransparentReads()
     {
+    }
+
+    public static boolean isRangeScanMergeEnabled()
+    {
+        return rangeScanMergeEnabled;
+    }
+
+    public static void setRangeScanMergeEnabled(boolean enabled)
+    {
+        rangeScanMergeEnabled = enabled;
     }
 
     /**
@@ -149,6 +177,9 @@ public final class TransparentReads
         ChunkCoverage.Coverage coverage = ChunkCoverage.forTable(metadata, cl);
         if (policy == null && !coverage.chunkTableExists())
             return hot;
+        if (query instanceof PartitionRangeReadCommand)
+            return maybeWrapRange(metadata, (PartitionRangeReadCommand) query, hot, coverage, policy, cl);
+
         // The hook fires both per read GROUP (the local path executes a whole group at once) and per
         // read COMMAND (the coordinator resolves one partition at a time), so accept either shape and
         // normalise to the list of single-partition queries this iterator will carry.
@@ -159,19 +190,7 @@ public final class TransparentReads
             commands = Collections.singletonList((SinglePartitionReadQuery) query);
         else
         {
-            // Range scans cannot merge chunks (no partition context). A client's range scan that
-            // could reach chunked data never gets here -- guardRangeRead refused it before it was
-            // issued -- so what arrives is either confined to the hot window (complete) or an
-            // internal caller, which reads the base table as it stands on purpose. The warning is
-            // for the latter. The hook fires from several places per query, so de-duplicate against
-            // the warnings already accumulated for THIS request rather than sending the same
-            // sentence three times.
-            String warning = "tiered table " + metadata.keyspace + '.' + metadata.name +
-                             ": range scans read hot rows only; query by partition key for merged hot+cold reads";
-            List<String> existing = ClientWarn.instance.getWarnings();
-            if (existing == null || !existing.contains(warning))
-                ClientWarn.instance.warn(warning);
-            return hot;
+            return warnHotOnly(metadata, hot);
         }
 
         if (commands.isEmpty())
@@ -193,6 +212,28 @@ public final class TransparentReads
 
         SinglePartitionReadQuery first = commands.get(0);
         ClusteringIndexFilter filter = first.clusteringIndexFilter();
+        // Built once per query, not once per partition key per query: everything it holds -- the two
+        // chunk SELECTs, the bounds, the projection -- depends only on the query, not on the key.
+        ChunkRowSource chunks = sourceFor(metadata, filter, chunkProjection(query.columnFilter()), coverage, policy, cl);
+        if (chunks == null)
+            return hot;
+
+        List<DecoratedKey> keys = new ArrayList<>(commands.size());
+        for (SinglePartitionReadQuery command : commands)
+            keys.add(command.partitionKey());
+        // The merge decorator is told whether the iterators run against clustering-comparator order,
+        // which is filter.isReversed() -- the comparator itself already encodes the DESC-ness.
+        return ChunkMergeUnfilteredIterator.wrap(hot, keys, chunks::rowsFor, metadata, filter.isReversed());
+    }
+
+    /**
+     * The chunk source for one clustering filter, or {@code null} when no chunk can hold a row the
+     * filter selects (an empty or unsupported filter, or a time range starting at or above the cold
+     * boundary) -- the caller then serves the hot rows alone, which are complete.
+     */
+    private static ChunkRowSource sourceFor(TableMetadata metadata, ClusteringIndexFilter filter, Set<String> projection,
+                                            ChunkCoverage.Coverage coverage, TieringPolicy policy, ConsistencyLevel cl)
+    {
         // WITH CLUSTERING ORDER BY (ts DESC) wraps the clustering type in ReversedType, so both
         // Slices and the names filter's NavigableSet are ordered by DESCENDING timestamp: the
         // comparator-order start bound is then the range's UPPER time bound, and the comparator-order
@@ -218,7 +259,7 @@ public final class TransparentReads
         {
             Slices slices = ((ClusteringIndexSliceFilter) filter).requestedSlices();
             if (slices.isEmpty())
-                return hot;
+                return null;
             startMs = ColdBoundary.lowestMs(slices.get(0), clusteringDescending);
             endMsExcl = ColdBoundary.highestMsExclusive(slices.get(slices.size() - 1), clusteringDescending);
             if (slices.size() > 1)
@@ -228,7 +269,7 @@ public final class TransparentReads
         {
             exactClusterings = ((ClusteringIndexNamesFilter) filter).requestedRows();
             if (exactClusterings.isEmpty())
-                return hot;
+                return null;
             Clustering<?> comparatorFirst = exactClusterings.first();
             Clustering<?> comparatorLast = exactClusterings.last();
             startMs = ColdBoundary.clusteringMs(clusteringDescending ? comparatorLast : comparatorFirst);
@@ -236,7 +277,7 @@ public final class TransparentReads
         }
         else
         {
-            return hot;
+            return null;
         }
 
         // The one correct question: can any chunk hold data at or above this query's start? Asked
@@ -244,47 +285,139 @@ public final class TransparentReads
         // never disagree about which rows a chunk owns (ColdBoundary.coldBelowMs).
         long mergeBelowMs = ColdBoundary.coldBelowMs(coverage, policy);
         if (startMs >= mergeBelowMs)
-            return hot;                                   // no chunk reaches up here: fast path
-
-        List<DecoratedKey> keys = new ArrayList<>(commands.size());
-        for (SinglePartitionReadQuery command : commands)
-            keys.add(command.partitionKey());
+            return null;                                   // no chunk reaches up here: fast path
 
         // The WIDEST chunk_window any existing chunk was written with, not the configured one: after
         // an operator shrinks chunk_window, every wider legacy chunk sits further before the range
         // start than one current window, and a look-back of one current window would never find it.
         long lookbackMs = coverage.lookbackMillis();
-        // Built once per query, not once per partition key per query: everything it holds -- the two
-        // chunk SELECTs, the bounds, the projection -- depends only on the query, not on the key. The
-        // source is told the TIMESTAMP order to emit in; the merge decorator is told whether the
-        // iterators run against clustering-comparator order, which is filter.isReversed() -- the
-        // comparator itself already encodes the DESC-ness.
-        ChunkRowSource chunks = new ChunkRowSource(metadata, lookbackMs, startMs, endMsExcl,
-                                                   exactClusterings, gappedSlices, emitDescending,
-                                                   // Decode only the columns this query reads.
-                                                   chunkProjection(query.columnFilter()), cl);
-        return ChunkMergeUnfilteredIterator.wrap(hot, keys, chunks::rowsFor, metadata, filter.isReversed());
+        // The source is told the TIMESTAMP order to emit in (emitDescending), and decodes only the
+        // columns the query reads (projection).
+        return new ChunkRowSource(metadata, lookbackMs, startMs, endMsExcl,
+                                  exactClusterings, gappedSlices, emitDescending, projection, cl);
+    }
+
+    /**
+     * The range-scan half of {@link #maybeWrap} (range-scan-merge-design.md section 1): wraps one
+     * coordinator sub-range's merged replica stream in a {@link ChunkRangeMergeIterator}, which joins
+     * it with the partition keys the chunk table holds in that sub-range.
+     * <p>
+     * Only on the coordinated path ({@code cl != null}: {@code DataResolver#resolveInternal}, after
+     * the replica merge and its read-repair listener, before the filter and the limit counter) and
+     * only when {@link #rangeMergeRefusal} has no objection -- exactly the condition under which
+     * {@link #guardRangeRead} lets a client's scan through, so a scan is either refused or merged,
+     * never silently served hot-only. What else arrives (the local path, an internal caller, a scan
+     * the guard let through because it stays hot) keeps the old hot-only behaviour and warning.
+     */
+    private static UnfilteredPartitionIterator maybeWrapRange(TableMetadata metadata, PartitionRangeReadCommand command,
+                                                              UnfilteredPartitionIterator hot,
+                                                              ChunkCoverage.Coverage coverage, TieringPolicy policy,
+                                                              ConsistencyLevel cl)
+    {
+        if (cl == null || rangeMergeRefusal(metadata, policy, command.rowFilter()) != null
+            || !ColdBoundary.hasTimestampClustering(metadata) || !coverage.chunkTableExists())
+            return warnHotOnly(metadata, hot);
+
+        DataRange dataRange = command.dataRange();
+        // The filter every key but a paging range's start key gets. DataRange keeps it to itself, so
+        // ask for it with a key that is never a start key: an empty partition key, which Cassandra
+        // refuses to write ("Key may not be empty").
+        ClusteringIndexFilter rangeFilter = dataRange.clusteringIndexFilter(metadata.partitioner.decorateKey(ByteBufferUtil.EMPTY_BYTE_BUFFER));
+        ConsistencyLevel chunkCl = rangeChunkConsistency(cl, policy);
+        Set<String> projection = chunkProjection(command.columnFilter());
+        ChunkRowSource rangeSource = sourceFor(metadata, rangeFilter, projection, coverage, policy, chunkCl);
+        if (rangeSource == null)
+            return hot;                                   // no chunk reaches this time range: complete
+
+        // A paging range's start key resumes after the last row returned, so it gets a narrower filter
+        // -- and a source of its own, built once. Identity, not equals: forPaging builds a fresh
+        // filter per call, and only the start key ever asks for one.
+        Map<ClusteringIndexFilter, Optional<ChunkRowSource>> sources = new IdentityHashMap<>();
+        sources.put(rangeFilter, Optional.of(rangeSource));
+        Function<DecoratedKey, CloseableIterator<Row>> rows = key -> {
+            ClusteringIndexFilter filter = dataRange.clusteringIndexFilter(key);
+            Optional<ChunkRowSource> source = sources.get(filter);
+            if (source == null)
+            {
+                source = Optional.ofNullable(sourceFor(metadata, filter, projection, coverage, policy, chunkCl));
+                sources.put(filter, source);
+            }
+            return source.isPresent() ? source.get().rowsFor(key) : CloseableIterator.empty();
+        };
+        TieringMetrics.record(metadata, TieringMetrics.Event.RANGE_SCAN_MERGED);
+        return new ChunkRangeMergeIterator(hot, rangeSource.keysIn(dataRange.keyRange()), rows, metadata,
+                                           rangeFilter.isReversed());
+    }
+
+    /**
+     * Why a range scan on {@code metadata} cannot merge chunks, or {@code null} if it can. The one
+     * predicate both {@link #guardRangeRead} and {@link #maybeWrapRange} ask.
+     */
+    private static String rangeMergeRefusal(TableMetadata metadata, TieringPolicy policy, RowFilter rowFilter)
+    {
+        if (!rangeScanMergeEnabled)
+            return "the range-scan merge is switched off on this node (TieredStorage MBean)";
+        if (policy == null)
+            return "the table has no valid timeseries_tiering policy to merge by";
+        if (!policy.rangeScanMerge)
+            return "its timeseries_tiering policy sets range_scan to 'refuse'";
+        // Replicas apply the row filter to the hot rows; decoded chunk rows join after that, so they
+        // would bypass it (and SAI does not index chunks at all).
+        if (rowFilter != null && !rowFilter.isEmpty())
+            return "the scan filters on a non-key column or uses an index, which chunk rows cannot honour";
+        // executeAccord reads through a path that never reaches DataResolver, so nothing would merge.
+        if (metadata.params.transactionalMode != TransactionalMode.off)
+            return "the table's transactional_mode is not 'off'";
+        return null;
+    }
+
+    /**
+     * The chunk side of a range scan reads at a quorum at least: a chunk-only partition missed by a
+     * weaker read is a whole partition missing from the answer (its base rows were deleted when it
+     * was encoded), and writes to a tiered table are quorum-only, so a quorum read overlaps them.
+     */
+    private static ConsistencyLevel rangeChunkConsistency(ConsistencyLevel cl, TieringPolicy policy)
+    {
+        return TieringPolicy.isQuorumStrength(cl) ? cl : policy.consistency;
+    }
+
+    /**
+     * The hot rows alone, with a client warning, for a range scan that does not merge. A client's
+     * scan only gets here when it stays above the cold boundary (complete) -- the guard refused the
+     * rest -- or from an internal caller, which reads the base table as it stands on purpose. The
+     * hook fires from several places per query, so de-duplicate against the warnings already
+     * accumulated for THIS request rather than sending the same sentence three times.
+     */
+    private static UnfilteredPartitionIterator warnHotOnly(TableMetadata metadata, UnfilteredPartitionIterator hot)
+    {
+        String warning = "tiered table " + metadata.keyspace + '.' + metadata.name +
+                         ": this range scan reads hot rows only";
+        List<String> existing = ClientWarn.instance.getWarnings();
+        if (existing == null || !existing.contains(warning))
+            ClientWarn.instance.warn(warning);
+        return hot;
     }
 
     /**
      * Refuses a client's range scan (any read without a partition key: a full scan, {@code count(*)},
-     * {@code DISTINCT}, a token range -- Spark's full-table read) when it could reach chunked data.
+     * {@code DISTINCT}, a token range -- Spark's full-table read) when it could reach chunked data and
+     * cannot merge it.
      * <p>
-     * {@link #maybeWrap} can only merge chunks into a partition it is told about, and a range scan
-     * names none, so on a tiered table it used to come back with the hot rows alone behind a client
-     * warning most drivers never surface: {@code count(*)} over 20M rows answered 500
-     * (tiering-benchmark.md). A successful query silently missing every cold row is the worst answer
-     * there is; an error is not.
+     * Before r4 no range scan could merge chunks, and one on a tiered table came back with the hot
+     * rows alone behind a client warning most drivers never surface: {@code count(*)} over 20M rows
+     * answered 500 (tiering-benchmark.md). A successful query silently missing every cold row is the
+     * worst answer there is; an error is not. Since r4 {@link #maybeWrapRange} merges them, and this
+     * refuses only what {@link #rangeMergeRefusal} names.
      * <p>
-     * Allowed through: internal callers (the server reads base tables as they stand on purpose), and
-     * a scan whose time range starts at or above {@link ColdBoundary#coldBelowMs} -- no chunk reaches
-     * it, so its answer is complete. An unknowable coverage puts that boundary at
+     * Allowed through: a scan that merges, internal callers (the server reads base tables as they
+     * stand on purpose), and a scan whose time range starts at or above {@link ColdBoundary#coldBelowMs}
+     * -- no chunk reaches it, so its answer is complete. An unknowable coverage puts that boundary at
      * {@link Long#MAX_VALUE}, so every scan is refused: the same fail-closed reading the merge and
      * the write guard take.
      *
      * @throws InvalidRequestException if the scan could reach data that only a chunk holds
      */
-    public static void guardRangeRead(TableMetadata metadata, ClusteringIndexFilter filter,
+    public static void guardRangeRead(TableMetadata metadata, ClusteringIndexFilter filter, RowFilter rowFilter,
                                       ClientState state, ConsistencyLevel cl)
     {
         if (state.isInternal || inInternalBypass())
@@ -311,17 +444,20 @@ public final class TransparentReads
         long coldBelowMs = ColdBoundary.coldBelowMs(coverage, policy);
         if (coldBelowMs == Long.MIN_VALUE || lowestRequestedMs(filter, ColdBoundary.isDescending(metadata)) >= coldBelowMs)
             return;
+        String refusal = rangeMergeRefusal(metadata, policy, rowFilter);
+        if (refusal == null)
+            return;                                       // merged by maybeWrapRange
 
         TieringMetrics.record(metadata, TieringMetrics.Event.RANGE_SCAN_REFUSED);
         String hotOnly = coldBelowMs == Long.MAX_VALUE
                          ? "(its chunk coverage cannot be read right now, so no time range is provably hot)"
                          : "or restrict its time range to at or above epoch millis " + coldBelowMs + " (the cold boundary)";
         throw new InvalidRequestException(
-            String.format("A range scan (a query without the partition key: a full scan, an aggregate, DISTINCT or a " +
-                          "token range) is not supported on %s.%s, because part of its data lives only in %s and a " +
-                          "range scan cannot merge it; it would return the hot rows alone as a complete answer. " +
+            String.format("This range scan (a query without the partition key: a full scan, an aggregate, DISTINCT or a " +
+                          "token range) is not supported on %s.%s: part of its data lives only in %s, and it cannot be " +
+                          "merged because %s; it would return the hot rows alone as a complete answer. " +
                           "Restrict the query by partition key %s.",
-                          metadata.keyspace, metadata.name, ChunkTables.chunkTableName(metadata.name), hotOnly));
+                          metadata.keyspace, metadata.name, ChunkTables.chunkTableName(metadata.name), refusal, hotOnly));
     }
 
     /** @return the oldest timestamp {@code filter} can select, {@link Long#MIN_VALUE} if unbounded below. */

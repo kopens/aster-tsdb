@@ -52,6 +52,7 @@ TESTS=(
   "testsome|org.apache.cassandra.db.timeseries.tiering.ChunkReadSupportTest"
   "testsome|org.apache.cassandra.db.timeseries.tiering.ChunkMergeIteratorTest"
   "testsome|org.apache.cassandra.db.timeseries.tiering.TransparentReadTest"
+  "testsome|org.apache.cassandra.db.timeseries.tiering.TransparentRangeReadTest"
   "testsome|org.apache.cassandra.tcm.LegacyAccordLayoutSnapshotTest"
   "testsome|org.apache.cassandra.db.timeseries.tiering.TieredTruncateTest"
   "testsome|org.apache.cassandra.tools.nodetool.mock.TieredStorageMockTest"

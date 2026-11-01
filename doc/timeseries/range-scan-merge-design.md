@@ -18,9 +18,12 @@
 
 # 설계: 계층화 테이블 레인지 스캔 청크 병합 + 스키마 경합(P1-01) 봉쇄
 
-상태: **설계 (2026-11-02).** 지금은 청크에 닿는 레인지 스캔을 `TransparentReads.guardRangeRead`가
-거부합니다([production-rollout.md §3.1](production-rollout.md)). 이 문서는 그 거부를 병합으로 바꾸는
-방법과, 재인코더의 스키마 경합을 닫는 방법을 정합니다.
+상태: **§1 구현 (r4, 2026-11-02).** 아래 설계에서 바뀐 점: 훅은 `DataResolver`를 고치지 않고
+`TransparentReads.maybeWrap`의 레인지 분기(`maybeWrapRange`)에 두었고(같은 자리에서 이미 호출됨), 청크 키
+열거는 `ChunkRowSource.keysIn`입니다. **기본값은 `merge`** 로 정했습니다(운영자 결정 — 옵트인이면 아무도
+켜지 않아 검증도 되지 않는다). 대신 테이블별 `range_scan: "refuse"`와 노드 전체 JMX 비상 스위치
+(`TieredStorage` MBean `RangeScanMergeEnabled`)를 둡니다. 정확성은 같은 데이터의 비계층 쌍둥이 테이블을
+오라클로 하는 `TransparentRangeReadTest`가 고정합니다. §2(P1-01)는 구현하지 않았습니다 — §2.4 끝 참고.
 
 ## 1. 레인지 스캔 청크 병합
 
@@ -74,7 +77,7 @@
 
 ### 1.3 가드 축소
 
-계속 거부: (a) 정책 옵션 `range_scan: "refuse"`(1단계 기본값) 또는 전역 JMX 스위치 꺼짐,
+계속 거부: (a) 정책 옵션 `range_scan: "refuse"`(r4 기본값은 `merge`) 또는 전역 JMX 스위치 꺼짐,
 (b) non-key `RowFilter`·인덱스(SAI 는 청크를 인덱싱하지 않음), (c) `transactional_mode != off`
 (`executeAccord`는 `DataResolver`를 우회). 내부 경로는 지금처럼 핫 행만 읽습니다.
 
@@ -140,3 +143,9 @@ soak 후 기본 merge → 3단계 필터·DISTINCT/count 최적화. 코디네이
 단위: seam `beforeSourceDeleteForTesting`에서 `ADD COLUMN` + 서버 타임스탬프 쓰기 → 값 생존, 다음 사이클
 인코딩; 가짜 `fenceMs`로 창 연기; 펜스 예외 → 삭제 0. jvm-dtest: node1 의 TCM 복제를 막은 채 node2 에서
 `ALTER ADD` + 새 컬럼 쓰기 → 기존 컬럼 갱신 → node1 `retier` → 필터 해제 후 새 컬럼 값 보존(수정 전 실패).
+
+**결정 (r4):** 펜스는 구현하지 않고 문서화된 한계로 둡니다. 재현 jvm-dtest(`TieredStorageDefectReproTest`
+s5a/s5b)에서 `ALTER ADD` 뒤 새 컬럼 값이 사라지는 경우는 **스키마 변경이 없어도** 기존 컬럼에서 똑같이
+일어났습니다 — 원인은 경합이 아니라 사이클 중 `USING TIMESTAMP <= maxWt` 쓰기라는 레인지 삭제의 타임스탬프
+규칙([tiered-storage.md §5.1](tiered-storage.md), §6)이고, 서버 타임스탬프 쓰기에서는 재현되지 않았습니다.
+§2.1의 TCM 지연 시나리오가 실제로 관측되면 그때 §2.2를 구현합니다.

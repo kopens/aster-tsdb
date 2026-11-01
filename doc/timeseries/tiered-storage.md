@@ -224,6 +224,7 @@ ALTER TABLE pp.tm_tag_point WITH extensions = {
 | `cold_window` | | 없음 | 지정 시, 이보다 오래된 청크는 통째로 삭제(보존 기한). `hot_window`보다 커야 함 |
 | `consistency` | | `LOCAL_QUORUM` | 재인코더의 모든 읽기/쓰기/삭제에 쓰는 CL. **쿼럼 계열만 허용** — [5.3](#53-cl-쿼럼-하한) 참고 |
 | `interval` | | `5m` | 이 테이블의 재인코딩 주기 (전역 스위프는 60초마다 돌며, interval이 지난 테이블만 실행) |
+| `range_scan` | | `merge` | 파티션 키 없는 조회가 청크에 닿을 때: `merge`는 청크를 병합(r4), `refuse`는 거부(r3 동작). [production-rollout.md §3.1](production-rollout.md) 참고 |
 
 기간 값의 문법은 `<양의 정수><m|h|d>` (분/시/일)입니다. 알 수 없는 키, 규칙 위반(JSON 오류,
 `hot_window < chunk_window`, `cold_window <= hot_window`, 쿼럼 미만 CL 등)은 **`ALTER TABLE`에서는
@@ -567,17 +568,13 @@ static 컬럼(`site_id`, `tag_name`, …)에 대한 쓰기·삭제는 이 규칙
 > 비용: 판정은 읽기 경로와 **같은 테이블별 캐시**를 씁니다. 청크 테이블이 없는 테이블(= 거의 모든
 > 테이블)은 캐시 조회 한 번으로 끝나며, 뮤테이션마다 청크 테이블을 읽지 않습니다.
 
-> **LWT(`IF ...`) 조건은 청크 데이터를 보지 못합니다.** CAS 선행 읽기는 투명 읽기 병합을 의도적으로
+> **콜드 클러스터링에 대한 LWT(`IF ...`)는 거부됩니다 (r4).** CAS 선행 읽기는 투명 읽기 병합을 의도적으로
 > 우회합니다 — 조건은 베이스 행에 대한 compare-and-set이고, Paxos는 자기가 소유하지 않는 데이터(다른
-> 테이블의 blob인 청크)를 직렬화할 수 없기 때문입니다. 따라서 청크화된 행은 `IF`에게 **없는 행**으로
-> 보이고 `IF EXISTS`는 적용되지 않습니다(아무것도 쓰지 않으므로 안전합니다). 조건이 통과하는 경우
-> (`IF col = null` 등)에는 위의 불변성 검사가 그대로 걸립니다.
->
-> 같은 이유로 **`INSERT ... IF NOT EXISTS`는 청크화된 클러스터링에서 성공합니다** — 선행 읽기가 행을
-> 보지 못하므로 `[applied] = true`가 되고 실제로 값이 쓰입니다. 데이터가 유실되지는 않습니다(콜드
-> 클러스터링에 실제 값을 쓰는 것은 설계상 허용되며, 이어지는 `SELECT`는 청크의 나머지 컬럼을 그 "새"
-> 행에 다시 병합해 줍니다). 다만 "없을 때만 쓴다"는 의도대로 동작하지는 않으므로, 과거 구간에
-> `IF NOT EXISTS`로 중복을 막으려는 설계는 피하십시오.
+> 테이블의 blob인 청크)를 직렬화할 수 없기 때문입니다. r3까지는 그래서 청크화된 행이 `IF`에게 **없는
+> 행**으로 보였습니다 — `IF EXISTS`는 false, `IF NOT EXISTS`는 `[applied] = true`. 틀린 답으로 조건을
+> 판정하는 대신, r4는 `hot_window`(커버리지를 알면 콜드 경계)보다 오래된 클러스터링을 조건으로 거는 쓰기를
+> Paxos 전에 `InvalidRequestException`으로 거부합니다(`TieredWrites.refuseConditionsOnColdData`,
+> `cold_writes_refused`로 집계). 핫 구간 행의 LWT와 조건 없는 콜드 쓰기는 그대로 허용됩니다.
 
 > **`CONSISTENCY SERIAL` SELECT와 `IF`는 같은 행을 다르게 봅니다.** SERIAL `SELECT`는 CAS 선행 읽기가
 > 아니라 선형화 읽기이므로 위의 우회 대상이 아니며, 청크 데이터를 **병합해서** 돌려줍니다. 그 자체는
@@ -637,7 +634,12 @@ static 컬럼(`site_id`, `tag_name`, …)에 대한 쓰기·삭제는 이 규칙
    `DISTINCT` 스캔이지만, 인코딩할 행이 없는 태그에는 할 일도 없습니다.)
 4. **잘못된 정책 JSON**: 파싱에 실패하는 정책이 걸린 테이블은 고칠 때까지 ERROR 로그를 남깁니다
    (최대 10분에 한 번으로 제한, `TieredStorageService`). 가상 테이블의 `last_error`에도 남습니다.
-5. **동명 테이블 DROP + CREATE**: 실행 통계가 `keyspace.table` 이름 키의 인메모리 맵이라, 같은
+5. **쓰기 CL 하한과 사이클 중 명시적 타임스탬프 (r4):** RF > 1 인 계층화 테이블에는 쿼럼 미만 쓰기가
+   거부됩니다 — 재인코더의 쿼럼 읽기에서 빠진 행이 레인지 삭제로 지워질 수 있었기 때문입니다
+   (`TieredStorageDefectReproTest` s1). 남는 한계는 위 2번과 같은 뿌리입니다: 재인코딩 사이클이 창을 읽은
+   뒤 `USING TIMESTAMP`로 그 창의 maxWt 이하를 찍어 도착한 쓰기는 레인지 톰스톤에 가려집니다(s5a/s5b,
+   `@Ignore("DOCUMENTED LIMIT")`). 서버 타임스탬프 쓰기는 해당 없습니다.
+6. **동명 테이블 DROP + CREATE**: 실행 통계가 `keyspace.table` 이름 키의 인메모리 맵이라, 같은
    이름으로 다시 만든 테이블은 첫 실행 전까지 이전 테이블의 통계가 가상 테이블/`tieringstatus`에
    잠깐 보입니다.
 

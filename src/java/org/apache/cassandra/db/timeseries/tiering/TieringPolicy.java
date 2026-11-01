@@ -60,6 +60,9 @@ import static java.lang.String.format;
  *     <li>{@code cold_window} (optional) - once a chunk is older than this, delete it outright.</li>
  *     <li>{@code consistency} (default {@code "LOCAL_QUORUM"}) - a {@link ConsistencyLevel} name.</li>
  *     <li>{@code interval} (default {@code "5m"}) - re-encoder tick period.</li>
+ *     <li>{@code range_scan} (default {@code "merge"}) - what a range scan (a query without the
+ *     partition key) that reaches chunked data does: {@code "merge"} decodes the chunks into it
+ *     ({@link ChunkRangeMergeIterator}), {@code "refuse"} fails it as builds before r4 did.</li>
  * </ul>
  * Durations use the grammar {@code <positive int><m|h|d>} (minutes/hours/days).
  *
@@ -77,13 +80,16 @@ public final class TieringPolicy
     private static final String COLD_WINDOW = "cold_window";
     private static final String CONSISTENCY = "consistency";
     private static final String INTERVAL = "interval";
+    private static final String RANGE_SCAN = "range_scan";
+    private static final String RANGE_SCAN_MERGE = "merge";
+    private static final String RANGE_SCAN_REFUSE = "refuse";
 
     private static final String DEFAULT_CHUNK_WINDOW = "1h";
     private static final String DEFAULT_CONSISTENCY = "LOCAL_QUORUM";
     private static final String DEFAULT_INTERVAL = "5m";
 
     private static final Set<String> KNOWN_KEYS = ImmutableSet.of(HOT_WINDOW, CHUNK_WINDOW, COLD_WINDOW,
-                                                                    CONSISTENCY, INTERVAL);
+                                                                    CONSISTENCY, INTERVAL, RANGE_SCAN);
 
     /**
      * Keys this policy used to accept, mapped to what happened to them. Rejected with a message that
@@ -132,18 +138,22 @@ public final class TieringPolicy
     public final long coldWindowMillis; // -1 = unset
     public final long intervalMillis;
     public final ConsistencyLevel consistency;
+    /** {@code range_scan}: true = merge chunks into range scans, false = refuse scans reaching them. */
+    public final boolean rangeScanMerge;
 
     private TieringPolicy(long hotWindowMillis,
                            long chunkWindowMillis,
                            long coldWindowMillis,
                            long intervalMillis,
-                           ConsistencyLevel consistency)
+                           ConsistencyLevel consistency,
+                           boolean rangeScanMerge)
     {
         this.hotWindowMillis = hotWindowMillis;
         this.chunkWindowMillis = chunkWindowMillis;
         this.coldWindowMillis = coldWindowMillis;
         this.intervalMillis = intervalMillis;
         this.consistency = consistency;
+        this.rangeScanMerge = rangeScanMerge;
     }
 
     // Parsed policies, keyed by the raw extension bytes. fromTable is on the hot path of every read
@@ -248,6 +258,12 @@ public final class TieringPolicy
         String interval = requireString(raw, INTERVAL);
         long intervalMillis = parseDurationMillis(INTERVAL, interval != null ? interval : DEFAULT_INTERVAL);
 
+        String rangeScan = requireString(raw, RANGE_SCAN);
+        if (rangeScan != null && !RANGE_SCAN_MERGE.equals(rangeScan) && !RANGE_SCAN_REFUSE.equals(rangeScan))
+            throw new ConfigurationException(format("%s.%s must be '%s' or '%s', not '%s'",
+                                                      EXTENSION_KEY, RANGE_SCAN, RANGE_SCAN_MERGE, RANGE_SCAN_REFUSE, rangeScan));
+        boolean rangeScanMerge = !RANGE_SCAN_REFUSE.equals(rangeScan);
+
         if (hotWindowMillis < chunkWindowMillis)
             throw new ConfigurationException(format("%s.%s (%s) must be >= %s (%s)",
                                                       EXTENSION_KEY, HOT_WINDOW, hotWindow, CHUNK_WINDOW,
@@ -257,7 +273,8 @@ public final class TieringPolicy
             throw new ConfigurationException(format("%s.%s (%s) must be > %s (%s)",
                                                       EXTENSION_KEY, COLD_WINDOW, coldWindow, HOT_WINDOW, hotWindow));
 
-        return new TieringPolicy(hotWindowMillis, chunkWindowMillis, coldWindowMillis, intervalMillis, consistency);
+        return new TieringPolicy(hotWindowMillis, chunkWindowMillis, coldWindowMillis, intervalMillis, consistency,
+                                 rangeScanMerge);
     }
 
     /** Floors {@code tsMillis} to the start of its {@link #chunkWindowMillis}-wide, epoch-aligned window. */
@@ -595,10 +612,10 @@ public final class TieringPolicy
     @Override
     public String toString()
     {
-        return format("TieringPolicy{hot_window=%dms, chunk_window=%dms, cold_window=%s, consistency=%s, interval=%dms}",
+        return format("TieringPolicy{hot_window=%dms, chunk_window=%dms, cold_window=%s, consistency=%s, interval=%dms, range_scan=%s}",
                        hotWindowMillis, chunkWindowMillis,
                        coldWindowMillis < 0 ? "unset" : coldWindowMillis + "ms",
-                       consistency, intervalMillis);
+                       consistency, intervalMillis, rangeScanMerge ? RANGE_SCAN_MERGE : RANGE_SCAN_REFUSE);
     }
 
     private static String requireString(Map<String, Object> raw, String key)
