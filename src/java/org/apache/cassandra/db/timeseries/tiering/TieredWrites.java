@@ -23,8 +23,10 @@ import java.util.List;
 import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.cassandra.db.Clustering;
+import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.DeletionInfo;
 import org.apache.cassandra.db.IMutation;
+import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RangeTombstone;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.Cell;
@@ -131,6 +133,64 @@ public final class TieredWrites
     }
 
     /**
+     * Refuses a conditional (LWT) write to a clustering that may live only in a chunk.
+     * <p>
+     * Paxos evaluates the condition with its own read, which does not merge chunks
+     * (tiered-storage.md §5.1.2). Against a chunked row that read sees nothing, so
+     * {@code INSERT ... IF NOT EXISTS} applied over an existing row and {@code UPDATE ... IF col = v}
+     * never matched a value a SERIAL read had just returned -- wrong answers to the question the
+     * caller asked, which TieredStorageDefectReproTest.s3 reproduced. Refused instead, against the
+     * same boundary the cell-tombstone rule uses (the established coverage, or what is provable
+     * without it). Conditions on static columns are untouched: statics are never chunked.
+     * <p>
+     * Called from {@code CQL3CasRequest.readCommand}, i.e. before Paxos reads the condition rows, for
+     * conditional statements and batches alike: a write-time check would only see conditions that
+     * came out true, and a condition that came out false against an unseen chunk is the other half of
+     * the wrong answer.
+     *
+     * @param conditionRows the clusterings the request conditions on (no static clustering)
+     */
+    public static void refuseConditionsOnColdData(TableMetadata metadata, Iterable<Clustering<?>> conditionRows)
+    {
+        if (TransparentReads.inInternalBypass() || !ColdBoundary.hasTimestampClustering(metadata))
+            return;
+        boolean anyRegularRow = false;
+        long lowestMs = Long.MAX_VALUE;
+        for (Clustering<?> clustering : conditionRows)
+        {
+            if (clustering == Clustering.STATIC_CLUSTERING)
+                continue;
+            anyRegularRow = true;
+            lowestMs = Math.min(lowestMs, ColdBoundary.clusteringMs(clustering));
+        }
+        if (!anyRegularRow)
+            return;
+
+        TieringPolicy policy;
+        try
+        {
+            policy = TieringPolicy.fromTable(metadata);
+        }
+        catch (ConfigurationException e)
+        {
+            policy = null;
+        }
+        ChunkCoverage.Coverage coverage = coverage(metadata, policy);
+        long coldBelowMs = coverage.known() ? ColdBoundary.coldBelowMs(coverage, policy)
+                                            : provablyColdBelowMs(metadata, policy);
+        if (coldBelowMs == Long.MIN_VALUE || lowestMs >= coldBelowMs)
+            return;
+
+        TieringMetrics.record(metadata, TieringMetrics.Event.COLD_WRITE_REFUSED);
+        throw new InvalidRequestException(
+            String.format("A conditional (LWT) write to %s.%s at a clustering older than the hot window is not " +
+                          "allowed: its condition is decided by a Paxos read that does not see rows already encoded " +
+                          "into %s, so IF NOT EXISTS / IF col = ... would be judged against the hot rows alone. " +
+                          "Write without the condition, or only condition rows inside the hot window.",
+                          metadata.keyspace, metadata.name, ChunkTables.chunkTableName(metadata.name)));
+    }
+
+    /**
      * Registers the update's tag with {@link TagRegistry} on the way past, so the re-encoder can
      * enumerate tags from a small shadow table instead of {@code SELECT DISTINCT}-ing the base table
      * every cycle. Gated on the same free clustering-shape check {@link #guard} opens with, so a
@@ -225,6 +285,50 @@ public final class TieredWrites
     {
         long lastKnownTop = ChunkCoverage.lastKnownTopExclusiveMs(metadata);
         return policy == null ? lastKnownTop : Math.max(lastKnownTop, ColdBoundary.hotBoundaryMs(policy));
+    }
+
+    /**
+     * Refuses a client write below quorum strength to a tiered table whose keyspace keeps more than one
+     * replica.
+     * <p>
+     * The re-encoder reads a window at its policy's quorum consistency, encodes what it read, and
+     * deletes the window's rows with a range tombstone at the newest writetime it saw. A row on fewer
+     * replicas than a quorum may be missing from that read; if its writetime is below the tombstone's it
+     * is then deleted on every replica without ever having been encoded. TieredStorageDefectReproTest.s1
+     * reproduced exactly that with a CL ONE write (6 rows written, 5 left). Quorum writes intersect the
+     * re-encoder's quorum read, so they cannot be missed this way. With a single replica every level is
+     * quorum strength and nothing is refused (node 41 runs RF 1).
+     * <p>
+     * Like the cold-write guards, only tiering's own bypass is exempt, not every internal client state:
+     * a coordinated write at ONE is just as lossy from an internal caller. Local {@code executeInternal}
+     * writes never reach this (they do not go through {@code ModificationStatement#execute}).
+     */
+    public static void guardWriteConsistency(TableMetadata metadata, ConsistencyLevel cl)
+    {
+        if (TransparentReads.inInternalBypass() || TieringPolicy.isQuorumStrength(cl))
+            return;
+        if (!ColdBoundary.hasTimestampClustering(metadata))
+            return;
+        TieringPolicy policy;
+        try
+        {
+            policy = TieringPolicy.fromTable(metadata);
+        }
+        catch (ConfigurationException e)
+        {
+            policy = null;
+        }
+        if (policy == null)
+            return;
+        int replicas = Keyspace.open(metadata.keyspace).getReplicationStrategy().getReplicationFactor().allReplicas;
+        if (replicas <= 1)
+            return;
+        TieringMetrics.record(metadata, TieringMetrics.Event.COLD_WRITE_REFUSED);
+        throw new InvalidRequestException(
+            String.format("Writes to the tiered table %s.%s must use a quorum consistency level (QUORUM, LOCAL_QUORUM, " +
+                          "EACH_QUORUM or ALL), not %s: the re-encoder reads at quorum and range-deletes what it " +
+                          "encoded, so a row on fewer replicas than a quorum can be deleted without being encoded.",
+                          metadata.keyspace, metadata.name, cl));
     }
 
     /**

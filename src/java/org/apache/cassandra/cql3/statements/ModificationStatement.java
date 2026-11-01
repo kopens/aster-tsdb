@@ -715,6 +715,9 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
             Guardrails.writeConsistencyLevels.guard(EnumSet.of(options.getConsistency(), options.getSerialConsistency()),
                                                     queryState.getClientState());
 
+        // Tiered storage: a sub-quorum write can be missed by the re-encoder's quorum read and range-deleted.
+        org.apache.cassandra.db.timeseries.tiering.TieredWrites.guardWriteConsistency(metadata(), options.getConsistency());
+
         return hasConditions()
              ? executeWithCondition(queryState, options, requestTime)
              : executeWithoutCondition(queryState, options, requestTime);

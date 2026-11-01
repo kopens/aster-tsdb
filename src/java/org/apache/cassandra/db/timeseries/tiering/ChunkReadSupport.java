@@ -38,6 +38,7 @@ import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.timeseries.ColumnarChunkCodec;
 import org.apache.cassandra.db.timeseries.ColumnarCursor;
 import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.DroppedColumn;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.BulkIterator;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -385,11 +386,20 @@ public final class ChunkReadSupport
             TreeMap<ColumnMetadata, String> byColumn = new TreeMap<>();
             for (String name : cursor.columns())
             {
-                ColumnMetadata column = metadata.getColumn(ByteBufferUtil.bytes(name));
+                ByteBuffer rawName = ByteBufferUtil.bytes(name);
+                ColumnMetadata column = metadata.getColumn(rawName);
                 // Dropped since the chunk was written (or, defensively, no longer a regular column):
                 // there is nowhere to put its cells, so leave it out rather than failing the read.
-                if (column != null && column.isRegular())
-                    byColumn.put(column, name);
+                if (column == null || !column.isRegular())
+                    continue;
+                // DROPped and re-ADDed under the same name: Cassandra ignores every cell of the old
+                // column, i.e. every cell timestamped at or before the drop. A chunk's cells carry
+                // cellTimestamp, so a chunk written before the drop holds the old column's values and
+                // must not surface them under the new one.
+                DroppedColumn dropped = metadata.droppedColumns.get(rawName);
+                if (dropped != null && cellTimestamp <= dropped.droppedTime)
+                    continue;
+                byColumn.put(column, name);
             }
             this.columns = byColumn.keySet().toArray(new ColumnMetadata[0]);
             this.slots = new int[byColumn.size()];

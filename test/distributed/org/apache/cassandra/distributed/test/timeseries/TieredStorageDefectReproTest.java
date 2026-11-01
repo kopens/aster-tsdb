@@ -44,24 +44,24 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
 import org.apache.cassandra.distributed.test.TestBaseImpl;
-import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.StorageService;
 
 import static org.apache.cassandra.distributed.api.Feature.GOSSIP;
 import static org.apache.cassandra.distributed.api.Feature.NETWORK;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /**
  * Reproduction attempts for suspected tiered-storage defects on a 3-node RF=3 cluster. Every test
  * asserts the behaviour a client of a plain Cassandra table would expect, so a failing test is a
  * confirmed defect and a passing one means the suspicion did not reproduce. Tests that were seen to
- * fail carry {@code @Ignore("CONFIRMED BUG: ...")} so the suite stays green; remove the annotation
- * when the defect is fixed.
+ * fail were fixed in r4 and now assert the fix (s1 write consistency floor, s2 dropped-column filter,
+ * s3 LWT refusal); s5a/s5b reproduce the documented limit of the range delete's timestamp rule and
+ * carry {@code @Ignore("DOCUMENTED LIMIT: ...")}.
  * <p>
  * All data uses tiny epoch-millis event times, so every window is closed and cold; re-encode cycles
  * are driven explicitly (never by the 60s sweeper).
@@ -112,54 +112,28 @@ public class TieredStorageDefectReproTest extends TestBaseImpl
      * window at the maximum writetime it saw, which is larger than the CL ONE row's. Once X is back,
      * that tombstone shadows the row on X and the chunk never contained it.
      */
-    @Ignore("CONFIRMED BUG: a CL ONE row the re-encoder's QUORUM read missed is range-deleted at maxWt and never chunked (observed 5 rows, expected 6)")
     @Test
-    public void s1_subQuorumWriteSurvivesReencode() throws Exception
+    public void s1_subQuorumWritesToATieredTableAreRefused()
     {
+        // The loss above, closed at the source: with RF 3 a write below quorum strength to a tiered table
+        // is refused (TieredWrites.guardWriteConsistency), so no acknowledged row can sit on fewer replicas
+        // than the re-encoder's quorum read reaches. Single statements and batches alike.
         String t = "s1_sub_quorum";
         createTieredTable(t, "value double");
-        int primary = primaryFor(t, TAG);
-        int lonely = primary == 3 ? 2 : 3;       // the replica that alone holds the CL ONE write
-        retierAllNodes(t);                        // no data yet: only creates the shadow tables while all nodes are up
-
-        // CL ONE write coordinated by X, whose mutations to the other replicas are dropped.
-        for (int other = 1; other <= 3; other++)
-            if (other != lonely)
-                CLUSTER.filters().verbs(Verb.MUTATION_REQ.id).from(lonely).to(other).drop();
-        CLUSTER.coordinator(lonely).execute(withKeyspace("INSERT INTO %s." + t + " (tag, ts, value) VALUES (?, ?, ?)"),
-                                            ConsistencyLevel.ONE, TAG, new Date(30_000L), 42.0);
-        CLUSTER.filters().reset();
-        Uninterruptibles.sleepUninterruptibly(5, TimeUnit.MILLISECONDS);
-
-        // Later, fully replicated rows in the same window.
-        for (int i = 0; i < 5; i++)
-            CLUSTER.coordinator(1).execute(withKeyspace("INSERT INTO %s." + t + " (tag, ts, value) VALUES (?, ?, ?)"),
-                                           ConsistencyLevel.ALL, TAG, new Date(i * 60_000L), 1.0 + i);
-
-        assertEquals("only X holds the CL ONE row", 6, localBaseRows(lonely, t));
-        for (int node = 1; node <= 3; node++)
-            if (node != lonely)
-                assertEquals(5, localBaseRows(node, t));
-        long lateWt = localWritetime(lonely, t, 30_000L);
-        long maxOthers = localMaxWritetime(primary, t);
-        assertTrue("precondition: the CL ONE row is older than the rows the re-encoder will see", lateWt < maxOthers);
-
-        CLUSTER.get(lonely).flush(KEYSPACE);
-        CLUSTER.get(lonely).shutdown().get();
-        try
+        for (ConsistencyLevel weak : new ConsistencyLevel[]{ ConsistencyLevel.ONE, ConsistencyLevel.LOCAL_ONE, ConsistencyLevel.TWO })
         {
-            CLUSTER.get(primary).nodetoolResult("retier", KEYSPACE, t).asserts().success();
+            assertThatThrownBy(() -> CLUSTER.coordinator(1).execute(
+                withKeyspace("INSERT INTO %s." + t + " (tag, ts, value) VALUES (?, ?, ?)"), weak, TAG, new Date(30_000L), 42.0))
+                .hasMessageContaining("must use a quorum consistency level");
+            assertThatThrownBy(() -> CLUSTER.coordinator(1).execute(
+                withKeyspace("BEGIN UNLOGGED BATCH INSERT INTO %s." + t + " (tag, ts, value) VALUES (?, ?, ?) APPLY BATCH"),
+                weak, TAG, new Date(30_000L), 42.0))
+                .hasMessageContaining("must use a quorum consistency level");
         }
-        finally
-        {
-            CLUSTER.get(lonely).startup();
-        }
-
-        Object[][] rows = executeWithRetry(primary, "SELECT ts, value FROM %s." + t + " WHERE tag = ?", ConsistencyLevel.ALL, TAG);
-        assertEquals("the acknowledged CL ONE write must not be destroyed by the re-encoder's range delete " +
-                     "(re-encoder saw 5 rows, X held 6)", 6, rows.length);
-        assertEquals(30_000L, ((Date) rows[1][0]).getTime());
-        assertEquals(42.0, (Double) rows[1][1], 0.0);
+        CLUSTER.coordinator(1).execute(withKeyspace("INSERT INTO %s." + t + " (tag, ts, value) VALUES (?, ?, ?)"),
+                                       ConsistencyLevel.QUORUM, TAG, new Date(30_000L), 42.0);
+        assertEquals(1, CLUSTER.coordinator(1).execute(withKeyspace("SELECT value FROM %s." + t + " WHERE tag = ?"),
+                                                       ConsistencyLevel.ALL, TAG).length);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -171,7 +145,6 @@ public class TieredStorageDefectReproTest extends TestBaseImpl
      * drop (the dropped-column timestamp filters the old cells). Chunk columns are resolved by name
      * only, so the pre-drop values come back under the new column.
      */
-    @Ignore("CONFIRMED BUG: ChunkReadSupport resolves chunk columns by name with no dropped-time filter, so pre-DROP values reappear under a re-ADDed column (observed 100.0, expected null)")
     @Test
     public void s2_droppedThenReaddedColumnDoesNotResurrectChunkValues()
     {
@@ -202,39 +175,29 @@ public class TieredStorageDefectReproTest extends TestBaseImpl
     // Scenario 3: LWT on cold (chunked) rows
     // ------------------------------------------------------------------------------------------
 
-    /** INSERT ... IF NOT EXISTS on a clustering that exists (in a chunk) must not apply. */
-    @Ignore("CONFIRMED BUG (documented, tiered-storage.md 5.1.2): CAS read bypasses chunks, IF NOT EXISTS applies over a chunked row (observed applied=true)")
+    /**
+     * INSERT ... IF NOT EXISTS on a chunked clustering used to apply (the Paxos read does not merge
+     * chunks), and UPDATE ... IF value = (a chunked value) never matched although a SERIAL read
+     * returned it. Both are now refused rather than answered wrongly, and nothing is written.
+     */
     @Test
-    public void s3a_insertIfNotExistsOnChunkedRowIsNotApplied()
+    public void s3_conditionalWritesOnChunkedRowsAreRefused()
     {
-        String t = "s3a_lwt_ine";
+        String t = "s3_lwt";
         createChunkedSingleTag(t);
 
-        Object[][] result = CLUSTER.coordinator(1).execute(
+        assertThatThrownBy(() -> CLUSTER.coordinator(1).execute(
             withKeyspace("INSERT INTO %s." + t + " (tag, ts, value) VALUES (?, ?, ?) IF NOT EXISTS"),
-            ConsistencyLevel.QUORUM, TAG, new Date(60_000L), 999.0);
+            ConsistencyLevel.QUORUM, TAG, new Date(60_000L), 999.0))
+            .hasMessageContaining("conditional (LWT) write");
+        assertThatThrownBy(() -> CLUSTER.coordinator(1).execute(
+            withKeyspace("UPDATE %s." + t + " SET value = ? WHERE tag = ? AND ts = ? IF value = ?"),
+            ConsistencyLevel.QUORUM, 555.0, TAG, new Date(60_000L), 2.0))
+            .hasMessageContaining("conditional (LWT) write");
+
         Object[][] after = CLUSTER.coordinator(1).execute(
             withKeyspace("SELECT value FROM %s." + t + " WHERE tag = ? AND ts = ?"), ConsistencyLevel.QUORUM, TAG, new Date(60_000L));
-        assertEquals("IF NOT EXISTS must see the chunked row", false, result[0][0]);
-        assertEquals("the existing value must not be overwritten", 2.0, (Double) after[0][0], 0.0);
-    }
-
-    /** UPDATE ... IF value = (the value the row holds) must apply when that value lives in a chunk. */
-    @Ignore("CONFIRMED BUG (documented, tiered-storage.md 5.1.2): IF col = <chunked value> never matches although SERIAL SELECT returns it (observed applied=false)")
-    @Test
-    public void s3b_conditionalUpdateMatchesChunkedValue()
-    {
-        String t = "s3b_lwt_if";
-        createChunkedSingleTag(t);
-
-        Object[][] serial = CLUSTER.coordinator(1).execute(
-            withKeyspace("SELECT value FROM %s." + t + " WHERE tag = ? AND ts = ?"), ConsistencyLevel.SERIAL, TAG, new Date(60_000L));
-        assertEquals("SERIAL read returns the chunked value", 2.0, (Double) serial[0][0], 0.0);
-
-        Object[][] result = CLUSTER.coordinator(1).execute(
-            withKeyspace("UPDATE %s." + t + " SET value = ? WHERE tag = ? AND ts = ? IF value = ?"),
-            ConsistencyLevel.QUORUM, 555.0, TAG, new Date(60_000L), 2.0);
-        assertEquals("IF value = 2.0 must match the value a SERIAL read just returned", true, result[0][0]);
+        assertEquals("the refused writes changed nothing", 2.0, (Double) after[0][0], 0.0);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -250,7 +213,7 @@ public class TieredStorageDefectReproTest extends TestBaseImpl
      * loses its value the same way with no schema change, so the loss comes from the range delete's
      * timestamp rule (section 5.1's inherent limit), not from anything the schema race adds.
      */
-    @Ignore("CONFIRMED BUG: a column ADDed after regularColumnsChanged() with a value at ts <= maxWt is range-deleted unencoded (observed null, expected 7.0); see s5b")
+    @Ignore("DOCUMENTED LIMIT (tiered-storage.md 5.1): an explicit USING TIMESTAMP <= maxWt landing during the cycle is shadowed by its range delete; reduces to s5b (observed null, expected 7.0)")
     @Test
     public void s5a_columnAddedAfterSchemaCheckKeepsItsValue() throws Exception
     {
@@ -277,7 +240,7 @@ public class TieredStorageDefectReproTest extends TestBaseImpl
      * loses the value, s5a's loss is the documented server-timestamp assumption (tiered-storage.md
      * section 5.1, "inherent limit"), not something the schema race adds.
      */
-    @Ignore("CONFIRMED BUG (documented limit, tiered-storage.md 5.1): any write at ts <= maxWt landing after the window read is shadowed, schema change or not (observed 1.0, expected 77.0)")
+    @Ignore("DOCUMENTED LIMIT (tiered-storage.md 5.1): an explicit USING TIMESTAMP <= maxWt landing after the window read is shadowed; server-timestamped writes are not (observed 1.0, expected 77.0)")
     @Test
     public void s5b_existingColumnWriteAtMaxWtDuringCycleKeepsItsValue() throws Exception
     {
@@ -463,23 +426,6 @@ public class TieredStorageDefectReproTest extends TestBaseImpl
         });
     }
 
-    /** WRITETIME(value) of the row at {@code tsMillis} as {@code node} physically holds it. */
-    private static long localWritetime(int node, String table, long tsMillis)
-    {
-        String cql = withKeyspace("SELECT WRITETIME(value) AS wt FROM %s." + table + " WHERE tag = '" + TAG + "' AND ts = " + tsMillis);
-        return CLUSTER.get(node).callOnInstance(() -> {
-            TransparentReads.enterInternalBypass();
-            try
-            {
-                return QueryProcessor.executeInternal(cql).one().getLong("wt");
-            }
-            finally
-            {
-                TransparentReads.exitInternalBypass();
-            }
-        });
-    }
-
     private static void awaitLocalBaseRows(int node, String table, int expected)
     {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
@@ -492,24 +438,5 @@ public class TieredStorageDefectReproTest extends TestBaseImpl
             Uninterruptibles.sleepUninterruptibly(50, TimeUnit.MILLISECONDS);
         } while (System.nanoTime() < deadline);
         assertEquals("node " + node + " base rows", expected, actual);
-    }
-
-    /** Retries a read while a just-restarted node is not yet seen as alive (Unavailable). */
-    private static Object[][] executeWithRetry(int coordinator, String cql, ConsistencyLevel cl, Object... values)
-    {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
-        while (true)
-        {
-            try
-            {
-                return CLUSTER.coordinator(coordinator).execute(withKeyspace(cql), cl, values);
-            }
-            catch (RuntimeException e)
-            {
-                if (System.nanoTime() > deadline)
-                    throw e;
-                Uninterruptibles.sleepUninterruptibly(500, TimeUnit.MILLISECONDS);
-            }
-        }
     }
 }

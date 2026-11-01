@@ -263,6 +263,9 @@ public class CQL3CasRequest implements CASRequest
                                                      new ClusteringIndexSliceFilter(Slices.ALL, false),
                                                      PotentialTxnConflicts.ALLOW);
 
+        // Tiered storage: this read decides the conditions and does not see chunked rows, so refuse a
+        // condition on a clustering that may live only in a chunk rather than answer it wrongly.
+        org.apache.cassandra.db.timeseries.tiering.TieredWrites.refuseConditionsOnColdData(metadata, conditions.navigableKeySet());
         ClusteringIndexNamesFilter filter = new ClusteringIndexNamesFilter(conditions.navigableKeySet(), false);
         return SinglePartitionReadCommand.create(metadata, nowInSec, key, columnFilter, filter);
     }
