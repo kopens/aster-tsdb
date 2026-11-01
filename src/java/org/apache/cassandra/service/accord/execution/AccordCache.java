@@ -71,7 +71,6 @@ import org.apache.cassandra.service.accord.AccordCommandStore;
 import org.apache.cassandra.service.accord.AccordKeyspace;
 import org.apache.cassandra.service.accord.AccordObjectSizes;
 import org.apache.cassandra.service.accord.OrderedKeys;
-import org.apache.cassandra.service.accord.api.AccordAgent;
 import org.apache.cassandra.service.accord.api.TokenKey;
 import org.apache.cassandra.service.accord.events.CacheEvents;
 import org.apache.cassandra.service.accord.execution.AccordCache.Adapter.Shrink;
@@ -89,7 +88,6 @@ import org.apache.cassandra.utils.ObjectSizes;
 
 import static accord.utils.Invariants.illegalState;
 import static accord.utils.Invariants.require;
-import static org.apache.cassandra.config.DatabaseDescriptor.getAccord;
 import static org.apache.cassandra.service.accord.execution.AccordCacheEntry.AGE_MASK;
 import static org.apache.cassandra.service.accord.execution.AccordCacheEntry.GENERATION_MASK;
 import static org.apache.cassandra.service.accord.execution.AccordCacheEntry.Status.EVICTED;
@@ -177,7 +175,7 @@ public class AccordCache
     private boolean shrinkingOn = true;
     private boolean tryShrinkOrEvict;
 
-    AccordCache(AccordCacheEntry.SaveExecutor saveExecutor, long maxSizeInBytes)
+    public AccordCache(AccordCacheEntry.SaveExecutor saveExecutor, long maxSizeInBytes)
     {
         this.saveExecutor = saveExecutor;
         this.maxSizeInBytes = maxSizeInBytes;
@@ -1270,7 +1268,7 @@ public class AccordCache
             TxnId minUndecided = value.minUndecidedManaged();
             int lastSize = (int) CommandSerializers.txnId.serializedSize(last);
             int minUndecidedSize = (int) CommandSerializers.txnId.serializedSize(minUndecided);
-            ByteBuffer result = Serialize.toBytesWithoutKey(lastSize + minUndecidedSize, value.maybePrune(0, AccordAgent.cfkHlcPruneDelta(getAccord())));
+            ByteBuffer result = Serialize.toBytesWithoutKey(lastSize + minUndecidedSize, value.maximalPrune());
             int limit = result.limit();
             result.limit(lastSize + minUndecidedSize);
             CommandSerializers.txnId.serialize(last, result, ByteBufferAccessor.instance, 0);

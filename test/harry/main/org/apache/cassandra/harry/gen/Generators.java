@@ -63,12 +63,11 @@ public class Generators
             for (int i = 0; i < length; i++)
             {
                 int next;
-                // Exclude the surrogate range (0xD800-0xDFFF): lone surrogates are not valid UTF-16 and do not
-                // survive a UTF-8 round trip (they are replaced with '?'), so generate below and above it instead
+                // Exclude surrogate range, generate values before and after it
                 if (rng.nextBoolean())
                     next = rng.nextInt(0x0000, 0xD800);
                 else
-                    next = rng.nextInt(0xE000, 0x10FFFF);
+                    next = rng.nextInt(0xD801, 0xDFFF);
                 codePoints[i] = next;
             }
 

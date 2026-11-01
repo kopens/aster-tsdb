@@ -44,7 +44,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * This test has been authored entirely by LLM.
+ * This test has been authored entirely by Claude.
  *
  * Reentrancy of the cache-entry queues, driven adversarially: the queues notify tasks while they are mutating
  * themselves, and those notifications come back in. This suite injects, from inside a notification, every mutation a

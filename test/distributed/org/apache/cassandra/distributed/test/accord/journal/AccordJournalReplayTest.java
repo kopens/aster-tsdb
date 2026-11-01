@@ -98,7 +98,7 @@ public class AccordJournalReplayTest extends TestBaseImpl
                                                                   .set("accord.retry_syncpoint", "1s*attempts")
                                                                   .set("accord.retry_durability", "1s*attempts")
                                                                   .set("accord.journal.replay_save_point", "NO")
-                                                                  .set("accord.catchup_on_start", "false")
+                                                                  .set("accord.catchup_on_start", "DISABLED")
                                                                   .with(NETWORK, GOSSIP))
                                       .start())
         {

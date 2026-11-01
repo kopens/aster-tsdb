@@ -19,12 +19,7 @@ package org.apache.cassandra.service.pager;
 
 import java.nio.ByteBuffer;
 import java.util.NoSuchElementException;
-import java.util.StringJoiner;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.DecoratedKey;
@@ -35,60 +30,40 @@ import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.partitions.PartitionIterator;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.RowIterator;
-import org.apache.cassandra.exceptions.InvalidRequestException;
-import org.apache.cassandra.exceptions.OperationExecutionException;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.transport.Dispatcher;
 
 /**
- * Pages input for aggregation queries to bound memory use when a group spans many rows.
- * {@link #fetchPage(PageSize, ConsistencyLevel, ClientState, Dispatcher.RequestTime)} may fetch multiple internal subpages.
- * <p/>
- * Internal reads enforce the total and per-partition group limits, client group page size,
- * and internal row and byte limits together.
+ * {@code QueryPager} that takes care of fetching the pages for aggregation queries.
+ * <p>
+ * For aggregation/group by queries, the user page size is in number of groups. But each group could be composed of very
+ * many rows so to avoid running into OOMs, this pager will page internal queries into sub-pages. So each call to
+ * {@link fetchPage} may (transparently) yield multiple internal queries (sub-pages).
  */
 public final class AggregationQueryPager implements QueryPager
 {
-    private static final Logger logger = LoggerFactory.getLogger(AggregationQueryPager.class);
-
     private final DataLimits limits;
-
-    private final PageSize subPageSize;
 
     // The sub-pager, used to retrieve the next sub-page.
     private QueryPager subPager;
 
-    public AggregationQueryPager(QueryPager subPager, PageSize subPageSize, DataLimits limits)
+    public AggregationQueryPager(QueryPager subPager, DataLimits limits)
     {
         this.subPager = subPager;
         this.limits = limits;
-        this.subPageSize = subPageSize;
     }
 
-    /**
-     * Returns source partitions for aggregation. For grouped queries, the page size and query limits count groups.
-     * A defined page size must use rows; byte sizes throw {@link InvalidRequestException}.
-     * Ungrouped aggregation ignores the row page size and consumes all input for one aggregate result.
-     *
-     * @param pageSize    the maximum number of elements to return in the next page (groups)
-     * @param consistency the consistency level to achieve for the query
-     * @param clientState the {@code ClientState} for the query. In practice, this can be null unless
-     *                    {@code consistency} is a serial consistency
-     */
     @Override
-    public PartitionIterator fetchPage(PageSize pageSize,
+    public PartitionIterator fetchPage(int pageSize,
                                        ConsistencyLevel consistency,
                                        ClientState clientState,
-                                       Dispatcher.RequestTime requestTime) throws OperationExecutionException
+                                       Dispatcher.RequestTime requestTime)
     {
-        if (pageSize.isDefined() && pageSize.getUnit() != PageSize.PageUnit.ROWS)
-            throw new InvalidRequestException("Paging in bytes is not supported for aggregation queries. Please specify the page size in rows.");
+        if (limits.isGroupByLimit())
+            return new GroupByPartitionIterator(pageSize, consistency, clientState, requestTime);
 
-        if (subPager.limits().isGroupByLimit())
-            return new GroupByPartitionIterator(pageSize, subPageSize, consistency, clientState, requestTime);
-
-        return new AggregationPartitionIterator(subPageSize, consistency, clientState, requestTime);
+        return new AggregationPartitionIterator(pageSize, consistency, clientState, requestTime);
     }
 
     @Override
@@ -97,23 +72,13 @@ public final class AggregationQueryPager implements QueryPager
         return subPager.executionController();
     }
 
-    /**
-     * The internal-read equivalent of
-     * {@link #fetchPage(PageSize, ConsistencyLevel, ClientState, Dispatcher.RequestTime)}.
-     *
-     * @param pageSize the maximum number of elements to return in the next page
-     * @param executionController the {@code ReadExecutionController} protecting the read
-     */
     @Override
-    public PartitionIterator fetchPageInternal(PageSize pageSize, ReadExecutionController executionController)
+    public PartitionIterator fetchPageInternal(int pageSize, ReadExecutionController executionController)
     {
-        if (pageSize.isDefined() && pageSize.getUnit() != PageSize.PageUnit.ROWS)
-            throw new InvalidRequestException("Paging in bytes is not supported for aggregation queries. Please specify the page size in rows.");
+        if (limits.isGroupByLimit())
+            return new GroupByPartitionIterator(pageSize, executionController, Dispatcher.RequestTime.forImmediateExecution());
 
-        if (limits().isGroupByLimit())
-            return new GroupByPartitionIterator(pageSize, subPageSize, executionController, Dispatcher.RequestTime.forImmediateExecution());
-
-        return new AggregationPartitionIterator(subPageSize, executionController, Dispatcher.RequestTime.forImmediateExecution());
+        return new AggregationPartitionIterator(pageSize, executionController, Dispatcher.RequestTime.forImmediateExecution());
     }
 
     @Override
@@ -146,12 +111,6 @@ public final class AggregationQueryPager implements QueryPager
         return subPager.isTopK();
     }
 
-    @Override
-    public DataLimits limits()
-    {
-        return limits;
-    }
-
     /**
      * <code>PartitionIterator</code> that automatically fetch a new sub-page of data if needed when the current iterator is
      * exhausted.
@@ -161,12 +120,7 @@ public final class AggregationQueryPager implements QueryPager
         /**
          * The top-level page size in number of groups.
          */
-        private final PageSize groupsPageSize;
-
-        /**
-         * Page size for internal paging
-         */
-        private final PageSize subPageSize;
+        private final int pageSize;
 
         // For "normal" queries
         private final ConsistencyLevel consistency;
@@ -208,44 +162,43 @@ public final class AggregationQueryPager implements QueryPager
         /**
          * The initial amount of row remaining
          */
-        protected int initialMaxRemaining;
+        private int initialMaxRemaining;
 
         private Dispatcher.RequestTime requestTime;
 
-        public GroupByPartitionIterator(PageSize groupsPageSize,
-                                        PageSize subPageSize,
+        public GroupByPartitionIterator(int pageSize,
                                         ConsistencyLevel consistency,
                                         ClientState clientState,
                                         Dispatcher.RequestTime requestTime)
         {
-            this(groupsPageSize, subPageSize, consistency, clientState, null, requestTime);
+            this(pageSize, consistency, clientState, null, requestTime);
         }
 
-        public GroupByPartitionIterator(PageSize groupsPageSize,
-                                        PageSize subPageSize,
+        public GroupByPartitionIterator(int pageSize,
                                         ReadExecutionController executionController,
                                         Dispatcher.RequestTime requestTime)
        {
-           this(groupsPageSize, subPageSize, null, null, executionController, requestTime);
+           this(pageSize, null, null, executionController, requestTime);
        }
 
-        private GroupByPartitionIterator(PageSize groupsPageSize,
-                                         PageSize subPageSize,
+        private GroupByPartitionIterator(int pageSize,
                                          ConsistencyLevel consistency,
                                          ClientState clientState,
                                          ReadExecutionController executionController,
                                          Dispatcher.RequestTime requestTime)
         {
-            this.groupsPageSize = groupsPageSize;
-            this.subPageSize = subPageSize;
+            this.pageSize = handlePagingOff(pageSize);
             this.consistency = consistency;
             this.clientState = clientState;
             this.executionController = executionController;
             this.requestTime = requestTime;
-            subPager = subPager.withUpdatedLimit(limits().withCountedLimit(groupsPageSize.rows()));
+        }
 
-            if (logger.isTraceEnabled())
-                logger.trace("Fetching a new page - created {}", this);
+        private int handlePagingOff(int pageSize)
+        {
+            // If the paging is off, the pageSize will be <= 0. So we need to replace
+            // it by DataLimits.NO_LIMIT
+            return pageSize <= 0 ? DataLimits.NO_LIMIT : pageSize;
         }
 
         public final void close()
@@ -271,42 +224,39 @@ public final class AggregationQueryPager implements QueryPager
         }
 
         /**
-         * Loads the next <code>RowIterator</code> to be returned. The iteration finishes when we reach either the
-         * user groups limit or the groups page size. The user provided limit is initially set in subPager.maxRemaining().
+         * Loads the next <code>RowIterator</code> to be returned.
          */
         private void fetchNextRowIterator()
         {
-            // we haven't started yet, fetch the first subpage (partition iterator with sub-page limit)
             if (partitionIterator == null)
             {
                 initialMaxRemaining = subPager.maxRemaining();
-                partitionIterator = fetchSubPage(subPageSize);
+                partitionIterator = fetchSubPage(pageSize);
             }
 
             while (!partitionIterator.hasNext())
             {
                 partitionIterator.close();
 
-                int remaining = getRemaining();
-                assert remaining >= 0;
-                if (remaining == 0 || subPager.isExhausted())
+                int counted = initialMaxRemaining - subPager.maxRemaining();
+
+                if (isDone(pageSize, counted) || subPager.isExhausted())
                 {
                     endOfData = true;
                     closed = true;
                     return;
                 }
 
-                subPager = updatePagerLimit(subPager, limits().withCountedLimit(remaining), lastPartitionKey, lastClustering);
-                partitionIterator = fetchSubPage(subPageSize);
+                subPager = updatePagerLimit(subPager, limits, lastPartitionKey, lastClustering);
+                partitionIterator = fetchSubPage(computeSubPageSize(pageSize, counted));
             }
 
             next = partitionIterator.next();
         }
 
-        protected int getRemaining()
+        protected boolean isDone(int pageSize, int counted)
         {
-            int counted = initialMaxRemaining - subPager.maxRemaining();
-            return groupsPageSize.withDecreasedRows(counted).rows();
+            return counted == pageSize;
         }
 
         /**
@@ -329,12 +279,24 @@ public final class AggregationQueryPager implements QueryPager
         }
 
         /**
+         * Computes the size of the next sub-page to retrieve.
+         *
+         * @param pageSize the top-level page size
+         * @param counted the number of result returned so far by the previous sub-pages
+         * @return the size of the next sub-page to retrieve
+         */
+        protected int computeSubPageSize(int pageSize, int counted)
+        {
+            return pageSize - counted;
+        }
+
+        /**
          * Fetchs the next sub-page.
          *
          * @param subPageSize the sub-page size in number of groups
          * @return the next sub-page
          */
-        private final PartitionIterator fetchSubPage(PageSize subPageSize)
+        private final PartitionIterator fetchSubPage(int subPageSize)
         {
             return consistency != null ? subPager.fetchPage(subPageSize, consistency, clientState, requestTime)
                                        : subPager.fetchPageInternal(subPageSize, executionController);
@@ -433,42 +395,11 @@ public final class AggregationQueryPager implements QueryPager
 
             public Row next()
             {
-                // we need to check this because this.rowIterator may exhaust if the sub-page is done and in such a case
-                // #hasNext switches this.rowIterator to the new one, which is obtained for the next page
-                if (!hasNext())
-                    throw new NoSuchElementException();
-
                 Row row = this.rowIterator.next();
                 lastClustering = row.clustering();
                 return row;
             }
         }
-
-        @Override
-        public String toString()
-        {
-            return new StringJoiner(", ", GroupByPartitionIterator.class.getSimpleName() + "[", "]")
-                   .add("groupsPageSize=" + groupsPageSize)
-                   .add("subPageSize=" + subPageSize)
-                   .add("endOfData=" + endOfData)
-                   .add("closed=" + closed)
-                   .add("limits=" + limits())
-                   .add("lastPartitionKey=" + lastPartitionKey)
-                   .add("lastClustering=" + ((lastClustering != null && subPager.executionController() != null) ? lastClustering.toString(subPager.executionController().metadata()): String.valueOf(lastClustering)))
-                   .add("initialMaxRemaining=" + initialMaxRemaining)
-                   .add("sub-pager=" + subPager.toString())
-                   .toString();
-        }
-    }
-
-    @Override
-    public String toString()
-    {
-        return new StringJoiner(", ", AggregationQueryPager.class.getSimpleName() + "[", "]")
-               .add("limits=" + limits())
-               .add("subPageSize=" + subPageSize)
-               .add("subPager=" + subPager)
-               .toString();
     }
 
     /**
@@ -478,19 +409,19 @@ public final class AggregationQueryPager implements QueryPager
      */
     public final class AggregationPartitionIterator extends GroupByPartitionIterator
     {
-        public AggregationPartitionIterator(PageSize subPageSize,
+        public AggregationPartitionIterator(int pageSize,
                                             ConsistencyLevel consistency,
                                             ClientState clientState,
                                             Dispatcher.RequestTime requestTime)
         {
-            super(PageSize.NONE, subPageSize, consistency, clientState, requestTime);
+            super(pageSize, consistency, clientState, requestTime);
         }
 
-        public AggregationPartitionIterator(PageSize subPageSize,
+        public AggregationPartitionIterator(int pageSize,
                                             ReadExecutionController executionController,
                                             Dispatcher.RequestTime requestTime)
         {
-            super(PageSize.NONE, subPageSize, executionController, requestTime);
+            super(pageSize, executionController, requestTime);
         }
 
         @Override
@@ -503,9 +434,15 @@ public final class AggregationQueryPager implements QueryPager
         }
 
         @Override
-        protected int getRemaining()
+        protected boolean isDone(int pageSize, int counted)
         {
-            return initialMaxRemaining;
+            return false;
+        }
+
+        @Override
+        protected int computeSubPageSize(int pageSize, int counted)
+        {
+            return pageSize;
         }
     }
 }

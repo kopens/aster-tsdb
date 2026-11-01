@@ -54,7 +54,6 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.ExpMovingAverage;
 import org.apache.cassandra.utils.MovingAverage;
-import org.apache.cassandra.utils.Throwables;
 
 import static org.apache.cassandra.db.RepairedDataInfo.NO_OP_REPAIRED_DATA_INFO;
 
@@ -441,14 +440,11 @@ public abstract class ReadResponse
                 return new InMemoryDataResponse(null, rdi.getDigest(), rdi.isConclusive());
             }
 
-            ImmutableBTreePartition partition = null;
+            ImmutableBTreePartition partition;
             ByteBuffer serialized = null;
             // Closing rowIter is our job, LimitedUnfilteredRowIterator deliberately never closes what it wraps.
-            // On the overflow path the serializer closes it too. The CloseOnceRowIterator wrapper makes closing
-            // harmless. The close is explicit rather than try-with-resources so that failure when closing the
-            // iterator does not mask the exception being propagated.
+            // The only exception is the overflow path, where serialize() takes it over, hence no try-with-resources.
             UnfilteredRowIterator rowIter = iter.next();
-            Throwable failure = null;
             try
             {
                 LimitedUnfilteredRowIterator limitedIter = new LimitedUnfilteredRowIterator(rowIter, inMemoryMaxRows, inMemoryMaxHeapSize);
@@ -459,25 +455,15 @@ public abstract class ReadResponse
                     // if a per-request limit is crossed then fall back to the ordinary serialized representation.
                     (limitedIter.overflowedByRowLimit() ? ReadResponseMetrics.inMemoryRowLimitHits
                                                         : ReadResponseMetrics.inMemorySizeLimitHits).inc();
-                    // make closing of the iterator idempotent to avoid double close
-                    rowIter = new CloseOnceRowIterator(rowIter);
                     serialized = serialize(command, partition, rowIter);
+                    rowIter = null;
                 }
             }
-            catch (Throwable t)
+            finally
             {
-                failure = t;
+                if (rowIter != null)
+                    rowIter.close();
             }
-
-            try
-            {
-                rowIter.close();
-            }
-            catch (Throwable t)
-            {
-                failure = Throwables.merge(failure, t);
-            }
-            Throwables.maybeFail(failure);
 
             // Capture digest after consuming and closing the iterator so any RepairedDataInfo transformations are reflected.
             if (serialized != null)
@@ -495,33 +481,6 @@ public abstract class ReadResponse
             UnfilteredRowIterator combined = UnfilteredRowIterators.concat(prefixIter, suffix);
             UnfilteredPartitionIterator partitionIter = new SingletonUnfilteredPartitionIterator(combined);
             return LocalDataResponse.build(partitionIter, command.columnFilter());
-        }
-
-        private static class CloseOnceRowIterator implements WrappingUnfilteredRowIterator
-        {
-            private final UnfilteredRowIterator wrapped;
-            private boolean closed;
-
-            CloseOnceRowIterator(UnfilteredRowIterator wrapped)
-            {
-                this.wrapped = wrapped;
-            }
-
-            @Override
-            public UnfilteredRowIterator wrapped()
-            {
-                return wrapped;
-            }
-
-            @Override
-            public void close()
-            {
-                if (closed)
-                    return;
-
-                closed = true;
-                wrapped.close();
-            }
         }
 
         private InMemoryDataResponse(ImmutableBTreePartition partition,

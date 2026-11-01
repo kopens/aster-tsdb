@@ -401,7 +401,7 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
             checkState(!dataWriterOpened, "Data writer has been already opened.");
 
             SequentialWriter dataWriter = DataComponent.buildWriter(descriptor,
-                                                                    getCompressionParams(),
+                                                                    getTableMetadataRef().getLocal(),
                                                                     getIOOptions().writerOptions,
                                                                     getMetadataCollector(),
                                                                     ensuringInBuildInternalContext(operationType),

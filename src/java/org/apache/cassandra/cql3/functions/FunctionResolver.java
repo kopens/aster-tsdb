@@ -170,11 +170,10 @@ public final class FunctionResolver
             {
                 if (receiverType != null && !containsMarkers(providedArgs))
                 {
-                    AbstractType<?> unwrappedReceiver = receiverType.unwrap();
                     for (Function toTest : compatibles)
                     {
                         List<AbstractType<?>> argTypes = toTest.argTypes();
-                        if (unwrappedReceiver.equals(argTypes.get(0)) && unwrappedReceiver.equals(argTypes.get(1)))
+                        if (receiverType.equals(argTypes.get(0)) && receiverType.equals(argTypes.get(1)))
                             return toTest;
                     }
                 }

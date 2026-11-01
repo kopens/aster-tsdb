@@ -869,9 +869,6 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         JVMStabilityInspector.replaceKiller(new InstanceKiller(Instance.this::shutdown));
 
         StorageService.instance.registerDaemon(CassandraDaemon.getInstanceForTesting());
-
-        awaitTurnToRegister(config.num());
-
         if (config.has(GOSSIP))
         {
             try
@@ -892,12 +889,8 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         {
             Stream<?> peers = cluster.stream().filter(IInstance::isValid);
             Schema.instance.saveSystemKeyspace();
-            int nodeId = config.num();
-
-            ClusterMetadataService cms = ClusterMetadataService.instance();
-            cms.processor().fetchLogAndWait();
+            ClusterMetadataService.instance().processor().fetchLogAndWait();
             NodeId self = Register.maybeRegister();
-
             RegistrationStatus.instance.onRegistration();
             if (!AccordService.isSetupOrStarting())
                 AccordService.localStartup(self);
@@ -947,28 +940,6 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         CassandraDaemon.getInstanceForTesting().completeSetup();
     }
 
-    /**
-     * Block until the next NodeId the cluster will allocate is our instance number to improve debuggability
-     */
-    private static void awaitTurnToRegister(int nodeId) throws InterruptedException
-    {
-        Logger logger = LoggerFactory.getLogger(Instance.class);
-        ClusterMetadataService cms = ClusterMetadataService.instance();
-        cms.processor().fetchLogAndWait();
-        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-        while (cms.metadata().myNodeId() == NodeId.UNREGISTERED && cms.metadata().directory.nextId < nodeId)
-        {
-            if (System.nanoTime() - deadlineNanos > 0)
-            {
-                logger.warn("Timed out waiting to register as NodeId {}; next id to allocate is {}. Registering anyway.",
-                            nodeId, cms.metadata().directory.nextId);
-                return;
-            }
-            Thread.sleep(10);
-            cms.processor().fetchLogAndWait();
-        }
-    }
-
     @Override
     public void postStartup()
     {
@@ -1011,8 +982,6 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
                     () -> StorageService.instance.setRpcReady(false),
                     () -> StorageService.instance.setIsShutdownUnsafeForTests(true),
                     CassandraDaemon.getInstanceForTesting()::destroyClientTransports);
-
-            error = parallelRun(error, executor, StorageService.instance::runPreShutdownHooks);
 
             if (config.has(GOSSIP) || config.has(NETWORK))
             {
@@ -1217,8 +1186,15 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
     }
 
     /**
-     * {@code PhysicalCoreExecutor} in jvector starts a singleton {@link java.util.concurrent.ForkJoinPool}
-     * without exposing a shutdown method. Use reflection to terminate it here to prevent classloader leak.
+     * jvector's {@code PhysicalCoreExecutor} is a static singleton wrapping a {@link java.util.concurrent.ForkJoinPool}
+     * and exposes no way to stop it, so - as one static per instance class loader - its workers outlive the instance
+     * and keep its class loader reachable. Stop it reflectively.
+     * <p>
+     * Unconditionally, and therefore possibly running its class initialiser: that is harmless, because a
+     * {@code ForkJoinPool} starts no threads until work is submitted to it, so initialising the singleton here cannot
+     * create the leak we are removing. Gating on "are there live ForkJoinPool workers" would be wrong in both
+     * directions - workers time out after ~60s idle, so a vector index built earlier in the test leaves nothing to
+     * see, and a worker can be created by a flush after we look.
      */
     private void shutdownJVectorPhysicalCoreExecutor(long timeout, TimeUnit unit) throws InterruptedException, TimeoutException
     {

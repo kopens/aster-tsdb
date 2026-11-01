@@ -50,7 +50,7 @@ import org.apache.cassandra.net.ParamType;
 import org.apache.cassandra.net.ResponseContext;
 import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.service.TimeoutStrategy;
-import org.apache.cassandra.service.accord.topology.AccordEndpointMap;
+import org.apache.cassandra.service.accord.topology.AccordEndpointMapper;
 
 import static accord.messages.MessageType.StandardMessage.ACCEPT_REQ;
 import static accord.messages.MessageType.StandardMessage.ACCEPT_RSP;
@@ -99,7 +99,6 @@ import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.expire;
 import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.slowPreaccept;
 import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.slowRead;
-import static org.apache.cassandra.service.accord.api.AccordWaitStrategies.slowStatusCheck;
 import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 
 public class AccordMessageSink implements MessageSink
@@ -195,17 +194,17 @@ public class AccordMessageSink implements MessageSink
     }
 
     private final MessageDelivery messaging;
-    private final AccordEndpointMap endpointMapper;
+    private final AccordEndpointMapper endpointMapper;
     private final RequestCallbacks callbacks;
 
-    public AccordMessageSink(MessageDelivery messaging, AccordEndpointMap endpointMapper, RequestCallbacks callbacks)
+    public AccordMessageSink(MessageDelivery messaging, AccordEndpointMapper endpointMapper, RequestCallbacks callbacks)
     {
         this.messaging = messaging;
         this.endpointMapper = endpointMapper;
         this.callbacks = callbacks;
     }
 
-    public AccordMessageSink(AccordEndpointMap endpointMapper, RequestCallbacks callbacks)
+    public AccordMessageSink(AccordEndpointMapper endpointMapper, RequestCallbacks callbacks)
     {
         this(MessagingService.instance(), endpointMapper, callbacks);
     }
@@ -240,6 +239,7 @@ public class AccordMessageSink implements MessageSink
         {
             case ACCORD_READ_REQ:
             case ACCORD_STABLE_THEN_READ_REQ:
+            case ACCORD_CHECK_STATUS_REQ:
             {
                 TimeoutStrategy slow = slowRead(txnId);
                 if (slow != null)
@@ -247,24 +247,7 @@ public class AccordMessageSink implements MessageSink
                 break;
             }
 
-            case ACCORD_CHECK_STATUS_REQ:
-            case ACCORD_AWAIT_REQ:
-            {
-                TimeoutStrategy slow = slowStatusCheck();
-                if (slow != null)
-                    slowAtNanos = nowNanos + slow.computeWait(attempt, NANOSECONDS);
-                break;
-            }
-
             case ACCORD_PRE_ACCEPT_REQ:
-            {
-                TimeoutStrategy slow = slowPreaccept(txnId);
-                if (slow != null)
-                    slowAtNanos = nowNanos + slow.computeWait(attempt, NANOSECONDS);
-                break;
-            }
-
-            case ACCORD_WAIT_UNTIL_APPLIED_REQ:
             {
                 TimeoutStrategy slow = slowPreaccept(txnId);
                 if (slow != null)

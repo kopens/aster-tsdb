@@ -295,7 +295,6 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
         this.mask = mask;
         this.columnConstraints = columnConstraints;
         this.columnConstraints.setColumnName(name);
-        this.columnConstraints.prepare(type);
         this.comment = comment;
         this.securityLabel = securityLabel;
     }

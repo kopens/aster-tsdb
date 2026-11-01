@@ -92,17 +92,6 @@ Deprecation
 
 New features
 ------------
-    - Query paging supports byte budgets for client fetch pages and internal replica reads (CASSANDRA-11745).
-      Set a byte fetch size through a supporting client using native protocol v5 or later; replica reads inherit
-      that budget. For aggregation queries without a client page size, configure aggregation_subpage_size in
-      cassandra.yaml (default 2MiB; 0B disables the limit). Explicit client row page sizes take precedence;
-      aggregation queries reject explicit client byte page sizes.
-      Configure page_size_in_bytes_warn_threshold and page_size_in_bytes_fail_threshold in cassandra.yaml
-      to warn or reject oversized client page requests. Both accept storage units and default to null (disabled).
-      Byte paging requires all cluster members to run Cassandra 6.0-alpha3 or later; until then, reads use row pages.
-      Byte budgets measure internal row data and can be exceeded to include the last row of a page.
-      See "Result paging" in doc/modules/cassandra/pages/developing/cql/dml.adoc for usage and upgrade details,
-      and doc/native_protocol_v5.spec for client capability discovery and request encoding.
     - JDK21 and Generational ZGC are now officially supported and generational ZGC is now the default Garbage Collector
     when using JDK21. See jvm21-server.options for more details and configuration parameters. We do not recommend using
     non-generational ZGC with Apache Cassandra.
@@ -172,18 +161,11 @@ New features
       cassandra.data_response_in_memory_max_rows_cl_one andcassandra.data_response_in_memory_max_size_cl_one.
       A limit is disabled by setting it to 0, and setting both limits of a tier to 0 disables the in-memory path for that tier.
       Note that the limits are not enforced in the middle of a range tombstone span, so a response may exceed them in that case.
-    - SAI Memtable-attached indexes now support sharding via WITH OPTIONS. See CQL documentation for details.
 Upgrading
 ---------
     - memtable_offheap_space: 0 is now rejected at startup when memtable_allocation_type is
     offheap_buffers or offheap_objects. Set a positive memtable_offheap_space, or an allocation
     type that does not allocate off-heap. See CASSANDRA-21019.
-    - entire_sstable_stream_digest_validation_enabled now defaults to true. Entire-SSTable (zero-copy)
-    streams are validated against the streamed Digest.crc32 before being added to the table, which
-    detects corruption introduced in transit or already present on the sending node's disk. This may
-    reject sstables that would previously have been silently accepted despite being corrupted. Set
-    entire_sstable_stream_digest_validation_enabled to false in cassandra.yaml to restore the old
-    behavior. (CASSANDRA-21694)
     [The following is a placeholder, to be revised asap]
     - trickle_fsync is by default set to "true" instead of "false" in cassandra.yaml (see CASSANDRA-21572)
     - Upgrading to 5.1 is currently only supported from 4.0, 4.1 or 5.0. Clusters running earlier releases must first

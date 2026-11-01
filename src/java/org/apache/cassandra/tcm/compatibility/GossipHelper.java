@@ -55,7 +55,8 @@ import org.apache.cassandra.schema.Keyspaces;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.SchemaKeyspace;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.service.accord.topology.AccordNodeInfos;
+import org.apache.cassandra.service.accord.topology.AccordFastPath;
+import org.apache.cassandra.service.accord.topology.AccordStaleReplicas;
 import org.apache.cassandra.service.consensus.migration.ConsensusMigrationState;
 import org.apache.cassandra.tcm.CMSMembership;
 import org.apache.cassandra.tcm.ClusterMetadata;
@@ -301,11 +302,12 @@ public class GossipHelper
                                    Directory.EMPTY,
                                    new TokenMap(DatabaseDescriptor.getPartitioner()),
                                    DataPlacements.empty(),
-                                   AccordNodeInfos.EMPTY,
+                                   AccordFastPath.EMPTY,
                                    LockedRanges.EMPTY,
                                    InProgressSequences.EMPTY,
                                    ConsensusMigrationState.EMPTY,
                                    Collections.emptyMap(),
+                                   AccordStaleReplicas.EMPTY,
                                    CMSMembership.EMPTY);
     }
 
@@ -423,11 +425,12 @@ public class GossipHelper
                                                                       directory,
                                                                       tokenMap,
                                                                       DataPlacements.empty(),
-                                                                      AccordNodeInfos.EMPTY,
+                                                                      AccordFastPath.EMPTY,
                                                                       LockedRanges.EMPTY,
                                                                       InProgressSequences.EMPTY,
                                                                       ConsensusMigrationState.EMPTY,
                                                                       extensions,
+                                                                      AccordStaleReplicas.EMPTY,
                                                                       CMSMembership.EMPTY);
         DataPlacements placements = new UniformRangePlacement().calculatePlacements(Epoch.UPGRADE_GOSSIP,
                                                                                     forPlacementCalculation,
@@ -438,11 +441,12 @@ public class GossipHelper
                                    directory,
                                    tokenMap,
                                    placements,
-                                   AccordNodeInfos.EMPTY,
+                                   AccordFastPath.EMPTY,
                                    LockedRanges.EMPTY,
                                    InProgressSequences.EMPTY,
                                    ConsensusMigrationState.EMPTY,
                                    extensions,
+                                   AccordStaleReplicas.EMPTY,
                                    CMSMembership.EMPTY);
     }
 

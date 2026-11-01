@@ -63,7 +63,7 @@ class IOTaskWrapper extends IOTask
     }
 
     @Override
-    void reportFailureMayThrow(Throwable fail, boolean isExclusive)
+    void reportFailureMayThrow(Throwable fail)
     {
         wrapped.fail(fail);
     }

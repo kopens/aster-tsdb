@@ -30,7 +30,6 @@ import java.util.Map;
 import java.util.NavigableSet;
 import java.util.Set;
 import java.util.function.BiFunction;
-import java.util.function.Predicate;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
@@ -562,9 +561,9 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         return operations.staticOperations();
     }
 
-    public boolean anyReferenceOperationMatches(Predicate<ReferenceOperation> test)
+    public Collection<ReferenceOperation> allReferenceOperations()
     {
-        return operations.anySubstitutionMatches(test);
+        return operations.allSubstitutions();
     }
 
     public Iterable<ColumnMetadata> getColumnsWithConditions()
@@ -663,7 +662,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                                                            metadata().partitioner.decorateKey(key),
                                                            filterBuilder.apply(filterArg)));
 
-        SinglePartitionReadCommand.Group group = SinglePartitionReadCommand.Group.create(commands, limits);
+        SinglePartitionReadCommand.Group group = SinglePartitionReadCommand.Group.create(commands, DataLimits.NONE);
 
         if (local)
         {
@@ -1113,34 +1112,34 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         for (int i = 0, size = writeFragments.size() ; i < size ; i++)
         {
             TxnWrite.Fragment writeFragment = writeFragments.get(i);
-            PartitionKey key = writeFragment.key;
+            DecoratedKey key = writeFragment.key.partitionKey();
             for (Row row : writeFragment.baseUpdate)
                 map.merge(new RowKey(key, row.clustering()), param, merge);
         }
     }
 
-    public <V> void forEachPartitionKey(List<TxnWrite.Fragment> writeFragments, Map<? super PartitionKey, V> map, V param, BiFunction<V, V, V> mergeFunction)
+    public <V> void forEachPartitionKey(List<TxnWrite.Fragment> writeFragments, Map<? super DecoratedKey, V> map, V param, BiFunction<V, V, V> mergeFunction)
     {
         for (int i = 0, size = writeFragments.size(); i < size; i++)
         {
             TxnWrite.Fragment writeFragment = writeFragments.get(i);
-            PartitionKey key = writeFragment.key;
+            DecoratedKey key = writeFragment.key.partitionKey();
             map.merge(key, param, mergeFunction);
         }
     }
 
     public static class RowKey
     {
-        public final PartitionKey key;
+        public final DecoratedKey key;
         public final Clustering<?> clustering;
 
-        public RowKey(PartitionKey key, Clustering<?> clustering)
+        public RowKey(DecoratedKey key, Clustering<?> clustering)
         {
             this.key = key;
             this.clustering = clustering;
         }
 
-        public PartitionKey partitionKey()
+        public DecoratedKey partitionKey()
         {
             return key;
         }
@@ -1285,7 +1284,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                                         clusterings,
                                         state,
                                         options,
-                                        DataLimits.cqlLimits(DataLimits.NO_LIMIT, 1),
+                                        DataLimits.cqlLimits(1),
                                         local,
                                         timestamp,
                                         nowInSeconds,

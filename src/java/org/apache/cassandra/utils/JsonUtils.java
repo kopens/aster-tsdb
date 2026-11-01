@@ -208,7 +208,6 @@ public final class JsonUtils
             try (FileOutputStreamPlus out = tempFile.newOutputStream(OVERWRITE))
             {
                 out.write(data);
-                out.flush();
                 // Force data to disk before rename to ensure durability.
                 // Without this, a crash after rename but before OS flushes to disk
                 // can leave the file with zero-filled or corrupted blocks.

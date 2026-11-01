@@ -28,7 +28,6 @@ import net.bytebuddy.implementation.bind.annotation.SuperCall;
 
 import org.junit.Test;
 
-import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.Feature;
@@ -92,7 +91,7 @@ public class IndexBuildFailsAfterStreamingTest extends TestBaseImpl
             }
         }
         public static AtomicBoolean enabled = new AtomicBoolean();
-        public static PageSize calculateIndexingPageSize(@SuperCall Callable<PageSize> zuper) throws Exception
+        public static int calculateIndexingPageSize(@SuperCall Callable<Integer> zuper) throws Exception
         {
             if (enabled.get())
                 throw new RuntimeException("On purpose fail 2i build");

@@ -97,17 +97,7 @@ public abstract class AbstractSortedCollector<T, C> extends AbstractList<T>
         return add;
     }
 
-    public C snapshot()
-    {
-        return build(false);
-    }
-
     public C build()
-    {
-        return build(true);
-    }
-
-    private C build(boolean clear)
     {
         C result;
         if (count == 0)
@@ -121,18 +111,14 @@ public abstract class AbstractSortedCollector<T, C> extends AbstractList<T>
         else if (count < BTREE_THRESHOLD)
         {
             result = copy((Object[])buffer, count);
-            if (clear)
-                cachedAny().forceDiscard((Object[])buffer, count);
+            cachedAny().forceDiscard((Object[])buffer, count);
         }
         else
         {
             result = copyBtree((Object[])buffer, count);
         }
-        if (clear)
-        {
-            buffer = null;
-            count = 0;
-        }
+        buffer = null;
+        count = 0;
         return result;
     }
 

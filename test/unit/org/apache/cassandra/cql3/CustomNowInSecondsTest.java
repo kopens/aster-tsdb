@@ -247,7 +247,7 @@ public class CustomNowInSecondsTest extends CQLTester
         return QueryOptions.create(ConsistencyLevel.ONE,
                                    Collections.emptyList(),
                                    false,
-                                   PageSize.NONE,
+                                   Integer.MAX_VALUE,
                                    null,
                                    null,
                                    ProtocolVersion.CURRENT,

@@ -31,9 +31,9 @@ class PlainChain<V> extends Plain
     final @Nullable ExclusiveExecutor exclusiveExecutor;
     volatile BiConsumer<? super V, Throwable> callback;
 
-    PlainChain(AccordExecutor executor, Callable<? extends V> call, BiConsumer<? super V, Throwable> callback, ExclusiveExecutor exclusiveExecutor, GlobalGroup global, ExclusiveGroup group)
+    PlainChain(AccordExecutor executor, Callable<? extends V> call, BiConsumer<? super V, Throwable> callback, ExclusiveExecutor exclusiveExecutor, ExclusiveGroup group)
     {
-        super(executor, global, group);
+        super(executor, group);
         this.call = call;
         this.callback = callback;
         this.exclusiveExecutor = exclusiveExecutor;
@@ -79,7 +79,7 @@ class PlainChain<V> extends Plain
     }
 
     @Override
-    void reportFailureMayThrow(Throwable fail, boolean isExclusive)
+    void reportFailureMayThrow(Throwable fail)
     {
         callback.accept(null, fail);
     }

@@ -62,8 +62,7 @@ import accord.impl.CommandChange;
 import accord.impl.progresslog.DefaultProgressLog;
 import accord.impl.progresslog.DefaultProgressLog.ModeFlag;
 import accord.impl.progresslog.TxnStateKind;
-import accord.local.BootstrapReason;
-import accord.local.Catchup;
+import accord.local.CatchupHard;
 import accord.local.Cleanup;
 import accord.local.Command;
 import accord.local.CommandStore;
@@ -167,8 +166,6 @@ import org.apache.cassandra.utils.concurrent.Future;
 import static accord.coordinate.Infer.InvalidIf.NotKnownToBeInvalid;
 import static accord.impl.CommandChange.Field.ACCEPTED;
 import static accord.impl.CommandChange.Field.PROMISED;
-import static accord.local.BootstrapReason.LOG_CORRUPTED;
-import static accord.local.BootstrapReason.LOG_INCOMPLETE;
 import static accord.local.RedundantStatus.Property.GC_BEFORE;
 import static accord.local.RedundantStatus.Property.LOCALLY_APPLIED;
 import static accord.local.RedundantStatus.Property.LOCALLY_DURABLE_TO_COMMAND_STORE;
@@ -186,7 +183,6 @@ import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.apache.cassandra.cql3.statements.RequestValidations.invalidRequest;
 import static org.apache.cassandra.db.virtual.AbstractLazyVirtualTable.OnTimeout.BEST_EFFORT;
 import static org.apache.cassandra.db.virtual.AbstractLazyVirtualTable.OnTimeout.FAIL;
-import static org.apache.cassandra.db.virtual.AccordDebugKeyspace.CommandStoreOpsTable.CommandStoreOp.REBOOTSTRAP_CORRUPTED;
 import static org.apache.cassandra.db.virtual.VirtualTable.Sorted.ASC;
 import static org.apache.cassandra.db.virtual.VirtualTable.Sorted.SORTED;
 import static org.apache.cassandra.db.virtual.VirtualTable.Sorted.UNSORTED;
@@ -1796,7 +1792,7 @@ public class AccordDebugKeyspace extends VirtualKeyspace
                     break;
                 case TRY_EXECUTE:
                     run(txnId, commandStoreId, safeStore -> {
-                        SafeCommand safeCommand = safeStore.unsafeTryGet(txnId);
+                        SafeCommand safeCommand = safeStore.unsafeGet(txnId);
                         Command command = safeCommand.current();
                         if (command.saveStatus() == SaveStatus.Applying)
                             return Commands.applyChain(safeStore, command.asExecuted());
@@ -1806,14 +1802,14 @@ public class AccordDebugKeyspace extends VirtualKeyspace
                     break;
                 case FORCE_UPDATE:
                     run(txnId, commandStoreId, safeStore -> {
-                        SafeCommand safeCommand = safeStore.unsafeTryGet(txnId);
+                        SafeCommand safeCommand = safeStore.unsafeGet(txnId);
                         safeCommand.update(safeStore, safeCommand.current(), true);
                         return AsyncChains.success(null);
                     });
                     break;
                 case FORCE_APPLY:
                     run(txnId, commandStoreId, safeStore -> {
-                        SafeCommand safeCommand = safeStore.unsafeTryGet(txnId);
+                        SafeCommand safeCommand = safeStore.unsafeGet(txnId);
                         Command command = safeCommand.current();
                         // TODO (expected): we can call applyChain with TruncatedApplyWithOutcome in theory, but the type signature prevents it
                         if (command.saveStatus().compareTo(SaveStatus.PreApplied) < 0 || command.saveStatus().compareTo(SaveStatus.TruncatedApplyWithOutcome) >= 0)
@@ -1844,7 +1840,7 @@ public class AccordDebugKeyspace extends VirtualKeyspace
         private void runWithRoute(TxnId txnId, int commandStoreId, Function<Command, BiConsumer<Route<?>, AsyncResult.Settable<Void>>> apply)
         {
             run(txnId, commandStoreId, safeStore -> {
-                SafeCommand safeCommand = safeStore.unsafeTryGet(txnId);
+                SafeCommand safeCommand = safeStore.unsafeGet(txnId);
                 Command command = safeCommand.current();
                 if (command == null)
                     throw new InvalidRequestException(txnId + " not known");
@@ -1907,7 +1903,7 @@ public class AccordDebugKeyspace extends VirtualKeyspace
         private void cleanup(TxnId txnId, int commandStoreId, Cleanup cleanup)
         {
             run(txnId, commandStoreId, safeStore -> {
-                SafeCommand safeCommand = safeStore.unsafeTryGet(txnId);
+                SafeCommand safeCommand = safeStore.unsafeGet(txnId);
                 Command command = safeCommand.current();
                 Command updated = Commands.purge(safeStore, command, command.participants(), cleanup, true);
                 safeCommand.update(safeStore, updated);
@@ -1992,10 +1988,8 @@ public class AccordDebugKeyspace extends VirtualKeyspace
             UNSET_PROGRESS_LOG_MODE("Unset the specified progress log mode."),
             TRY_EXECUTE_LISTENING("Try to execute all of the transactions (and their dependencies) that have registered listeners on other transactions."),
             REPLAY("Run journal replay for all transactions"),
-            // TODO (expected): specify ranges
-            REBOOTSTRAP_CORRUPTED("Rebootstrap the command store. This invalidates the local journal, synchronises its data via data repair and rejoins the distributed state machine."),
-            REBOOTSTRAP_INCOMPLETE("Rebootstrap the command store. This invalidates the local journal, synchronises its data via data repair and rejoins the distributed state machine."),
-            REBOOTSTRAP_IF_BEHIND("Hard catchup the command store. This invalidates the local journal for any ranges not up to date with some quorum, synchronises its data via data repair and rejoins the distributed state machine."),
+            REBOOTSTRAP("Rebootstrap the command store. This invalidates the local journal, synchronises its data via data repair and rejoins the distributed state machine."),
+            HARD_CATCHUP("Hard catchup the command store. This invalidates the local journal for any ranges not up to date with some quorum, synchronises its data via data repair and rejoins the distributed state machine."),
             ;
 
             final String description;
@@ -2088,15 +2082,13 @@ public class AccordDebugKeyspace extends VirtualKeyspace
                     };
                     break;
                 }
-                case REBOOTSTRAP_CORRUPTED:
-                case REBOOTSTRAP_INCOMPLETE:
-                    BootstrapReason reason = op == REBOOTSTRAP_CORRUPTED ? LOG_CORRUPTED : LOG_INCOMPLETE;
-                    allFunction = () -> ((AccordService) AccordService.instance()).rebootstrap(reason, true);
-                    function = commandStore -> commandStore.rebootstrap(node, reason).coordinateAndReads();
+                case REBOOTSTRAP:
+                    allFunction = () -> node.commandStores().rebootstrap(node);
+                    function = commandStore -> commandStore.rebootstrap(node);
                     break;
-                case REBOOTSTRAP_IF_BEHIND:
-                    allFunction = () -> Catchup.rebootstrapIfBehind(node, Arrays.asList(node.commandStores().all())).beginAsResult();
-                    function = commandStore -> Catchup.rebootstrapIfBehind(node, Collections.singletonList(commandStore)).beginAsResult();
+                case HARD_CATCHUP:
+                    allFunction = () -> CatchupHard.catchup(node, Arrays.asList(node.commandStores().all())).beginAsResult();
+                    function = commandStore -> CatchupHard.catchup(node, Collections.singletonList(commandStore)).beginAsResult();
                     break;
             }
 
@@ -2492,6 +2484,7 @@ public class AccordDebugKeyspace extends VirtualKeyspace
         {
             throw new InvalidRequestException("Unknown bucket_mode '" + value + '\'');
         }
+
     }
 
     private static int checkNonNegative(Object value, String field, int ifNull)

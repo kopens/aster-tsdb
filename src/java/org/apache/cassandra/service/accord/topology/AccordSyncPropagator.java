@@ -59,7 +59,6 @@ import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.service.accord.AccordService;
 import org.apache.cassandra.service.accord.serializers.KeySerializers;
 import org.apache.cassandra.service.accord.serializers.TopologySerializers;
-import org.apache.cassandra.service.accord.topology.AccordEndpointMap.NodeStatus;
 import org.apache.cassandra.utils.CollectionSerializers;
 import org.apache.cassandra.utils.NoSpamLogger;
 
@@ -193,13 +192,13 @@ public class AccordSyncPropagator implements TopologyListener
 
     private final PendingNodes pending = new PendingNodes();
     private final Node.Id self;
-    private final AccordEndpointMap endpointMapper;
+    private final AccordEndpointMapper endpointMapper;
     private final MessageDelivery messagingService;
     private final ScheduledExecutorPlus scheduler;
     private TestListener listener;
     private final ConcurrentHashMap<RetryKey, Notification> retryingNotifications = new ConcurrentHashMap<>();
 
-    public AccordSyncPropagator(Node.Id self, AccordEndpointMap endpointMapper,
+    public AccordSyncPropagator(Node.Id self, AccordEndpointMapper endpointMapper,
                                 MessageDelivery messagingService, ScheduledExecutorPlus scheduler)
     {
         this.self = self;
@@ -333,18 +332,18 @@ public class AccordSyncPropagator implements TopologyListener
             return false;
 
         // was the endpoint removed from membership?
-        NodeStatus nodeStatus = endpointMapper.nodeStatus(to);
+        AccordEndpointMapper.NodeStatus nodeStatus = endpointMapper.nodeStatus(to);
         switch (nodeStatus)
         {
             default: throw new UnhandledEnum(nodeStatus);
-            case UNREADABLE:
-            case UNAVAILABLE:
-                noSpamLogger.warn("Node{} is not alive, unable to notify of {}", to, notification);
-                scheduleRetry(to, notification);
-                return false;
-            case REMOVED:
-                // fall through to UNKNOWN, as the node has been removed from the cluster in the latest epoch: nobody is
-                // going to answer, scheduleRetry has no attempt limit, and the epoch's sync must complete without it
+            case UNHEALTHY:
+                if (!endpointMapper.isRemoved(to))
+                {
+                    noSpamLogger.warn("Node{} is not alive, unable to notify of {}", to, notification);
+                    scheduleRetry(to, notification);
+                    return false;
+                }
+                // fall through to UNKNOWN, as we have been removed from the cluster in the latest epoch
             case UNKNOWN:
                 // endpoint is not a member of the latest epoch
                 pending.ack(to, notification);

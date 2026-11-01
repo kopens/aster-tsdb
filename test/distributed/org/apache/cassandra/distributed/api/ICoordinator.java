@@ -76,16 +76,6 @@ public interface ICoordinator
 
     QueryResult executeWithPagingWithResult(String query, ConsistencyLevel consistencyLevel, int pageSize, Object... boundValues);
 
-    default Iterator<Object[]> executeWithPagingInBytes(String query, ConsistencyLevel consistencyLevel, int pageSizeInBytes, Object... boundValues)
-    {
-        return executeWithPagingInBytesWithResult(query, consistencyLevel, pageSizeInBytes, boundValues).map(Row::toObjectArray);
-    }
-
-    default QueryResult executeWithPagingInBytesWithResult(String query, ConsistencyLevel consistencyLevel, int pageSizeInBytes, Object... boundValues)
-    {
-        throw new UnsupportedOperationException();
-    }
-
     default Future<Object[][]> asyncExecuteWithTracing(UUID sessionId, String query, ConsistencyLevel consistencyLevel, Object... boundValues)
     {
         return FutureUtils.map(asyncExecuteWithTracingWithResult(sessionId, query, consistencyLevel, boundValues), r -> r.toObjectArrays());

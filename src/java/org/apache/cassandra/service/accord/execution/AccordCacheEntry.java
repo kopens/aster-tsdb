@@ -163,10 +163,8 @@ public class AccordCacheEntry<K, V, S extends SafeState<V> & SaferState<K, V, S>
     static final int GENERATION_SHIFT = 9;
     static final int GENERATION_MASK = 0x7fff;
     static final int AGE_SHIFT = 24;
-    static final int AGE_MASK = 0x3f;
-
-    static final int INCONSISTENT = 0x40000000;
-    static final int UNSAFE_TO_READ = 0x80000000;
+    static final int AGE_MASK = 0x7f;
+    static final int INCONSISTENT = 0x80000000;
 
     static final long EMPTY_SIZE = ObjectSizes.measure(new AccordCacheEntry<>(null, null));
 
@@ -800,30 +798,20 @@ public class AccordCacheEntry<K, V, S extends SafeState<V> & SaferState<K, V, S>
         return (status & INCONSISTENT) != 0;
     }
 
-    public final boolean isUnsafeToRead()
-    {
-        return (status & UNSAFE_TO_READ) != 0;
-    }
-
     final void setInconsistent()
     {
         status |= INCONSISTENT;
     }
 
-    final void setUnsafeToRead()
+    final void unsetInconsistent()
     {
-        status |= INCONSISTENT | UNSAFE_TO_READ;
-    }
-
-    final void setConsistentAndSafeToRead()
-    {
-        status &= ~(INCONSISTENT | UNSAFE_TO_READ);
+        status &= ~INCONSISTENT;
     }
 
     // a partially failed ATOMIC execution must retain its queue position for any retry that may be scheduled
     final void reclaimFifoHead(SafeTask<?> task)
     {
-        Invariants.require(isUnsafeToRead(), "%s may only retain a claim on an entry it has marked unsafe to read", task);
+        Invariants.require(isInconsistent(), "%s may only retain a claim on an entry it has marked inconsistent", task);
         Invariants.require(isLockedBy(task));
         Invariants.require(!isLockedHoldingQueue());
         Invariants.require(isLoaded());
@@ -838,7 +826,7 @@ public class AccordCacheEntry<K, V, S extends SafeState<V> & SaferState<K, V, S>
                 if (!next.isDone())
                 {
                     next.onChangeRunnableStatus(this, NOT_RUNNABLE);
-                    next.onUnsafeToReadKeyExclusive(this);
+                    next.onInconsistentKeyExclusive(this);
                 }
             }
             else

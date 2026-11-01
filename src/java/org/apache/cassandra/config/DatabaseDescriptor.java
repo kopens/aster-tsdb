@@ -85,7 +85,6 @@ import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.config.Config.PaxosOnLinearizabilityViolation;
 import org.apache.cassandra.config.Config.PaxosStatePurging;
 import org.apache.cassandra.config.DurationSpec.IntMillisecondsBound;
-import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.commitlog.AbstractCommitLogSegmentManager;
@@ -1270,11 +1269,6 @@ public class DatabaseDescriptor
         {
             throw new ConfigurationException(ex.getMessage());
         }
-
-        if (conf.aggregation_subpage_size.toBytes() < 0)
-            throw new ConfigurationException("aggregation_subpage_size_in_kb must be >= 0");
-
-        setAggregationSubPageSize(getAggregationSubPageSize());
     }
 
     @VisibleForTesting
@@ -2966,6 +2960,11 @@ public class DatabaseDescriptor
         conf.concurrent_materialized_view_writes = concurrent_materialized_view_writes;
     }
 
+    public static int getAccordConcurrentMigrationOps()
+    {
+        return conf.accord.migration_concurrency.or(2 * FBUtilities.getAvailableProcessors());
+    }
+
     public static int getAccordConcurrentOps()
     {
         return conf.accord.queue_thread_count.or(2 * FBUtilities.getAvailableProcessors());
@@ -2978,11 +2977,6 @@ public class DatabaseDescriptor
             throw new IllegalArgumentException("Concurrent accord operations must be non-negative");
         }
         conf.accord.queue_thread_count = new OptionaldPositiveInt(concurrent_operations);
-    }
-
-    public static int getAccordConcurrentMigrationOps()
-    {
-        return conf.accord.migration_concurrency.or(2 * FBUtilities.getAvailableProcessors());
     }
 
     public static void setConcurrentAccordMigrationOps(int concurrent_operations)
@@ -4689,16 +4683,6 @@ public class DatabaseDescriptor
     public static boolean setStreamEntireSSTables(boolean value)
     {
         return conf.stream_entire_sstables = value;
-    }
-
-    public static boolean getEntireSSTableStreamDigestValidationEnabled()
-    {
-        return conf.entire_sstable_stream_digest_validation_enabled;
-    }
-
-    public static void setEntireSSTableStreamDigestValidationEnabled(boolean value)
-    {
-        conf.entire_sstable_stream_digest_validation_enabled = value;
     }
 
     public static DurationSpec.LongMillisecondsBound getStreamTransferTaskTimeout()
@@ -6524,20 +6508,5 @@ public class DatabaseDescriptor
     public static void setGossipQuarantineDisabled(boolean disabled)
     {
         conf.gossip_quarantine_disabled = disabled;
-    }
-
-    public static PageSize getAggregationSubPageSize()
-    {
-        if (conf.aggregation_subpage_size.toBytes() == 0)
-            return PageSize.NONE;
-
-        return PageSize.inBytes(conf.aggregation_subpage_size.toBytes());
-    }
-
-    public static void setAggregationSubPageSize(PageSize pageSize)
-    {
-        Preconditions.checkArgument(!pageSize.isDefined() || pageSize.getUnit() == PageSize.PageUnit.BYTES);
-        Preconditions.checkArgument(pageSize.bytes() >= 0);
-        conf.aggregation_subpage_size = new DataStorageSpec.IntBytesBound(pageSize.isDefined() ? pageSize.bytes() : 0);
     }
 }

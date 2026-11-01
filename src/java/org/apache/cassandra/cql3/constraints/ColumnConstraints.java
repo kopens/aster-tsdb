@@ -63,13 +63,6 @@ public class ColumnConstraints extends ColumnConstraint<ColumnConstraints>
     }
 
     @Override
-    public void prepare(AbstractType<?> columnType)
-    {
-        for (ColumnConstraint<?> constraint : constraints)
-            constraint.prepare(columnType);
-    }
-
-    @Override
     public String name()
     {
         return getConstraintType().name();

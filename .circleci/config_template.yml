@@ -1677,19 +1677,11 @@ build_common: &build_common
 
 jobs:
   j11_build:
-    executor:
-      name: java11-executor
-      exec_resource_class: large
-    environment:
-      ANT_OPTS: "-Xmx3g"
+    executor: java11-executor
     <<: *build_common
 
   j17_build:
-    executor:
-      name: java17-executor
-      exec_resource_class: large
-    environment:
-      ANT_OPTS: "-Xmx3g"
+    executor: java17-executor
     <<: *build_common
 
   j11_dtest_jars_build:

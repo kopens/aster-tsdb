@@ -112,7 +112,7 @@ public class PaxosBackedProcessor extends AbstractLocalProcessor
         for (Replica peer : replicas)
             requests.add(new FetchLogRequest(peer, MessagingService.instance(), metadata.epoch));
 
-        while (!retryPolicy.hasExpired() && !log.isClosed())
+        while (!retryPolicy.hasExpired())
         {
             Iterator<FetchLogRequest> iter = requests.iterator();
             boolean hasRequestToSelf = false;
