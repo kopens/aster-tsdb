@@ -89,11 +89,13 @@ Every other gate starts **fresh** clusters. On 2026-11-01 `v6.0.0-r2` passed all
 not start on node 41: upstream `4da20e07e8` had changed the TCM `ClusterMetadata` layout without a version
 bump, and only metadata an earlier build wrote shows that. The script boots the candidate on a copy of an
 existing node's metadata with that node's IP and `cassandra.yaml` (isolated docker network, nothing
-published), takes `nodetool cms snapshot`, and restarts -- so it proves both "reads the old layout" and
-"reads what it writes". It must FAIL for `aster-tsdb:local-2cdd586a72` (r2) and PASS for the candidate.
+published), takes `nodetool cms snapshot`, and restarts -- so it proves both "reads what the earlier build
+wrote" and "reads what it writes". Use a **current** copy of 41's metadata: from r6 on, metadata written
+before r4 no longer boots (r6 removed r4's old-layout reader), so a pre-r4 copy FAILs by design.
 Note that the data volume on 41 is `/data1/docker-data/volumes/pp-data/_data`, not the host's
 `/data1/pp-data` (a stale directory). The golden fixtures under `test/data/tcm/` cover the same class of
-break in CI (`LegacyAccordLayoutSnapshotTest`); add one per release that writes metadata in a new layout.
+break in CI (`ClusterMetadataSnapshotLayoutTest`: r4's layout must read exactly, r3's must not); add one
+per release that writes metadata in a new layout.
 
 ## 3. The performance gate — `.build/sh/ci-perf`
 

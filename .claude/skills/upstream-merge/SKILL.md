@@ -132,7 +132,7 @@ git rev-parse HEAD:modules/accord :modules/accord upstream/cassandra-6.0:modules
 The fork does not carry its own Accord changes, so take upstream's pointer when they differ, then
 `git submodule update --init --recursive`.
 
-**The 2026-11 merge and the TCM format break — already handled in r4.** The merge of upstream up to
+**The 2026-11 merge and the TCM format break — handled in r4, reader removed in r6.** The merge of upstream up to
 `c37fca619a` (shipped first in `v6.0.0-r2`) could not start on an existing cluster: upstream `4da20e07e8`
 (Accord rebootstrap) changed TCM `ClusterMetadata` serialization (AccordFastPath → AccordNodeInfos,
 AccordStaleReplicas dropped) without bumping the TCM serialization `Version`
@@ -141,9 +141,10 @@ AccordStaleReplicas dropped) without bumping the TCM serialization `Version`
 `service/accord/topology/LegacyAccordLayout.java`: `MetadataSnapshots.fromBytes` falls back to the old layout
 when the current one does not consume a snapshot exactly, and `CassandraDaemon` (next to
 `TieredStorageService.setup()`) calls `LegacyAccordLayout.rewriteSnapshotIfLegacyWasRead()` so the node
-rewrites it in the current layout. So the next merge is a plain merge — **no revert-the-revert any more**.
-Keep both hunks (`MetadataSnapshots.fromBytes`, the `ClusterMetadata.deserializeLegacyAccordLayout` branch) when
-they conflict, until the code is deleted (planned for the release after node 41 has booted r4).
+rewrites it in the current layout. Node 41 (the only pre-r4 node) booted r4 and rewrote its snapshot, so
+**r6 deleted all of it**: `MetadataSnapshots.java` and `ClusterMetadata.java` are upstream's again, and the
+next merge is a plain merge with no hunks to keep there. `ClusterMetadataSnapshotLayoutTest` pins the
+layout with r4's snapshot as a golden fixture — if a merge breaks it, upstream changed the layout again.
 **Whatever the merge, boot the candidate on old metadata before it ships:** `docker/upgrade-boot-test.sh`
 with a copy of node 41's system metadata (see the `docker-integration-test` skill §2.5). A fresh-cluster gate
 does not catch this class of break; if upstream changes a format without a `Version` bump again, add a
