@@ -89,6 +89,29 @@
   프로파일상 실병목으로 확인되면 착수. 주의: 새 SSTable 컴포넌트는 io/sstable 포맷 수술 +
   업스트림 머지 마찰.
 
+## r5 후보 — 다른 포크에서 가져올 것 (datastax/cassandra, 2026-11-02 검토)
+
+[datastax/cassandra](https://github.com/datastax/cassandra) `main`은 **Cassandra 5.0 기반**이고
+상당수가 Astra/CNDB 전용(테넌트 센서, 자체 메시징 버전, 벡터·BM25)이라 통째 머지는 하지 않는다.
+아래만 골라 가져온다. 1차 판단은 커밋 제목 기준이며, 각 항목은 착수 전에 6.0 코드에 같은 문제가
+있는지부터 확인한다(업스트림이 이미 고친 것은 제외). 라이선스는 Apache 2.0.
+
+1. **의존성 CVE 범프** — 첫 순위. 우리 빌드가 DataStax의 CVE 범프 이전 버전을 쓴다:
+   snappy-java 1.1.10.4 → 1.1.10.7(CVE-2026-108104/108106), guava 32.0.1 → 33.7.2(CVE-2026-102554),
+   netty 4.1.130 → 4.1.139, jackson 2.19.2 → 2.21.8, logback 1.5.18 → 1.5.35, lz4-java 1.11.2 → 1.11.4.
+   업스트림 6.0이 고정한 버전이므로 범프마다 전체 게이트를 돌리고, 폐쇄망 반입을 위해 Nexus 미러에
+   해당 버전이 있는지 확인한다.
+2. **SSTable이 많을 때의 성능** — TSCS는 창마다 SSTable을 만들므로 직접 해당: HCD-468
+   (`IntervalTree` 빌드 처리량, add/replace 지원), CNDB-15064(압축 청크 오프셋 블록 캐시 — 오프힙 절감).
+3. **6.0에도 있을 법한 버그 수정**: `WaitQueue.Signal.awaitUninterruptibly` 인터럽트 시 무한 대기,
+   HCD-585(static 컬럼 일부 조회 시 `Columns$Serializer.encodeBitmap` 예외), HCD-534(MemtablePool
+   "Negative released" 크래시), CNDB-19222(청크 캐시 누수·계정 오류).
+4. **설계 참고만**: CNDB-18245 "UCS 시간 기반 레벨" — TSCS와 같은 발상. 코드를 가져오지 않고
+   TSCS 델리게이트 재평가(위 미결) 때 비교 자료로 쓴다.
+
+함께 r5에서: r4의 TCM 스냅샷 호환 코드(`LegacyAccordLayout`) 삭제 — 노드 41이 r4로 한 번 기동해
+메타데이터가 새 형식으로 고쳐 쓰인 것을 확인한 뒤.
+
 ## 유지되는 게이트
 
 - 쓰기 ≥152k rows/s 유지(현행 156.4k), 재인코더 ≥50k rows/s(실측 684k — 13.7×),

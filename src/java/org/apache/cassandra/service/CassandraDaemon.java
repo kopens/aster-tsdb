@@ -444,6 +444,8 @@ public class CassandraDaemon
             JVMStabilityInspector.inspectThrowable(t);
             logger.warn("Unable to start tiered storage service", t);
         }
+        // Aster fork: a metadata snapshot read in the pre-4da20e07e8 layout at startup is rewritten in the current one.
+        org.apache.cassandra.service.accord.topology.LegacyAccordLayout.rewriteSnapshotIfLegacyWasRead();
 
         // schedule periodic background compaction task submission. this is simply a backstop against compactions stalling
         // due to scheduling errors or race conditions
@@ -653,13 +655,15 @@ public class CassandraDaemon
     {
         VirtualKeyspaceRegistry.instance.register(VirtualSchemaKeyspace.instance);
         VirtualKeyspaceRegistry.instance.register(SystemViewsKeyspace.instance);
-        VirtualKeyspaceRegistry.instance.register(new VirtualKeyspace(VIRTUAL_METRICS, createMetricsKeyspaceTables()));
 
         if (DatabaseDescriptor.getAccord().enable_virtual_debug_only_keyspace)
         {
             VirtualKeyspaceRegistry.instance.register(AccordDebugKeyspace.instance);
             VirtualKeyspaceRegistry.instance.register(AccordDebugRemoteKeyspace.instance);
         }
+
+        if (CassandraRelevantProperties.VIRTUAL_KEYSPACE_SYSTEM_METRICS_ENABLED.getBoolean())
+            VirtualKeyspaceRegistry.instance.register(new VirtualKeyspace(VIRTUAL_METRICS, createMetricsKeyspaceTables()));
 
         // Flush log messages to system_views.system_logs virtual table as there were messages already logged
         // before that virtual table was instantiated.

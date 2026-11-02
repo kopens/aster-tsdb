@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.NavigableSet;
 import java.util.Set;
 import java.util.function.BiFunction;
+import java.util.function.Predicate;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
@@ -561,9 +562,9 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         return operations.staticOperations();
     }
 
-    public Collection<ReferenceOperation> allReferenceOperations()
+    public boolean anyReferenceOperationMatches(Predicate<ReferenceOperation> test)
     {
-        return operations.allSubstitutions();
+        return operations.anySubstitutionMatches(test);
     }
 
     public Iterable<ColumnMetadata> getColumnsWithConditions()
@@ -662,7 +663,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                                                            metadata().partitioner.decorateKey(key),
                                                            filterBuilder.apply(filterArg)));
 
-        SinglePartitionReadCommand.Group group = SinglePartitionReadCommand.Group.create(commands, DataLimits.NONE);
+        SinglePartitionReadCommand.Group group = SinglePartitionReadCommand.Group.create(commands, limits);
 
         if (local)
         {
@@ -713,6 +714,9 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         if (Guardrails.writeConsistencyLevels.enabled(queryState.getClientState())) // to avoid EnumSet allocation
             Guardrails.writeConsistencyLevels.guard(EnumSet.of(options.getConsistency(), options.getSerialConsistency()),
                                                     queryState.getClientState());
+
+        // Tiered storage: a sub-quorum write can be missed by the re-encoder's quorum read and range-deleted.
+        org.apache.cassandra.db.timeseries.tiering.TieredWrites.guardWriteConsistency(metadata(), options.getConsistency());
 
         return hasConditions()
              ? executeWithCondition(queryState, options, requestTime)
@@ -1112,34 +1116,34 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         for (int i = 0, size = writeFragments.size() ; i < size ; i++)
         {
             TxnWrite.Fragment writeFragment = writeFragments.get(i);
-            DecoratedKey key = writeFragment.key.partitionKey();
+            PartitionKey key = writeFragment.key;
             for (Row row : writeFragment.baseUpdate)
                 map.merge(new RowKey(key, row.clustering()), param, merge);
         }
     }
 
-    public <V> void forEachPartitionKey(List<TxnWrite.Fragment> writeFragments, Map<? super DecoratedKey, V> map, V param, BiFunction<V, V, V> mergeFunction)
+    public <V> void forEachPartitionKey(List<TxnWrite.Fragment> writeFragments, Map<? super PartitionKey, V> map, V param, BiFunction<V, V, V> mergeFunction)
     {
         for (int i = 0, size = writeFragments.size(); i < size; i++)
         {
             TxnWrite.Fragment writeFragment = writeFragments.get(i);
-            DecoratedKey key = writeFragment.key.partitionKey();
+            PartitionKey key = writeFragment.key;
             map.merge(key, param, mergeFunction);
         }
     }
 
     public static class RowKey
     {
-        public final DecoratedKey key;
+        public final PartitionKey key;
         public final Clustering<?> clustering;
 
-        public RowKey(DecoratedKey key, Clustering<?> clustering)
+        public RowKey(PartitionKey key, Clustering<?> clustering)
         {
             this.key = key;
             this.clustering = clustering;
         }
 
-        public DecoratedKey partitionKey()
+        public PartitionKey partitionKey()
         {
             return key;
         }
@@ -1284,7 +1288,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                                         clusterings,
                                         state,
                                         options,
-                                        DataLimits.cqlLimits(1),
+                                        DataLimits.cqlLimits(DataLimits.NO_LIMIT, 1),
                                         local,
                                         timestamp,
                                         nowInSeconds,

@@ -49,6 +49,10 @@ to undo than an uncommitted one.
 `README.ko.md` is the Korean one, and a change to either belongs in both). Upstream keeps editing
 `README.asc`, producing a modify/delete conflict. Delete it again: `git rm README.asc`.
 
+**`.github/workflows/code-check.yaml`, `build-scripts.yaml`** — the fork runs the GitHub mirror's checks on
+JDK 21 only (one `ant-check-jdk21` job); upstream's `ant-check-jdk11`/`-jdk17` jobs fail on fork code that
+uses post-11 APIs. Keep the fork's side; take upstream's other edits to these files.
+
 **`build.xml`** — upstream resets `base.version` to an alpha/beta (e.g. `6.0-alpha3`). The fork's
 versioning rule requires `6.0.0`, because the build must produce `build/apache-cassandra-6.0.0.jar`
 and the release pipeline renames from that exact path. Keep `<property name="base.version" value="6.0.0"/>`.
@@ -122,24 +126,29 @@ git rev-parse HEAD:modules/accord :modules/accord upstream/cassandra-6.0:modules
 The fork does not carry its own Accord changes, so take upstream's pointer when they differ, then
 `git submodule update --init --recursive`.
 
-**The 2026-11 merge was backed out of `main` — revert the revert first.** The merge of upstream up to
-`c37fca619a` (fork commit `4855fd41ba`, shipped only in `v6.0.0-r2`) cannot start on an existing
-cluster: upstream `4da20e07e8` (Accord rebootstrap) changed TCM `ClusterMetadata` serialization
-(AccordFastPath → AccordNodeInfos, AccordStaleReplicas dropped) without bumping the TCM serialization
-`Version`, so metadata written by earlier builds fails to deserialize
-(`IllegalArgumentException: No enum constant ...MultiStepOperation.Kind.`, exit 3). Node 41 failed exactly
-so on 2026-11-01. `main` was then reset to the content of `v6.0.0-r3` (the fork fixes without that merge)
-by the commit whose subject starts `[정리] main 에서 2026-11 업스트림 머지를 뺀다`. Git still records the
-upstream commits as merged, so a plain re-merge brings them back **without** those 58 commits. The next
-upstream merge (planned at Cassandra 6.0 GA) must first `git revert` that backing-out commit, then merge.
-Before it ships, boot the candidate against a copy of node 41's system metadata (system, system_schema,
-system_cluster_metadata, system_auth, system_distributed) on an isolated docker network with 41's IP and
-`cassandra.yaml`; a fresh-cluster gate does not catch this class of break. If upstream still changes the
-format without a `Version` bump, add a version-gated reader in the fork (or revert `4da20e07e8`).
+**The 2026-11 merge and the TCM format break — already handled in r4.** The merge of upstream up to
+`c37fca619a` (shipped first in `v6.0.0-r2`) could not start on an existing cluster: upstream `4da20e07e8`
+(Accord rebootstrap) changed TCM `ClusterMetadata` serialization (AccordFastPath → AccordNodeInfos,
+AccordStaleReplicas dropped) without bumping the TCM serialization `Version`
+(`IllegalArgumentException: No enum constant ...MultiStepOperation.Kind.`, exit 3 — node 41, 2026-11-01).
+`main` was backed out to r3's content, and **r4 reverted that back-out** and added
+`service/accord/topology/LegacyAccordLayout.java`: `MetadataSnapshots.fromBytes` falls back to the old layout
+when the current one does not consume a snapshot exactly, and `CassandraDaemon` (next to
+`TieredStorageService.setup()`) calls `LegacyAccordLayout.rewriteSnapshotIfLegacyWasRead()` so the node
+rewrites it in the current layout. So the next merge is a plain merge — **no revert-the-revert any more**.
+Keep both hunks (`MetadataSnapshots.fromBytes`, the `ClusterMetadata.deserializeLegacyAccordLayout` branch) when
+they conflict, until the code is deleted (planned for the release after node 41 has booted r4).
+**Whatever the merge, boot the candidate on old metadata before it ships:** `docker/upgrade-boot-test.sh`
+with a copy of node 41's system metadata (see the `docker-integration-test` skill §2.5). A fresh-cluster gate
+does not catch this class of break; if upstream changes a format without a `Version` bump again, add a
+version-gated reader the same way.
 
 **Fork feature touchpoints** — `SelectStatement.java` (gap-fill wiring, and the
-`TransparentReads.guardRangeRead` call in `getRangeCommand` that refuses range scans reaching chunked
-data), `db/compaction/TimeSeries*.java`,
+`TransparentReads.guardRangeRead(table, filter, rowFilter, ...)` call in `getRangeCommand` that refuses range
+scans which reach chunked data and cannot merge it), `ModificationStatement.execute` and
+`BatchStatement.execute` (`TieredWrites.guardWriteConsistency` — r4's write CL floor), `CQL3CasRequest.readCommand`
+(`TieredWrites.refuseConditionsOnColdData` — r4's LWT refusal), `ClusteringIndexSliceFilter`/`ClusteringIndexNamesFilter`
+(`FilterNotIndexed.applyToPartitionColumns`, HCD-585 backport from datastax/cassandra — drop if upstream fixes it), `db/compaction/TimeSeries*.java`,
 `FreezeCompactionTask.java`, `db/compaction/timeseries/`, `TableAttributes.java`, `CassandraDaemon.java`,
 `SystemViewsKeyspace.java`, `NodetoolCommand.java`, `NodeProbe.java`, `DataResolver.java`/`DigestResolver.java`,
 `ColumnFamilyStore.java`/`ColumnFamilyStoreMBean.java`, `metrics/CassandraMetricsRegistry.java` (one line in

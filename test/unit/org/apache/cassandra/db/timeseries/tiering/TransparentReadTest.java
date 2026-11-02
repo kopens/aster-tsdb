@@ -948,19 +948,20 @@ public class TransparentReadTest extends CQLTester
     }
 
     /**
-     * A range scan has no partition to merge chunks into, so on a tiered table it used to come back
-     * with the hot rows alone, behind a client warning most drivers never surface: {@code count(*)}
-     * over 20M rows answered 500 (tiering-benchmark.md). A successful query that is silently missing
-     * every cold row is the worst answer there is, so the scan is now refused instead.
+     * Before r4 a range scan could not merge chunks, and on a tiered table it came back with the hot
+     * rows alone, behind a client warning most drivers never surface: {@code count(*)} over 20M rows
+     * answered 500 (tiering-benchmark.md). Range scans merge since r4 (TransparentRangeReadTest); a
+     * table whose policy says {@code range_scan: "refuse"} keeps the refusal, every shape of it.
      * <p>
      * Through the native protocol, because that is the path a client takes and the guard leaves
      * internal callers alone. Spark's full-table read is the token-range shape below.
      */
     @Test
-    public void rangeScansThatReachColdDataAreRefused() throws Throwable
+    public void rangeScansThatReachColdDataAreRefusedWhenThePolicySaysRefuse() throws Throwable
     {
         requireNetwork();
         loadTwoWindowsAndReencode();
+        setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\",\"range_scan\":\"refuse\"}");
 
         assertRangeScanRefused("SELECT ts, value FROM %s");
         assertRangeScanRefused("SELECT count(*) FROM %s");

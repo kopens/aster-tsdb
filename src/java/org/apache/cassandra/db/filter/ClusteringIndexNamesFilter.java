@@ -24,6 +24,7 @@ import java.util.Objects;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ClusteringComparator;
+import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.Slice;
 import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.TypeSizes;
@@ -119,6 +120,13 @@ public class ClusteringIndexNamesFilter extends AbstractClusteringIndexFilter
         // the range extend) and it's harmless to left them.
         class FilterNotIndexed extends Transformation
         {
+            @Override
+            protected RegularAndStaticColumns applyToPartitionColumns(RegularAndStaticColumns columns)
+            {
+                // HCD-585 (datastax/cassandra db83efa9b3): see ClusteringIndexSliceFilter#filterNotIndexed.
+                return columnFilter.fetchedColumns();
+            }
+
             @Override
             public Row applyToStatic(Row row)
             {

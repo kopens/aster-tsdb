@@ -36,6 +36,7 @@ import org.apache.cassandra.db.timeseries.ColumnarChunkCodec;
 import org.apache.cassandra.db.timeseries.ColumnarCursor;
 import org.apache.cassandra.db.timeseries.StatOrder;
 import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.DroppedColumn;
 import org.apache.cassandra.schema.TableMetadata;
 
 /**
@@ -58,6 +59,12 @@ final class ChunkWindowEncoder
     private final String[] valueRawNames;
     private final int[] valueTypeCodes;
     private final StatOrder[] valueStatOrders;
+    /**
+     * Per column, when a previous column of the same name was DROPped (microseconds), else
+     * Long.MIN_VALUE. An existing chunk written before that drop holds the old column's values, which
+     * must not be carried into the re-encoded chunk under the re-ADDed one -- see Window.
+     */
+    private final long[] valueDroppedAt;
 
     ChunkWindowEncoder(TableMetadata base)
     {
@@ -76,8 +83,11 @@ final class ChunkWindowEncoder
         // makes that pairing in one place. A type whose comparator the code cannot express (time:
         // unsigned comparator, signed INT64 extrema) declares NONE and forgoes pruning.
         valueStatOrders = new StatOrder[valueCount];
+        valueDroppedAt = new long[valueCount];
         for (int c = 0; c < valueCount; c++)
         {
+            DroppedColumn dropped = base.droppedColumns.get(valueColumns.get(c).name.bytes);
+            valueDroppedAt[c] = dropped == null ? Long.MIN_VALUE : dropped.droppedTime;
             valueRawNames[c] = valueColumns.get(c).name.toString();
             valueTypeCodes[c] = ChunkColumnTypes.typeCodeFor(valueColumns.get(c).type);
             valueStatOrders[c] = ChunkColumnTypes.statOrderFor(valueColumns.get(c).type);
@@ -142,6 +152,7 @@ final class ChunkWindowEncoder
                 return;
             }
             existingPayload = existingChunk.getBytes("payload");
+            existingMaxWt = existingChunk.getLong("max_row_writetime");
             ColumnarCursor cursor = ColumnarChunkCodec.cursor(existingPayload, null);
             while (cursor.advance())
             {
@@ -149,11 +160,12 @@ final class ChunkWindowEncoder
                 for (int c = 0; c < valueRawNames.length; c++)
                     // null for a column this chunk does not carry (ADDed to the table after the chunk
                     // was written); a column the chunk carries but the table has since DROPped is
-                    // simply never asked for, so it drops out here.
-                    values[c] = cursor.getBytes(valueRawNames[c]);
+                    // simply never asked for, so it drops out here. A chunk written before a column of
+                    // the same name was DROPped carries the OLD column, whose cells (read back at
+                    // max_row_writetime + 1, ChunkReadSupport) are at or before the drop: null too.
+                    values[c] = existingMaxWt + 1 <= valueDroppedAt[c] ? null : cursor.getBytes(valueRawNames[c]);
                 merged.put(cursor.timestamp(), values);
             }
-            existingMaxWt = existingChunk.getLong("max_row_writetime");
             existingChunkWt = existingChunk.getLong("chunk_wt");
             maxWt = existingMaxWt;
             haveWritetime = true;

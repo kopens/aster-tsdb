@@ -48,4 +48,14 @@ public interface TieredStorageServiceMBean
      * windows_encoded, rows_encoded, late_merges, chunks_expired, tags_skipped}.
      */
     List<String> statusRows();
+
+    /**
+     * Whether range scans merge chunk rows on this node (tables whose policy says
+     * {@code range_scan: "merge"}, the default). {@code false} makes every range scan that could
+     * reach chunked data fail as it did before r4 -- the emergency switch for the range merge,
+     * without a schema change. Per node and not persisted: a restart turns it back on.
+     */
+    boolean isRangeScanMergeEnabled();
+
+    void setRangeScanMergeEnabled(boolean enabled);
 }

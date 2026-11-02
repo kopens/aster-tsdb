@@ -385,6 +385,27 @@ public class TieredStorageColumnsTest extends CQLTester
         assertEquals(0, raw("SELECT ts FROM %s WHERE tag = 't' AND ts < ?", new Date(HOUR)).size());
     }
 
+    /**
+     * Asserts {@code query}, a conditional write, is refused because its clustering is cold: a Paxos
+     * precondition read cannot see chunked rows (TieredWrites.refuseConditionsOnColdData, since r4).
+     */
+    private void assertRejectedAsColdCondition(String query, Object... values) throws Throwable
+    {
+        long refusedBefore = TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.COLD_WRITE_REFUSED);
+        try
+        {
+            execute(query, values);
+            fail("expected the conditional write to be rejected: " + query);
+        }
+        catch (InvalidRequestException e)
+        {
+            assertTrue(e.getMessage(), e.getMessage().contains("conditional (LWT) write"));
+            assertTrue(e.getMessage(), e.getMessage().contains("hot window"));
+        }
+        assertEquals("each refused conditional write is counted", refusedBefore + 1,
+                     TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.COLD_WRITE_REFUSED));
+    }
+
     /** Asserts {@code query} is refused as an attempt to mutate chunked (cold) data. */
     private void assertRejectedAsColdWrite(String query, Object... values) throws Throwable
     {
@@ -569,38 +590,39 @@ public class TieredStorageColumnsTest extends CQLTester
     public void conditionalDeleteOfChunkedDataIsRejected() throws Throwable
     {
         // LWT/CAS builds its update in CQL3CasRequest.makeUpdates and never goes through
-        // ModificationStatement.getMutations, so without a guard there `IF` was a way straight past
-        // the immutability rule. The condition must be one that PASSES against a non-existent base
-        // row (chunked data is invisible to LWT conditions -- see below), or the statement no-ops
-        // before it ever builds an update.
+        // ModificationStatement.getMutations, so without a guard `IF` was a way straight past the
+        // immutability rule. Since r4 every conditional write to a cold clustering is refused before
+        // Paxos runs (its condition could not see the chunk); the makeUpdates guard stays behind it.
         chunkOneRow();
-        assertRejectedAsColdWrite("DELETE FROM %s WHERE tag = 't' AND ts = ? IF value = null", new Date(0L));
-        assertRejectedAsColdWrite("DELETE value FROM %s WHERE tag = 't' AND ts = ? IF quality = null", new Date(0L));
+        assertRejectedAsColdCondition("DELETE FROM %s WHERE tag = 't' AND ts = ? IF value = null", new Date(0L));
+        assertRejectedAsColdCondition("DELETE value FROM %s WHERE tag = 't' AND ts = ? IF quality = null", new Date(0L));
     }
 
     @Test
     public void conditionalUpdateToNullOfChunkedDataIsRejected() throws Throwable
     {
         chunkOneRow();
-        assertRejectedAsColdWrite("UPDATE %s SET value = null WHERE tag = 't' AND ts = ? IF quality = null",
-                                  new Date(0L));
+        assertRejectedAsColdCondition("UPDATE %s SET value = null WHERE tag = 't' AND ts = ? IF quality = null",
+                                      new Date(0L));
     }
 
     @Test
     public void aConditionalBatchCannotSmuggleAColdDeleteThrough() throws Throwable
     {
         chunkOneRow();
-        assertRejectedAsColdWrite("BEGIN BATCH " +
-                                  "DELETE value FROM %s WHERE tag = 't' AND ts = ? IF quality = null " +
-                                  "APPLY BATCH", new Date(0L));
+        assertRejectedAsColdCondition("BEGIN BATCH " +
+                                      "DELETE value FROM %s WHERE tag = 't' AND ts = ? IF quality = null " +
+                                      "APPLY BATCH", new Date(0L));
     }
 
     @Test
-    public void aConditionalWriteOfARealValueToAColdClusteringStillSucceeds() throws Throwable
+    public void aConditionalWriteOfARealValueToAColdClusteringIsRefusedButAPlainOneIsNot() throws Throwable
     {
-        // The rule is about UN-writing cold data; a conditional late correction is still legal.
+        // Before r4 this applied, because `IF value = null` read the chunked row as absent -- a
+        // condition judged against the wrong answer. The same late correction without `IF` is legal.
         chunkOneRow();
-        execute("UPDATE %s SET quality = 7 WHERE tag = 't' AND ts = ? IF value = null", new Date(0L));
+        assertRejectedAsColdCondition("UPDATE %s SET quality = 7 WHERE tag = 't' AND ts = ? IF value = null", new Date(0L));
+        execute("UPDATE %s USING TIMESTAMP 300 SET quality = 7 WHERE tag = 't' AND ts = ?", new Date(0L));
         UntypedResultSet rows = execute("SELECT value, quality FROM %s WHERE tag = 't' AND ts = ?", new Date(0L));
         assertEquals(7, rows.one().getInt("quality"));
         assertEquals("the columns the UPDATE did not name still come from the chunk",
@@ -608,39 +630,31 @@ public class TieredStorageColumnsTest extends CQLTester
     }
 
     @Test
-    public void lwtConditionsDoNotSeeChunkedData() throws Throwable
+    public void lwtConditionsOnChunkedDataAreRefused() throws Throwable
     {
-        // Documented limitation, and the reason the conditions above are written against null: a CAS
-        // precondition read deliberately bypasses the hot+chunk merge, because Paxos can only
+        // A CAS precondition read deliberately bypasses the hot+chunk merge, because Paxos can only
         // linearize data it owns and a chunk is a blob in another table that no ballot orders. So a
-        // chunked row reads as ABSENT to `IF`, and `IF EXISTS` simply does not apply -- it writes
-        // nothing, which is safe, rather than deleting cold data.
+        // chunked row would read as ABSENT to `IF` -- `IF EXISTS` answering false for a row that
+        // exists. Since r4 the condition is refused instead of judged against that wrong answer.
         chunkOneRow();
-        UntypedResultSet applied = execute("DELETE FROM %s WHERE tag = 't' AND ts = ? IF EXISTS", new Date(0L));
-        assertFalse("IF EXISTS must not apply against a chunked row", applied.one().getBoolean("[applied]"));
+        assertRejectedAsColdCondition("DELETE FROM %s WHERE tag = 't' AND ts = ? IF EXISTS", new Date(0L));
         // ...and the row is untouched.
         assertEquals(1.5, execute("SELECT value FROM %s WHERE tag = 't' AND ts = ?", new Date(0L))
                           .one().getDouble("value"), 0.0);
     }
 
     @Test
-    public void insertIfNotExistsAppliesOnAChunkedClustering() throws Throwable
+    public void insertIfNotExistsOnAChunkedClusteringIsRefused() throws Throwable
     {
-        // The other direction of the same limitation, documented in tiered-storage.md §5.1.2: a CAS
-        // precondition read cannot see the chunk, so `IF NOT EXISTS` finds no row and writes. Nothing
-        // is lost -- writing a real value to a cold clustering is legal, and the following SELECT
-        // merges the chunk's other columns back into the "new" row -- but it does not mean what an
-        // application using it as a duplicate guard over historical data would expect.
+        // The other direction of the same blindness: before r4 `IF NOT EXISTS` found no row and wrote,
+        // so an application using it as a duplicate guard over historical data was told "new" for a
+        // row that existed. Refused now (tiered-storage.md section 5.1.2), and the chunk is untouched.
         chunkOneRow();
-        UntypedResultSet applied = execute("INSERT INTO %s (tag, ts, quality) VALUES ('t', ?, 7) IF NOT EXISTS",
-                                           new Date(0L));
-        assertTrue("IF NOT EXISTS applies against a chunked row, because the condition cannot see it",
-                   applied.one().getBoolean("[applied]"));
+        assertRejectedAsColdCondition("INSERT INTO %s (tag, ts, quality) VALUES ('t', ?, 7) IF NOT EXISTS", new Date(0L));
 
         UntypedResultSet rows = execute("SELECT value, quality FROM %s WHERE tag = 't' AND ts = ?", new Date(0L));
-        assertEquals(7, rows.one().getInt("quality"));
-        assertEquals("the columns the INSERT did not name still come from the chunk",
-                     1.5, rows.one().getDouble("value"), 0.0);
+        assertEquals(192, rows.one().getInt("quality"));
+        assertEquals(1.5, rows.one().getDouble("value"), 0.0);
     }
 
     // ---- projection push-down must be observationally invisible ----
@@ -733,7 +747,7 @@ public class TieredStorageColumnsTest extends CQLTester
         assertRejectedAsColdWrite("UPDATE %s USING TIMESTAMP 300 SET value = null WHERE tag = 't' AND ts = ?",
                                   new Date(0L));
         assertRejectedAsColdWrite("DELETE FROM %s USING TIMESTAMP 300 WHERE tag = 't'");
-        assertRejectedAsColdWrite("DELETE FROM %s WHERE tag = 't' AND ts = ? IF value = null", new Date(0L));
+        assertRejectedAsColdCondition("DELETE FROM %s WHERE tag = 't' AND ts = ? IF value = null", new Date(0L));
 
         // ...and the chunk's copy is still there and still complete.
         UntypedResultSet rows = execute("SELECT value, quality FROM %s WHERE tag = 't' AND ts = ?", new Date(0L));

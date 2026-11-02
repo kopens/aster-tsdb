@@ -526,6 +526,10 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
             for (int i = 0; i < statements.size(); i++)
                 statements.get(i).validateDiskUsage(options.forStatement(i), clientState, diskUsageCheck);
 
+        // Tiered storage: a sub-quorum write can be missed by the re-encoder's quorum read and range-deleted.
+        for (ModificationStatement statement : statements)
+            org.apache.cassandra.db.timeseries.tiering.TieredWrites.guardWriteConsistency(statement.metadata(), options.getConsistency());
+
         if (hasConditions)
             return executeWithConditions(options, queryState, requestTime);
 

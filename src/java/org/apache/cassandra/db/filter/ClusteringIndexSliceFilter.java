@@ -21,6 +21,7 @@ import java.io.IOException;
 
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ClusteringComparator;
+import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.Slice;
 import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.partitions.CachedPartition;
@@ -103,6 +104,16 @@ public class ClusteringIndexSliceFilter extends AbstractClusteringIndexFilter
         // the range extend) and it's harmless to leave them.
         class FilterNotIndexed extends Transformation
         {
+            @Override
+            protected RegularAndStaticColumns applyToPartitionColumns(RegularAndStaticColumns columns)
+            {
+                // HCD-585 (datastax/cassandra db83efa9b3): the rows and the static row are filtered with the column
+                // filter below, so the resulting iterator must advertise the fetched columns. Keeping the source's
+                // (all the table's columns when the source is a full-partition read populating the row cache) makes
+                // the read response claim columns it does not carry and breaks Columns.Serializer#serializeSubset.
+                return columnFilter.fetchedColumns();
+            }
+
             @Override
             public Row applyToRow(Row row)
             {
