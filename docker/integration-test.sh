@@ -791,8 +791,11 @@ section "TSCS retention: an expired window is dropped whole, and only that windo
 # requires retention >= window_size + freeze_after. With 1m/1m/2m, a window expires once its start
 # is more than 3 minutes old -- so the 20-minute-old windows below are expired on arrival and the
 # current one cannot be, whenever this runs.
-RET_W0=$(( (NOW2_MS / 60000 - 20) * 60000 ))     # three old windows, 20 minutes back
-RET_NOW_W=$(( (NOW2_MS / 60000) * 60000 ))       # the current window
+# Read the clock here, not NOW2_MS: that dates from minutes earlier, and a "current" window taken from
+# it can already be more than 3 minutes old -- expired -- by the time this section runs.
+RET_NOW_MS=$(date +%s%3N)
+RET_W0=$(( (RET_NOW_MS / 60000 - 20) * 60000 ))     # three old windows, 20 minutes back
+RET_NOW_W=$(( (RET_NOW_MS / 60000) * 60000 ))       # the current window
 cql "
 CREATE TABLE IF NOT EXISTS it.tscs_retention (
     tag text, ts timestamp, value double,
@@ -840,8 +843,19 @@ CREATE TABLE IF NOT EXISTS it.cold_expiry (
     PRIMARY KEY (tag_id, timestamp)
 ) WITH compaction = {'class':'TimeSeriesCompactionStrategy'};
 " > /dev/null
-OLD_WIN_MS=$(( (NOW2_MS / 3600000 - 5) * 3600000 ))     # expires under cold_window 3h
-NEW_WIN_MS=$(( (NOW2_MS / 3600000 - 2) * 3600000 ))     # cold (past hot_window 1h) but inside 3h
+# The window choice depends on which hour "now" is in, so read the clock HERE, and never in the last
+# minutes of an hour: NOW2_MS dates from minutes earlier, and on 2026-11-02 a run that crossed 10:00
+# between choosing the windows and the expiry cycle expired NEW_WIN as well (its start fell past
+# now - cold_window), failing two assertions on a correct build. Everything below until the second
+# retier takes about a minute; 5 minutes of margin pins it inside one hour.
+NOW3_MS=$(date +%s%3N)
+LEFT_MS=$(( 3600000 - NOW3_MS % 3600000 ))
+if [ "$LEFT_MS" -lt 300000 ]; then
+    sleep $(( LEFT_MS / 1000 + 5 ))
+    NOW3_MS=$(date +%s%3N)
+fi
+OLD_WIN_MS=$(( (NOW3_MS / 3600000 - 5) * 3600000 ))     # expires under cold_window 3h
+NEW_WIN_MS=$(( (NOW3_MS / 3600000 - 2) * 3600000 ))     # cold (past hot_window 1h) but inside 3h
 cql "ALTER TABLE it.cold_expiry WITH extensions = {'timeseries_tiering': '$TIERING_JSON'};" > /dev/null
 cql "
 INSERT INTO it.cold_expiry (tag_id, timestamp, value) VALUES ('t', $(( OLD_WIN_MS + 60000 )), 1);
