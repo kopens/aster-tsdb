@@ -649,14 +649,18 @@ check "system_views.timeseries_tiering counts the three refused cold writes" \
     "SELECT cold_writes_refused FROM system_views.timeseries_tiering WHERE keyspace_name='it' AND table_name='tm_tag_point';" \
     '^ *3 *$'
 
-# A range scan cannot merge chunks. It used to answer from the hot rows alone, as a success: a
-# full-scan count(*) over this table would have reported the hot rows and no cold ones. Refused now.
-check "a full-scan count(*) on a tiered table is refused, not answered from hot rows" \
+# Range scans merge chunks since r4 (range_scan defaults to "merge"). Every one of this table's 5 rows
+# lives only in the chunk now -- the base rows were range-deleted -- so a hot-rows-only answer would be
+# 0 (what builds before r3 returned as a success; r3 refused the scan). 5 proves the merge.
+check "a full-scan count(*) on a tiered table merges the chunk (5 rows, all of them cold)" \
     "SELECT count(*) FROM it.tm_tag_point;" \
-    'range scan'
-check "...and the refusal is counted" \
-    "SELECT range_scans_refused FROM system_views.timeseries_tiering WHERE keyspace_name='it' AND table_name='tm_tag_point';" \
-    '^ *1 *$'
+    '^ *5 *$'
+check "...DISTINCT finds the partition that only the chunk table holds" \
+    "SELECT DISTINCT tag_id FROM it.tm_tag_point;" \
+    'TAG-001'
+check "...and the merged scans are counted" \
+    "SELECT range_scans_merged FROM system_views.timeseries_tiering WHERE keyspace_name='it' AND table_name='tm_tag_point';" \
+    '^ *[1-9][0-9]* *$'
 
 # ...and a write inside the hot window is untouched by the rule. Two rows, because the interesting
 # one is not the obvious one.
