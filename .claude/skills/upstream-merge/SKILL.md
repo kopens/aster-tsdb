@@ -53,6 +53,12 @@ to undo than an uncommitted one.
 JDK 21 only (one `ant-check-jdk21` job); upstream's `ant-check-jdk11`/`-jdk17` jobs fail on fork code that
 uses post-11 APIs. Keep the fork's side; take upstream's other edits to these files.
 
+**`.build/build-rat.xml`, `.build/run-ci.d/run-ci-test.py`** — two small fork hunks that keep the GitHub mirror's
+checks green: RAT excludes for `.claude/**` and the generated `CHANGELOG.md` (neither can carry a license
+header; every other fork file does — give new ones the Apache header, or `ant rat-check` fails on the mirror),
+and `test_attach_url_overrides_environment_server` pinning `--repository` so it does not depend on the checkout's
+remote ending in "cassandra". Keep both alongside upstream's edits.
+
 **`build.xml`** — upstream resets `base.version` to an alpha/beta (e.g. `6.0-alpha3`). The fork's
 versioning rule requires `6.0.0`, because the build must produce `build/apache-cassandra-6.0.0.jar`
 and the release pipeline renames from that exact path. Keep `<property name="base.version" value="6.0.0"/>`.
