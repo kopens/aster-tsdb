@@ -804,7 +804,10 @@ class TestConnectionModes(unittest.TestCase):
 
     def test_attach_url_overrides_environment_server(self):
         with patch.dict(os.environ, {'JENKINS_URL': 'https://other.example'}, clear=True), \
-                patch('run_ci.sys.argv', ['run-ci', '--attach', 'https://ci.example/job/cassandra/42/']):
+                patch('run_ci.sys.argv', ['run-ci', '--attach', 'https://ci.example/job/cassandra/42/',
+                                          # pinned, so the check does not depend on what the checkout's tracking
+                                          # remote is called (on a fork mirror it does not end in "cassandra")
+                                          '--repository', 'https://github.com/apache/cassandra.git']):
             args = run_ci.parse_arguments()
         self.assertEqual(args.url, 'https://ci.example')
 
