@@ -123,6 +123,13 @@ diff /tmp/want.txt /tmp/have.txt     # 버전이 다른 항목이 곧 함께 교
 - **TCM 메타데이터:** r4는 업스트림 `4da20e07e8` 이전 빌드(r3 이하)가 쓴 메타데이터 스냅샷을 읽고, 기동
   직후 스스로 새 형식 스냅샷을 찍습니다(로그 `Rewrote the cluster metadata snapshot in the current
   layout`). 운영자 조치는 없습니다. 다음 기동부터는 옛 형식 리더를 쓰지 않습니다.
+- **r6부터는 그 옛 형식 리더가 없습니다.** r3 이하로 운영하던 노드는 **반드시 r4로 한 번 기동한 뒤** r6으로
+  올리십시오. r3 이하에서 r6으로 바로 올리면 기동하지 못합니다(`No enum constant
+  ...MultiStepOperation.Kind.`). 노드 41은 2026-11-02에 r4로 기동해 재작성을 마쳤습니다.
+  **r4 이전에 떠 둔 메타데이터 백업도 같습니다.** 41번의 `/data1/pp-backup/cassandra-upgrade-*` 같은 r4 이전
+  `system_cluster_metadata` 사본을 복원할 때는 r4로 한 번 기동해 새 형식으로 바꾼 뒤 r6으로 올리십시오. 그래서
+  `v6.0.0-r4`는 지우지 않고 남겨 둡니다. jar는 GitLab 릴리즈에 있고, 태그는 GitHub 미러(`kopens/aster-tsdb`)에도
+  있어 소스에서 다시 빌드할 수 있습니다.
 - **⚠️ 되돌릴 수 없는 지점:** r4로 한 번 기동한 노드는 **r3 이하 jar로 되돌리면 기동하지 못합니다** — r3는
   새 형식을 읽지 못합니다(자동 재작성이 없어도 `metadata_snapshot_frequency`마다 새 형식 스냅샷이 쌓입니다).
   jar 롤백을 가능하게 하려면 **교체 전에 `<data>/system_cluster_metadata` 디렉터리를 복사해 두고**, 롤백할

@@ -21,8 +21,8 @@
 # Every other gate starts fresh clusters, and on 2026-11-01 that is exactly how v6.0.0-r2 passed them
 # and then could not boot node 41: upstream changed the TCM metadata layout without a version bump.
 # This boots the candidate on a copy of an existing node's system metadata, with that node's IP and
-# cassandra.yaml, waits for the node to rewrite the snapshot in its own layout (it does that by itself after
-# reading a legacy one) and restarts, so both "reads the old layout" and "reads what it writes" are proven.
+# cassandra.yaml, takes a metadata snapshot in the candidate's layout and restarts, so both "reads what the
+# earlier build wrote" and "reads what it writes" are proven.
 #
 # usage: docker/upgrade-boot-test.sh <image> <metadata-dir> <cassandra.yaml> <node-ip> [<jar>]
 #   <metadata-dir>  a COPY of the node's data dir holding system, system_schema, system_cluster_metadata
@@ -79,33 +79,16 @@ if ! wait_boot 1; then
     exit 1
 fi
 echo "ok   first boot on the existing metadata"
-# Here-strings, not `docker logs | grep -q`: under pipefail, grep -q exiting early SIGPIPEs the writer and
-# turns a match into a failure -- the false FAILs the integration test showed on 2026-11-01.
-# The WARN MetadataSnapshots logs when it had to read the old layout; not the bare phrase "legacy Accord layout",
-# which the rewrite's own INFO line also contains.
-LEGACY_READ='written by a build before upstream 4da20e07e8'
-grep -q "$LEGACY_READ" <<< "$(docker logs "$NAME" 2>&1)" && echo "     (read a snapshot in the pre-4da20e07e8 layout)"
-
-# A legacy snapshot is rewritten by the node itself once startup has progressed
-# (LegacyAccordLayout.rewriteSnapshotIfLegacyWasRead) -- no operator step. Wait for that, then restart.
-if grep -q "$LEGACY_READ" <<< "$(docker logs "$NAME" 2>&1)"; then
-    for _ in $(seq 1 24); do
-        grep -q 'Rewrote the cluster metadata snapshot' <<< "$(docker logs "$NAME" 2>&1)" && break
-        sleep 5
-    done
-    grep -q 'Rewrote the cluster metadata snapshot' <<< "$(docker logs "$NAME" 2>&1)" \
-        || { echo "FAIL: the node did not rewrite the legacy snapshot by itself"; docker logs "$NAME" 2>&1 | grep -A5 'Could not rewrite' | head; exit 1; }
-    echo "ok   the node rewrote the snapshot in the current layout by itself"
-fi
+# Then prove it reads what it writes: take a metadata snapshot in this build's layout, so the restart loads
+# that instead of the one an earlier build wrote.
+docker exec "$NAME" /opt/cassandra/bin/nodetool cms snapshot >/dev/null 2>&1 \
+    || { echo "FAIL: nodetool cms snapshot failed on the candidate"; exit 1; }
+echo "ok   took a metadata snapshot in the candidate's layout"
 docker restart "$NAME" >/dev/null
 if ! wait_boot 2; then
     echo "FAIL: the candidate does not start on the metadata it wrote itself"
     docker logs "$NAME" 2>&1 | grep -A12 'Exception encountered during startup' | tail -20
     exit 1
 fi
-if [ "$(docker logs "$NAME" 2>&1 | grep -c "$LEGACY_READ")" -gt 1 ]; then
-    echo "FAIL: the second boot still needed the legacy layout -- the snapshot was not rewritten"
-    exit 1
-fi
-echo "ok   second boot on the snapshot it rewrote"
+echo "ok   second boot on the snapshot it wrote"
 echo "PASS"
