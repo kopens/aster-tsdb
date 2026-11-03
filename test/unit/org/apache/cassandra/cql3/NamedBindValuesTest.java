@@ -21,10 +21,11 @@ package org.apache.cassandra.cql3;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import com.datastax.driver.core.SimpleStatement;
+
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import com.datastax.driver.core.SimpleStatement;
 import org.apache.cassandra.transport.ProtocolVersion;
 
 import static org.junit.Assert.assertEquals;
