@@ -75,7 +75,10 @@ ALP의 압축 특성은 [bake-off 결과](codec-bakeoff.md)를 참고하세요.
 
 경계 위(핫)에서는 이 중 어느 것도 거부되지 않습니다. 지켜볼 지표는
 `system_views.timeseries_tiering`(§4.2)의 `consecutive_failures`·`last_error`(사이클이 멈추면 조용히
-멈춥니다), `corrupt_chunk_reads`·`coverage_read_failures`(0이어야 함), `windows_encoded`·`rows_encoded`(사이클마다 증가)입니다.
+멈춥니다), `corrupt_chunk_reads`·`coverage_read_failures`(0이어야 함), `windows_encoded`·`rows_encoded`입니다. 마지막 두 개는 누적값이 아니라 **직전 사이클 한 번의
+값**이라(§4.2), `interval`이 `chunk_window`보다 짧으면 새 창이 핫 경계를 넘지 않은 사이클에서는 0이
+정상입니다 — 위 정책(5분 주기, 15분 창)에서는 세 번에 두 번이 0입니다. 멈춤의 신호는 `last_run_at`이
+`interval`보다 오래 갱신되지 않는 것, 또는 0이 `chunk_window` 넘게 이어지는 것입니다.
 
 ## 1. 대상 스키마 — 시간으로 클러스터링된 아무 테이블
 
