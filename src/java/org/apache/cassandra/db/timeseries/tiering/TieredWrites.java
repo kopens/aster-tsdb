@@ -27,6 +27,7 @@ import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.DeletionInfo;
 import org.apache.cassandra.db.IMutation;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.LivenessInfo;
 import org.apache.cassandra.db.RangeTombstone;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.Cell;
@@ -215,6 +216,7 @@ public final class TieredWrites
             return;
 
         refusePastTimestampsIntoColdData(update);
+        refuseShortTtlsIntoColdData(update);
 
         // CONTENT FIRST, coverage second. Coverage can cost a ledger read, and the overwhelming
         // majority of writes -- every plain INSERT/UPDATE of real values -- cannot un-write anything
@@ -406,6 +408,82 @@ public final class TieredWrites
                                   metadata.keyspace, metadata.name, oldest));
             }
         }
+    }
+
+    /**
+     * Refuses a live write with a TTL shorter than the hot window into a clustering that is already
+     * chunked.
+     * <p>
+     * A chunk holds values only, with no TTL and no tombstone (ChunkReadSupport). A late write into an
+     * encoded window overrides the chunk's value until the next cycle merges it in; but if its TTL runs
+     * out first, the expired cell reads as absent, the cycle keeps the chunk's value for it, and the
+     * value the write replaced comes back -- the same resurrection the cell-tombstone rule in
+     * {@link #guard} refuses, deferred by the TTL. A TTL of at least the hot window outlives the
+     * re-encoder's next cycle (it runs every few minutes), so the write is merged first and only loses
+     * its TTL, as every encoded row does. Late writes without a TTL, and TTLs on hot clusterings, are
+     * untouched. A {@code default_time_to_live} below the hot window is already the shape
+     * {@link TieringPolicy#ttlShadowsHotWindowWarning} warns about; late writes into chunked windows of
+     * such a table are refused here too.
+     */
+    private static void refuseShortTtlsIntoColdData(PartitionUpdate update)
+    {
+        TableMetadata metadata = update.metadata();
+        TieringPolicy policy;
+        try
+        {
+            policy = TieringPolicy.fromTable(metadata);
+        }
+        catch (ConfigurationException e)
+        {
+            return;
+        }
+        if (policy == null)
+            return;
+
+        // Content first, as in guard: only an expiring cell on a clustering below the hot boundary can
+        // be refused, so nothing else pays for coverage.
+        long hotBoundaryMs = ColdBoundary.hotBoundaryMs(policy);
+        long lowestMs = Long.MAX_VALUE;
+        for (Row row : update)
+        {
+            if (row.clustering() == Clustering.STATIC_CLUSTERING)
+                continue;
+            long clusteringMs = ColdBoundary.clusteringMs(row.clustering());
+            if (clusteringMs >= hotBoundaryMs || clusteringMs >= lowestMs)
+                continue;
+            if (hasShortTtl(row, policy.hotWindowMillis))
+                lowestMs = clusteringMs;
+        }
+        if (lowestMs == Long.MAX_VALUE)
+            return;
+
+        // Nothing ever encoded (MIN_VALUE) means no chunk value to bring back. An unknown coverage
+        // (MAX_VALUE) refuses, as every other cold-write rule does.
+        long coldBelowMs = ColdBoundary.coldBelowMs(coverage(metadata, policy), policy);
+        if (lowestMs >= coldBelowMs)
+            return;
+
+        TieringMetrics.record(metadata, TieringMetrics.Event.COLD_WRITE_REFUSED);
+        throw new InvalidRequestException(
+            String.format("Writing to %s.%s with a TTL shorter than the hot window (%dms) is not allowed at a clustering " +
+                          "that is already encoded into %s: chunks carry no TTL, so if the TTL ran out before the " +
+                          "next tiering cycle merged the write, the value it replaced would silently come back. " +
+                          "Write without USING TTL (cold data expires through the policy's cold_window), with a TTL " +
+                          "of at least the hot window, or only at clusterings inside the hot window.",
+                          metadata.keyspace, metadata.name, policy.hotWindowMillis,
+                          ChunkTables.chunkTableName(metadata.name)));
+    }
+
+    private static boolean hasShortTtl(Row row, long hotWindowMillis)
+    {
+        long hotWindowSeconds = hotWindowMillis / 1000;
+        LivenessInfo liveness = row.primaryKeyLivenessInfo();
+        if (liveness.isExpiring() && liveness.ttl() < hotWindowSeconds)
+            return true;
+        for (Cell<?> cell : row.cells())
+            if (cell.isExpiring() && cell.ttl() < hotWindowSeconds)
+                return true;
+        return false;
     }
 
     /**
