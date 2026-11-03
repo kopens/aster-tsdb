@@ -155,7 +155,7 @@ version-gated reader the same way.
 scans which reach chunked data and cannot merge it), `ModificationStatement.execute` and
 `BatchStatement.execute` (`TieredWrites.guardWriteConsistency` — r4's write CL floor), `CQL3CasRequest.readCommand`
 (`TieredWrites.refuseConditionsOnColdData` — r4's LWT refusal), `ClusteringIndexSliceFilter`/`ClusteringIndexNamesFilter`
-(`FilterNotIndexed.applyToPartitionColumns`, HCD-585 backport from datastax/cassandra — drop if upstream fixes it), `db/compaction/TimeSeries*.java`,
+(`FilterNotIndexed.applyToPartitionColumns`, HCD-585 backport from datastax/cassandra — drop if upstream fixes it), `QueryOptions.OptionsWithNames` (overrides `getValue`/`getValuesSize` and turns off the `byte[]` fast path so unprepared named values bind by name — a fix for upstream 8a72868066, pinned by `NamedBindValuesTest`; drop if upstream fixes it), `db/compaction/TimeSeries*.java`,
 `FreezeCompactionTask.java`, `db/compaction/timeseries/`, `TableAttributes.java`, `CassandraDaemon.java`,
 `SystemViewsKeyspace.java`, `NodetoolCommand.java`, `NodeProbe.java`, `DataResolver.java`/`DigestResolver.java`,
 `ColumnFamilyStore.java`/`ColumnFamilyStoreMBean.java`, `metrics/CassandraMetricsRegistry.java` (one line in

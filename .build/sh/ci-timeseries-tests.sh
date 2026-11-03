@@ -54,6 +54,7 @@ TESTS=(
   "testsome|org.apache.cassandra.db.timeseries.tiering.TransparentReadTest"
   "testsome|org.apache.cassandra.db.timeseries.tiering.TransparentRangeReadTest"
   "testsome|org.apache.cassandra.tcm.ClusterMetadataSnapshotLayoutTest"
+  "testsome|org.apache.cassandra.cql3.NamedBindValuesTest"
   "testsome|org.apache.cassandra.db.filter.ClusteringIndexFilterNotIndexedTest"
   "testsome|org.apache.cassandra.cql3.validation.operations.SelectWithPartialRowCacheTest"
   "testsome|org.apache.cassandra.db.timeseries.tiering.TieredTruncateTest"
