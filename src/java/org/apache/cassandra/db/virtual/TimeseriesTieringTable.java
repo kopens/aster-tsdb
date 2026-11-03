@@ -56,6 +56,7 @@ final class TimeseriesTieringTable extends AbstractVirtualTable
     private static final String TAGS_SKIPPED_TOTAL = "tags_skipped_total";
     private static final String RANGE_SCANS_REFUSED = "range_scans_refused";
     private static final String RANGE_SCANS_MERGED = "range_scans_merged";
+    private static final String FILTERED_READS_REFUSED = "filtered_reads_refused";
     private static final String CORRUPT_CHUNK_READS = "corrupt_chunk_reads";
     private static final String COVERAGE_READ_FAILURES = "coverage_read_failures";
     private static final String COLD_WRITES_REFUSED = "cold_writes_refused";
@@ -84,6 +85,7 @@ final class TimeseriesTieringTable extends AbstractVirtualTable
                            .addRegularColumn(TAGS_SKIPPED_TOTAL, LongType.instance)
                            .addRegularColumn(RANGE_SCANS_REFUSED, LongType.instance)
                            .addRegularColumn(RANGE_SCANS_MERGED, LongType.instance)
+                           .addRegularColumn(FILTERED_READS_REFUSED, LongType.instance)
                            .addRegularColumn(CORRUPT_CHUNK_READS, LongType.instance)
                            .addRegularColumn(COVERAGE_READ_FAILURES, LongType.instance)
                            .addRegularColumn(COLD_WRITES_REFUSED, LongType.instance)
@@ -144,6 +146,9 @@ final class TimeseriesTieringTable extends AbstractVirtualTable
                       // Spark read without the partition key. Find which application.
                       .column(RANGE_SCANS_REFUSED, count(keyspace.name, table.name, Event.RANGE_SCAN_REFUSED))
                       .column(RANGE_SCANS_MERGED, count(keyspace.name, table.name, Event.RANGE_SCAN_MERGED))
+                      // A partition-key read with ALLOW FILTERING on a non-key column (or an index)
+                      // reached chunked data. Find which application.
+                      .column(FILTERED_READS_REFUSED, count(keyspace.name, table.name, Event.FILTERED_READ_REFUSED))
                       // Non-zero is an incident: a window's only copy does not decode.
                       .column(CORRUPT_CHUNK_READS, count(keyspace.name, table.name, Event.CORRUPT_CHUNK_READ))
                       .column(COVERAGE_READ_FAILURES, count(keyspace.name, table.name, Event.COVERAGE_READ_FAILURE))

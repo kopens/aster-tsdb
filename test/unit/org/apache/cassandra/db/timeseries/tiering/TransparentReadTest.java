@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 
 import org.junit.BeforeClass;
@@ -1014,6 +1015,114 @@ public class TransparentReadTest extends CQLTester
         assertEquals("each refusal is counted, so an operator sees it without a log search",
                      refusedBefore + 1,
                      TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.RANGE_SCAN_REFUSED));
+    }
+
+    /**
+     * A partition-key read with ALLOW FILTERING on a non-key column: replicas filter the hot rows, but
+     * chunk rows were merged in after that, so every cold row of the range came back whatever its
+     * value. Refused instead, like the range-scan case, whenever the time range reaches chunked data.
+     */
+    @Test
+    public void partitionReadsWithANonKeyFilterThatReachColdDataAreRefused() throws Throwable
+    {
+        requireNetwork();
+        loadTwoWindowsAndReencode();
+
+        assertFilteredReadRefused("SELECT ts, value FROM %s WHERE tag = 't1' AND value > 2.5 ALLOW FILTERING");
+        assertFilteredReadRefused("SELECT ts, value FROM %s WHERE tag = 't1' AND ts >= ? AND ts < ? AND value = 1.0 ALLOW FILTERING",
+                                  new Date(0), new Date(HOUR));
+        assertFilteredReadRefused("SELECT count(*) FROM %s WHERE tag = 't1' AND value > 2.5 ALLOW FILTERING");
+        assertFilteredReadRefused("SELECT ts, value FROM %s WHERE tag IN ('t1', 't2') AND value > 2.5 ALLOW FILTERING");
+
+        // The same reads without the non-key condition still merge (the application filters).
+        assertEquals(6, executeNet("SELECT ts, value FROM %s WHERE tag = 't1'").all().size());
+    }
+
+    /** ...but one whose time range lies wholly above the cold boundary is filtered by replicas alone, completely. */
+    @Test
+    public void partitionReadsWithANonKeyFilterConfinedToTheHotWindowAreServed() throws Throwable
+    {
+        requireNetwork();
+        loadTwoWindowsAndReencode();
+        long recent = System.currentTimeMillis() - HOUR;
+        execute("INSERT INTO %s (tag, ts, value) VALUES ('t2', ?, 7.0)", new Date(recent));
+        execute("INSERT INTO %s (tag, ts, value) VALUES ('t2', ?, 8.0)", new Date(recent + 1));
+
+        List<com.datastax.driver.core.Row> rows =
+            executeNet("SELECT value FROM %s WHERE tag = 't2' AND ts >= ? AND value > 7.5 ALLOW FILTERING",
+                       new Date(recent - 60_000L)).all();
+        assertEquals(1, rows.size());
+        assertEquals(8.0, rows.get(0).getDouble("value"), 0.0);
+    }
+
+    private void assertFilteredReadRefused(String query, Object... values) throws Throwable
+    {
+        long refusedBefore = TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.FILTERED_READ_REFUSED);
+        try
+        {
+            int rows = executeNet(query, values).all().size();
+            fail("expected the filtered read to be refused rather than answered with unfiltered chunk rows: " + query +
+                 " returned " + rows + " row(s)");
+        }
+        catch (com.datastax.driver.core.exceptions.InvalidQueryException e)
+        {
+            assertTrue(e.getMessage(), e.getMessage().contains("filters on a non-key column"));
+            assertTrue(e.getMessage(), e.getMessage().contains("filter in the application"));
+        }
+        assertEquals(refusedBefore + 1,
+                     TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.FILTERED_READ_REFUSED));
+    }
+
+    /**
+     * A chunk carries no TTL: a short-TTL write over a chunked row, expiring before the next cycle
+     * merged it, would bring the chunk's old value back. Refused; a TTL of at least the hot window,
+     * and a short TTL on a hot clustering, are not.
+     */
+    @Test
+    public void shortTtlWritesIntoChunkedClusteringsAreRefused() throws Throwable
+    {
+        requireNetwork();
+        loadTwoWindowsAndReencode();
+        long refusedBefore = TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.COLD_WRITE_REFUSED);
+
+        try
+        {
+            executeNet("UPDATE %s USING TTL 60 SET value = 9.0 WHERE tag = 't1' AND ts = ?", new Date(20 * 60_000L));
+            fail("expected a short-TTL write over a chunked row to be refused");
+        }
+        catch (com.datastax.driver.core.exceptions.InvalidQueryException e)
+        {
+            assertTrue(e.getMessage(), e.getMessage().contains("TTL shorter than the hot window"));
+        }
+        try
+        {
+            executeNet("INSERT INTO %s (tag, ts, value) VALUES ('t1', ?, 9.0) USING TTL 60", new Date(25 * 60_000L));
+            fail("expected a short-TTL insert into a chunked window to be refused");
+        }
+        catch (com.datastax.driver.core.exceptions.InvalidQueryException e)
+        {
+            assertTrue(e.getMessage(), e.getMessage().contains("TTL shorter than the hot window"));
+        }
+        assertEquals(refusedBefore + 2, TieringMetrics.count(KEYSPACE, currentTable(), TieringMetrics.Event.COLD_WRITE_REFUSED));
+        assertEquals(2.0, executeNet("SELECT value FROM %s WHERE tag = 't1' AND ts = ?", new Date(20 * 60_000L)).one().getDouble("value"), 0.0);
+
+        // At least the hot window (2h): merged by the next cycle long before it expires.
+        executeNet("UPDATE %s USING TTL 7200 SET value = 9.0 WHERE tag = 't1' AND ts = ?", new Date(20 * 60_000L));
+        assertEquals(9.0, executeNet("SELECT value FROM %s WHERE tag = 't1' AND ts = ?", new Date(20 * 60_000L)).one().getDouble("value"), 0.0);
+        // Hot clustering: nothing chunked to come back.
+        executeNet("INSERT INTO %s (tag, ts, value) VALUES ('t1', ?, 9.0) USING TTL 60", new Date(System.currentTimeMillis() - 60_000L));
+    }
+
+    @Test
+    public void chunkLookbackCoversTheConfiguredChunkWindowEvenBeforeCoverageSeesIt()
+    {
+        ChunkCoverage.Coverage oneHourChunks = ChunkCoverage.Coverage.EMPTY.widenedBy(0, 0, HOUR);
+        // chunk_window raised to 6h: another node's 6h chunks are not in this node's cached coverage yet.
+        assertEquals(6 * HOUR, TransparentReads.lookbackMillis(oneHourChunks, TieringPolicy.parse("{\"hot_window\":\"12h\",\"chunk_window\":\"6h\"}")));
+        // chunk_window lowered: legacy 6h chunks are still reached.
+        ChunkCoverage.Coverage sixHourChunks = ChunkCoverage.Coverage.EMPTY.widenedBy(0, 0, 6 * HOUR);
+        assertEquals(6 * HOUR, TransparentReads.lookbackMillis(sixHourChunks, TieringPolicy.parse("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}")));
+        assertEquals(6 * HOUR, TransparentReads.lookbackMillis(sixHourChunks, null));
     }
 
     /** @return what {@link TransparentReads#maybeWrap} does to {@code hot} for a full-partition read of 't1'. */

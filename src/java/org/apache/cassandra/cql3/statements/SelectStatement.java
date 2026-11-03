@@ -992,6 +992,9 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         if (filter == null || filter.isEmpty(table.comparator))
             return ReadQuery.empty(table);
 
+        // Chunk rows would join a filtered read unfiltered; see TransparentReads.guardFilteredPartitionRead.
+        org.apache.cassandra.db.timeseries.tiering.TransparentReads.guardFilteredPartitionRead(table, filter, rowFilter, state, options.getConsistency());
+
         List<DecoratedKey> decoratedKeys;
         if (keys.size() == 1) // reduce allocations in collections for keys
         {

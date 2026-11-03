@@ -287,10 +287,7 @@ public final class TransparentReads
         if (startMs >= mergeBelowMs)
             return null;                                   // no chunk reaches up here: fast path
 
-        // The WIDEST chunk_window any existing chunk was written with, not the configured one: after
-        // an operator shrinks chunk_window, every wider legacy chunk sits further before the range
-        // start than one current window, and a look-back of one current window would never find it.
-        long lookbackMs = coverage.lookbackMillis();
+        long lookbackMs = lookbackMillis(coverage, policy);
         // The source is told the TIMESTAMP order to emit in (emitDescending), and decodes only the
         // columns the query reads (projection).
         return new ChunkRowSource(metadata, lookbackMs, startMs, endMsExcl,
@@ -458,6 +455,75 @@ public final class TransparentReads
                           "merged because %s; it would return the hot rows alone as a complete answer. " +
                           "Restrict the query by partition key %s.",
                           metadata.keyspace, metadata.name, ChunkTables.chunkTableName(metadata.name), refusal, hotOnly));
+    }
+
+    /**
+     * How far before a query's start a chunk's {@code window_start} may sit and still reach into it.
+     * <p>
+     * The WIDEST chunk_window any existing chunk was written with, not the configured one: after an
+     * operator shrinks chunk_window, every wider legacy chunk sits further before the range start than
+     * one current window, and a look-back of one current window would never find it. And never less
+     * than the configured one: coverage is cached per node for up to a minute, so after chunk_window
+     * is raised, chunks another node has just written at the new width are wider than the widest this
+     * node has seen -- a look-back short of them silently drops the head of every such window.
+     */
+    @VisibleForTesting
+    static long lookbackMillis(ChunkCoverage.Coverage coverage, TieringPolicy policy)
+    {
+        long lookbackMs = coverage.lookbackMillis();
+        return policy == null ? lookbackMs : Math.max(lookbackMs, policy.chunkWindowMillis);
+    }
+
+    /**
+     * Refuses a client's partition-restricted read that filters on a non-key column ({@code ALLOW
+     * FILTERING}) or goes through an index, when its time range reaches chunked data.
+     * <p>
+     * Replicas apply the row filter to the hot rows; {@link #maybeWrap} merges decoded chunk rows in
+     * after that, so they would join the answer unfiltered -- {@code WHERE tag = ? AND ts >= ? AND
+     * value > 100 ALLOW FILTERING} returned every cold row of the range. Filtering the chunk rows
+     * alone would not be right either: a hot row that the filter dropped can still be the newer
+     * version of a chunk row that passes it. The range-scan path refuses the same thing
+     * ({@link #rangeMergeRefusal}); this is its single-partition counterpart. A time range starting at
+     * or above {@link ColdBoundary#coldBelowMs} is untouched: no chunk reaches it and replicas filter
+     * every row it can return.
+     *
+     * @throws InvalidRequestException if the read could reach data that only a chunk holds
+     */
+    public static void guardFilteredPartitionRead(TableMetadata metadata, ClusteringIndexFilter filter, RowFilter rowFilter,
+                                                  ClientState state, ConsistencyLevel cl)
+    {
+        if (rowFilter == null || rowFilter.isEmpty() || state.isInternal || inInternalBypass())
+            return;
+        if (!ColdBoundary.hasTimestampClustering(metadata))
+            return;
+
+        TieringPolicy policy;
+        try
+        {
+            policy = TieringPolicy.fromTable(metadata);
+        }
+        catch (ConfigurationException e)
+        {
+            policy = null;
+        }
+
+        ChunkCoverage.Coverage coverage = ChunkCoverage.forTable(metadata, cl);
+        if (!coverage.chunkTableExists())
+            return;
+        long coldBelowMs = ColdBoundary.coldBelowMs(coverage, policy);
+        if (coldBelowMs == Long.MIN_VALUE || lowestRequestedMs(filter, ColdBoundary.isDescending(metadata)) >= coldBelowMs)
+            return;
+
+        TieringMetrics.record(metadata, TieringMetrics.Event.FILTERED_READ_REFUSED);
+        String hotOnly = coldBelowMs == Long.MAX_VALUE
+                         ? "(its chunk coverage cannot be read right now, so no time range is provably hot)"
+                         : "or restrict its time range to at or above epoch millis " + coldBelowMs + " (the cold boundary)";
+        throw new InvalidRequestException(
+            String.format("This query is not supported on %s.%s: it filters on a non-key column or uses an index, and part " +
+                          "of its time range lives only in %s, whose rows cannot honour that filter; it would return " +
+                          "them unfiltered. Read the time range without the non-key condition and filter in the " +
+                          "application, %s.",
+                          metadata.keyspace, metadata.name, ChunkTables.chunkTableName(metadata.name), hotOnly));
     }
 
     /** @return the oldest timestamp {@code filter} can select, {@link Long#MIN_VALUE} if unbounded below. */
