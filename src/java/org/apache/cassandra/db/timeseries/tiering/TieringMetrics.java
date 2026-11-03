@@ -53,6 +53,8 @@ public final class TieringMetrics
     public enum Event
     {
         RANGE_SCAN_REFUSED("RangeScansRefused"),
+        /** A partition-restricted read with a non-key filter or an index that reached chunked data. */
+        FILTERED_READ_REFUSED("FilteredReadsRefused"),
         /** Counted per coordinator sub-range resolve that merged chunk keys into a range scan. */
         RANGE_SCAN_MERGED("RangeScansMerged"),
         CORRUPT_CHUNK_READ("CorruptChunkReads"),

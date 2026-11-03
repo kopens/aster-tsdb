@@ -31,6 +31,49 @@ git rev-list --count main..upstream/cassandra-6.0
 
 If the count is 0, say so and stop — there is nothing to do.
 
+## 1b. Read the risky upstream commits before merging
+
+Upstream's test suite passing is not evidence for this fork. Both defects that reached our releases in
+2026-11 came in through an upstream merge, not through fork code, and upstream's own tests covered
+neither:
+
+- **4da20e07e8** changed the Accord sections of the `ClusterMetadata` snapshot layout without a
+  `Version` bump. Node 41 could not boot r2 on its own metadata. Upstream's tests always start from a
+  fresh cluster, so they never read a snapshot an older build wrote.
+- **8a72868066** (CASSANDRA-20166) added `getValue(int)` and a `byte[]` fast path to `QueryOptions`.
+  `OptionsWithNames` overrode only the old `getValues()`, so named values on unprepared statements were
+  bound in send order: wrong rows written, with no error. No upstream test sends named values out of
+  marker order.
+
+So before merging, list the new commits that touch the places where a silent behaviour change hurts
+most, and read each diff:
+
+```bash
+git log --oneline --no-merges main..upstream/cassandra-6.0 -- \
+  src/java/org/apache/cassandra/tcm/ src/java/org/apache/cassandra/io/sstable/format/ \
+  src/java/org/apache/cassandra/net/ src/java/org/apache/cassandra/db/rows/ \
+  src/java/org/apache/cassandra/cql3/QueryOptions.java src/java/org/apache/cassandra/cql3/terms/ \
+  src/java/org/apache/cassandra/transport/ src/java/org/apache/cassandra/service/StorageProxy.java \
+  src/java/org/apache/cassandra/service/accord/
+```
+
+For each of those commits, check:
+
+1. **Serialization change without a version bump.** If a `serialize`/`deserialize` pair or a
+   `*Serializer` changed, is the change gated on a `Version` / `MessagingService` version? If not,
+   data an older build wrote stops being readable. `ClusterMetadataSnapshotLayoutTest` pins the TCM
+   snapshot; nothing pins the others.
+2. **A new method on a base class or interface.** List every subclass, in upstream's code and in the
+   fork's (`git grep -n "extends <Base>\|implements <Base>"`). For each one, decide whether the
+   inherited default is still correct for it. A wrapper that delegates a new accessor straight to the
+   wrapped object, bypassing what the subclass changed, is exactly the CASSANDRA-20166 bug.
+3. **A new fast path next to an old one.** When a commit adds a second way to read the same data, any
+   override of the old way must now cover the new one too.
+
+Put the commits you read and anything you flagged into the reply (see "Reporting back"). If one
+needs a fork-side fix, it gets its own commit with a test that fails without it, and an entry under
+"Fork feature touchpoints" below so the next merge knows to keep it.
+
 ## 2. Merge
 
 ```bash
@@ -290,8 +333,9 @@ is the part the user cannot see from the diff stat.
 
 ## Reporting back
 
-Tell the user: how many upstream commits landed, which files conflicted and how each was resolved,
-anything that needed a code fix to compile, and the test results. Keep it to a short list — they are
+Tell the user: how many upstream commits landed, which risky commits from step 1b you read and what
+you flagged, which files conflicted and how each was resolved, anything that needed a code fix to
+compile, and the test results. Keep it to a short list — they are
 syncing, not reading a report.
 
 **Say it out loud when a dependency version moved.** This fork ships to production as a single jar
