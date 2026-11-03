@@ -332,6 +332,23 @@ cold_window  : 목표 보존 기간 (예: 10y)
   `consistency`로 올려 읽습니다.
 - **관측:** `system_views.timeseries_tiering`의 `range_scans_merged` / `range_scans_refused`.
 
+### 3.1.1 파티션 키를 지정한 조회도 일반 컬럼 필터를 걸면 콜드 구간에서 거부됩니다 (r8)
+
+`WHERE tag_id = ? AND timestamp >= ? AND value_numeric > ? ALLOW FILTERING`처럼 파티션 키에 **일반 컬럼
+조건(또는 인덱스)** 을 더한 조회는 r7까지 콜드 구간의 청크 행을 **필터 없이** 섞어 돌려줬습니다. 레플리카는
+핫 행에만 필터를 적용하고, 청크 행은 그 뒤에 병합되기 때문입니다. 청크 행에만 따로 필터를 거는 것도 답이
+아닙니다. 필터에서 걸러진 핫 행이 통과하는 청크 행의 더 새로운 버전일 수 있기 때문입니다.
+
+r8은 이런 조회의 시간 범위가 콜드 경계에 닿으면 레인지 스캔과 같은 방식으로 **거부**합니다. 핫 구간 안에서만
+읽는 조회는 지금처럼 동작합니다. 고치는 법은 **시간 범위로만 읽고 조건은 애플리케이션에서 거르는 것**입니다.
+`system_views.timeseries_tiering`의 `filtered_reads_refused`로 집계됩니다.
+
+| 조회 | r8 결과 |
+| --- | --- |
+| `WHERE tag_id = ? AND timestamp >= ? AND timestamp < ?` | ✅ 병합 |
+| 같은 조회에 `AND value > ? ALLOW FILTERING` — 범위가 콜드 경계에 닿음 | ❌ 거부 |
+| 같은 조회 — 범위 전체가 콜드 경계 이후(핫 구간) | ✅ 레플리카가 필터 |
+
 ### 3.2 콜드 구간에서 값을 지우는 쓰기는 거부됩니다
 
 콜드 구간(청크 커버리지 상단과 `now - hot_window` 중 늦은 쪽보다 오래된 구간)에 대한 파티션 삭제,
@@ -389,11 +406,27 @@ TSCS만 쓰는 테이블에서는 이것이 오히려 의도된 방식입니다(
 돌려줬습니다. r4는 `hot_window`보다 오래된 클러스터링의 조건부 쓰기를 Paxos 전에 거부합니다. 조건 없는
 일반 쓰기(늦은 정정·백필)는 그대로 허용됩니다.
 
+### 3.2.4 콜드 클러스터링에 `hot_window`보다 짧은 TTL로 쓰면 거부됩니다 (r8)
+
+청크에는 TTL이 없습니다. 이미 청크로 옮겨진 클러스터링에 `USING TTL 60`처럼 짧은 TTL로 쓰면, 다음 사이클이
+병합하기 전에 TTL이 끝날 수 있습니다. 그러면 만료된 셀은 "없음"으로 읽히고, 사이클은 청크의 옛 값을 유지해
+덮어쓴 값이 **되살아납니다**. r8은 TTL이 `hot_window`보다 짧은 쓰기를 거부합니다(`cold_writes_refused`로 집계).
+TTL이 `hot_window` 이상이면 다음 사이클이 먼저 병합하므로 허용합니다(병합되면서 TTL은 사라집니다 — §2).
+TTL 없는 늦은 쓰기와 핫 구간의 TTL 쓰기는 영향이 없습니다. `default_time_to_live`가 `hot_window`보다 짧은
+테이블은 늦은 쓰기가 전부 여기에 걸립니다. 이미 경고 대상인 구성입니다(§2).
+
 ### 3.3 `transactional_mode`을 켜지 마십시오
 
 Accord 트랜잭션 **읽기**는 청크 병합을 거치지 않아 `hot_window` 이전 이력이 통째로 빠진 결과를
 조용히 돌려줍니다. 계층화는 그런 테이블을 거부하지만 **`ALTER TABLE`을 막지는 못합니다** — 실패는
 다음 사이클의 ERROR 로그로만 나타납니다.
+
+### 3.4 커서 컴팩션(`cursor_compaction_enabled`)은 켜지 마십시오
+
+6.0의 커서 컴팩션은 `conf/cassandra.yaml`에서 `false`, `conf/cassandra_latest.yaml`에서 `true`입니다. 이
+포크는 이를 TSCS의 윈도우 분할·동결과 함께 검증하지 않았습니다. BIG 포맷 출력에서만 동작하므로 노드
+41처럼 `selected_format: bti`이면 켜도 쓰이지 않지만, `cassandra_latest.yaml`을 바탕으로 설정을 옮길 때는
+`false`로 두십시오.
 
 ---
 
