@@ -638,6 +638,33 @@ public abstract class QueryOptions implements RealTimeFunctionContext
             assert orderedValues != null; // We should have called prepare first!
             return orderedValues;
         }
+
+        // The wrapper's versions of these read the wrapped values in the order the client sent them, which binds
+        // named values by position (an UPDATE sent with :owner before :holder wrote a new row keyed by the holder).
+        // Every accessor must see the order prepare() established, so the byte[] fast path is off here.
+        @Override
+        public int getValuesSize()
+        {
+            return getValues().size();
+        }
+
+        @Override
+        public ByteBuffer getValue(int index)
+        {
+            return getValues().get(index);
+        }
+
+        @Override
+        public boolean isByteArrayValuesGetSupported()
+        {
+            return false;
+        }
+
+        @Override
+        public byte[][] getByteArrayValues()
+        {
+            throw new IllegalStateException("named values are bound through getValues(); isByteArrayValuesGetSupported() is false");
+        }
     }
 
     // Options that are likely to not be present in most queries
