@@ -720,6 +720,28 @@ Operational note: late data arriving into an already-chunked window is merged au
 - **Use TSCS compaction** — window ordering, freeze and whole-window drops are automated for time series, and the current window is delegated to UCS (`scaling_parameters: 'T4'`). Express retention with `retention` (whole-window drop) or `default_time_to_live`.
 - `time_bucket(interval, ts)` must be the last element of `GROUP BY` (after the partition key columns) for the grouping to be pushed down into the read path.
 
+### 13.1 Recommended combinations — TSCS, tiering and TimeSeriesMemtable
+
+The three features interlock on the same **time window**. Each row adds to the one above it and saves more space.
+
+| Table | Combination | What it buys |
+| --- | --- | --- |
+| Every time-series table (the default) | **TSCS** | SSTables split by window, closed windows frozen to one SSTable each, whole-window drops via `retention`. Worth it on its own |
+| Long retention, space matters | **TSCS + tiering** | Old windows compressed into column-oriented chunks while SELECT stays unchanged. Tiering **refuses to install its policy on a non-TSCS table**: the re-encoder only covers the source rows with a range tombstone, and TSCS's freeze is the only thing that physically removes them from disk |
+| Even less space | **TSCS + tiering + `TimeSeriesMemtable`** | Data belonging to a cold window is flushed straight to chunks (`ColdWindowChunkFlush`), skipping the write-rows-then-delete-them step |
+
+- **Keep TSCS `window_size` equal to the tiering `chunk_window`.** If they differ, one chunk straddles two compaction windows (§11).
+- **`TimeSeriesMemtable` takes two steps**: (1) add a `memtable.configurations` key to `cassandra.yaml` on every node and restart, (2) `ALTER TABLE ... WITH memtable = '<key>'`. A node without the key logs one ERROR and **silently falls back** to the default memtable, so confirm it took effect on each node — [timeseries-memtable.md §2, §5](doc/timeseries/timeseries-memtable.md).
+
+### 13.2 Turning tiering on and running it
+
+- **Trial-run before a real table.** Tiering deletes the source rows, so from the moment it is on, `<table>__chunks` is the only copy. Run it on a regenerable table (or a copy) through one full retention cycle and one node restart first, and **confirm your backups include `__chunks` before the first re-encode** — [production-rollout.md §0](doc/timeseries/production-rollout.md).
+- **Make `hot_window` several times `chunk_window`.** If they are equal, a window is encoded the moment it closes and there is effectively no period in which `DELETE` works (§12.3).
+- **Watch the re-encoder.** A stalled cycle is silent. `consecutive_failures` in `SELECT * FROM system_views.timeseries_tiering` should be 0; `nodetool tieringstatus` shows each table's last run.
+- **Two TSCS warning signs**: the table MBean's `ParkedTimeSeriesWindows` (windows compaction could not make progress on) and `FarFutureTimeSeriesSSTables` (SSTables parked for future timestamps) should both be **empty**. There is no nodetool subcommand for them; read them with `nodetool sjk mx` — [prod-tscs-settings.md §2, §3](doc/timeseries/prod-tscs-settings.md).
+- **Dropping a tiered table has a fixed order**: (1) detach the policy with `ALTER TABLE ... WITH extensions = {}`, (2) `DROP` the shadow tables (`<table>__chunks` and the rest), (3) `DROP` the base table. Any other order is refused — on purpose, so cold data cannot be lost silently.
+- **Reading from Spark** needs [aster-tsdb-spark-connector](http://dev.kopens.io/common/aster-tsdb-spark-connector) `4.1.4-r1` or later and this build at `v6.0.0-r4` or later. Every connector scan is a token-range scan, and earlier servers refuse range scans on tiered tables.
+
 ---
 
 ## Building
