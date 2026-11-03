@@ -728,6 +728,28 @@ ALTER TABLE pp.tm_tag_point WITH extensions = {};
 - **TSCS 컴팩션**(`TimeSeriesCompactionStrategy`)을 쓰세요 — 창 정렬·동결·통삭제가 시계열에 맞게 자동화되고, 현재 창 내부는 UCS(`scaling_parameters: 'T4'`)에 위임됩니다. 보존은 `retention`(창 통삭제) 또는 `default_time_to_live`로 지정하면 됩니다.
 - `time_bucket(interval, ts)`는 `GROUP BY`의 마지막 요소(파티션 키 컬럼들 뒤)여야 그룹핑이 읽기 경로로 푸시다운됩니다.
 
+### 13.1 권장 조합 — TSCS · 계층화 · TimeSeriesMemtable
+
+세 기능은 같은 **시간 창**을 기준으로 맞물립니다. 위로 갈수록 기본, 아래로 갈수록 저장 공간을 더 줄입니다.
+
+| 테이블 성격 | 조합 | 얻는 것 |
+| --- | --- | --- |
+| 모든 시계열 테이블 (기본) | **TSCS** | 창 단위 SSTable 분리, 닫힌 창의 동결(창당 1 SSTable), `retention`에 의한 창 통삭제. 혼자 써도 충분히 이득입니다 |
+| 오래 보관하면서 공간을 줄일 테이블 | **TSCS + 계층화** | 오래된 창을 컬럼 지향 청크로 압축하고 SELECT는 그대로. 계층화는 **TSCS가 아닌 테이블에는 정책 설치 자체가 거부**됩니다 — 재인코더는 원본 행을 범위 툼스톤으로 지울 뿐이고, 그 아래 행을 디스크에서 실제로 비우는 것은 TSCS의 동결뿐이기 때문입니다 |
+| 더 줄이려면 | **TSCS + 계층화 + `TimeSeriesMemtable`** | 콜드 창에 해당하는 데이터는 flush 시 곧바로 청크로 써서(`ColdWindowChunkFlush`), 원본 행을 썼다가 다시 지우는 단계를 건너뜁니다 |
+
+- **TSCS `window_size`와 계층화 `chunk_window`는 같은 값으로** 두십시오. 어긋나면 청크 하나가 컴팩션 창 두 개에 걸칩니다(§11 유의사항).
+- **`TimeSeriesMemtable`은 두 단계로 켭니다**: ① 모든 노드의 `cassandra.yaml`에 `memtable.configurations` 키 추가 후 재시작, ② `ALTER TABLE ... WITH memtable = '<키>'`. 키가 없는 노드는 ERROR 로그 한 줄만 남기고 **조용히 기본 memtable로 폴백**하므로, 노드마다 실제로 켜졌는지 확인하십시오 — [timeseries-memtable.md §2, §5](doc/timeseries/timeseries-memtable.md).
+
+### 13.2 계층화를 켜고 운영할 때
+
+- **실제 테이블에 켜기 전에 시험 운영부터.** 계층화는 원본 행을 지우므로 켜는 순간부터 `<테이블>__chunks`가 유일한 사본입니다. 재생성 가능한 테이블(또는 사본)로 보존 주기 한 바퀴와 노드 재시작 1회를 거친 뒤 진행하고, **백업에 `__chunks`가 포함되는지 첫 재인코딩 전에** 확인하십시오 — [production-rollout.md §0](doc/timeseries/production-rollout.md).
+- **`hot_window`는 `chunk_window`의 몇 배로.** 같으면 창이 닫히자마자 인코딩되어 `DELETE`할 수 있는 기간이 사실상 없습니다(§12.3 유의사항).
+- **재인코더를 감시하십시오.** 멈춘 사이클은 아무 에러 없이 조용합니다. `SELECT * FROM system_views.timeseries_tiering`의 `consecutive_failures`가 0이어야 정상이고, `nodetool tieringstatus`로 테이블별 마지막 실행을 봅니다.
+- **TSCS 이상 신호 두 가지**: 테이블 MBean의 `ParkedTimeSeriesWindows`(진척 못 낸 창)와 `FarFutureTimeSeriesSSTables`(미래 타임스탬프로 파킹된 SSTable)는 **비어 있어야 정상**입니다. 전용 nodetool 명령이 없어 `nodetool sjk mx`로 읽습니다 — [prod-tscs-settings.md §2, §3](doc/timeseries/prod-tscs-settings.md).
+- **계층화된 테이블을 지우는 순서는 정해져 있습니다**: ① `ALTER TABLE ... WITH extensions = {}`로 정책 분리 → ② 그림자 테이블(`<테이블>__chunks` 등) `DROP` → ③ 베이스 테이블 `DROP`. 순서를 어기면 `DROP`이 거부됩니다 — 콜드 데이터를 조용히 잃지 않도록 일부러 막아 둔 것입니다.
+- **Spark로 읽을 때**는 [aster-tsdb-spark-connector](http://dev.kopens.io/common/aster-tsdb-spark-connector) `4.1.4-r1` 이상과 이 빌드 `v6.0.0-r4` 이상을 쓰십시오. 커넥터의 스캔은 모두 토큰 범위 스캔이라, 그 이전 서버는 계층화된 테이블의 범위 스캔을 거부합니다.
+
 ---
 
 ## 빌드
