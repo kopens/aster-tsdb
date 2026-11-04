@@ -66,7 +66,7 @@ public class TscolTableReader extends BtiTableReader
         {
             in.seek(indexEntry.position);
             ByteBufferUtil.skipShortLength(in);                               // the partition key
-            return ColumnarPartitions.iterator(ColumnarPartitions.read(this, in, key, selectedColumns, slices), slices, reversed);
+            return ColumnarPartitions.read(this, in, key, selectedColumns, slices, reversed);
         }
         catch (IOException | CorruptSSTableException e)
         {

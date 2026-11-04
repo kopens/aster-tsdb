@@ -59,6 +59,18 @@ public final class TscolBody
      */
     public static List<Row> readColumnar(TableMetadata metadata, DataInputPlus in, ColumnFilter columns, BlockSelector selector) throws IOException
     {
+        List<Row> rows = new ArrayList<>();
+        for (ByteBuffer block : readBlocks(metadata, in, selector))
+            rows.addAll(RowBlockCodec.decode(metadata, block, columns));
+        return rows;
+    }
+
+    /**
+     * Reads the columnar body and the end-of-partition byte after it, keeping the selected blocks' bytes undecoded --
+     * for a reader that decodes them one at a time as it is pulled.
+     */
+    public static List<ByteBuffer> readBlocks(TableMetadata metadata, DataInputPlus in, BlockSelector selector) throws IOException
+    {
         int blockCount = in.readUnsignedVInt32();
         long[] min = new long[blockCount], max = new long[blockCount];
         int[] length = new int[blockCount];
@@ -69,7 +81,7 @@ public final class TscolBody
             in.readUnsignedVInt32();                                           // row count, for tools
             length[i] = in.readUnsignedVInt32();
         }
-        List<Row> rows = new ArrayList<>();
+        List<ByteBuffer> blocks = new ArrayList<>();
         for (int i = 0; i < blockCount; i++)
         {
             if (!selector.wants(min[i], max[i]))
@@ -79,10 +91,10 @@ public final class TscolBody
             }
             byte[] block = new byte[length[i]];
             in.readFully(block);
-            rows.addAll(RowBlockCodec.decode(metadata, ByteBuffer.wrap(block), columns));
+            blocks.add(ByteBuffer.wrap(block));
         }
         if (!UnfilteredSerializer.isEndOfPartition(in.readUnsignedByte()))
             throw new IOException("columnar partition body of " + metadata + " is not followed by an end-of-partition byte");
-        return rows;
+        return blocks;
     }
 }

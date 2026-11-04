@@ -207,71 +207,93 @@ public final class RowBlockCodec
         for (ColumnMetadata column : metadata.regularColumns())
             if (columns == null || columns.fetches(column))
                 emitted.add(column);
+        int c = emitted.size();
 
         Set<String> projection = new HashSet<>(List.of(ROW_TS, ROW_TTL, ROW_LDT, ROW_BASE));
-        boolean[] queried = new boolean[emitted.size()];
-        for (int i = 0; i < emitted.size(); i++)
+        boolean[] queried = new boolean[c];
+        String[] names = new String[c];
+        for (int i = 0; i < c; i++)
         {
             ColumnMetadata column = emitted.get(i);
-            String name = column.name.toString();
+            names[i] = column.name.toString();
             queried[i] = columns == null || columns.fetchedColumnIsQueried(column);
-            Collections.addAll(projection, WT + name, TTL + name, LDT + name, DEL + name);
+            Collections.addAll(projection, WT + names[i], TTL + names[i], LDT + names[i], DEL + names[i]);
             if (queried[i])
-                projection.add(name);                                     // an unqueried column's values are never read
+                projection.add(names[i]);                                 // an unqueried column's values are never read
         }
 
         ColumnarCursor cursor = ColumnarChunkCodec.cursor(payload, projection);
-        List<Row> rows = new ArrayList<>();
+        // Every name resolved once per block, not once per row and column (ColumnarCursor#columnSlot).
+        int rowTsSlot = cursor.columnSlot(ROW_TS), rowTtlSlot = cursor.columnSlot(ROW_TTL);
+        int rowLdtSlot = cursor.columnSlot(ROW_LDT), rowBaseSlot = cursor.columnSlot(ROW_BASE);
+        int[] valueSlot = new int[c], wtSlot = new int[c], ttlSlot = new int[c], ldtSlot = new int[c], delSlot = new int[c];
+        for (int i = 0; i < c; i++)
+        {
+            valueSlot[i] = queried[i] ? cursor.columnSlot(names[i]) : ColumnarCursor.ABSENT_COLUMN;
+            wtSlot[i] = cursor.columnSlot(WT + names[i]);
+            ttlSlot[i] = cursor.columnSlot(TTL + names[i]);
+            ldtSlot[i] = cursor.columnSlot(LDT + names[i]);
+            delSlot[i] = cursor.columnSlot(DEL + names[i]);
+        }
+
+        List<Row> rows = new ArrayList<>(ColumnarChunkCodec.rowCount(payload));
         Row.Builder builder = BTreeRow.sortedBuilder();
         while (cursor.advance())
         {
             builder.newRow(Clustering.make(TimestampType.instance.fromTimeInMillis(cursor.timestamp())));
             long base;
             long livenessTimestamp = LivenessInfo.NO_TIMESTAMP;
-            ByteBuffer ts = cursor.getBytes(ROW_TS);
+            ByteBuffer ts = cursor.getBytes(rowTsSlot);
             if (ts != null)
             {
-                base = LongType.instance.compose(ts);
+                base = longAt(ts);
                 livenessTimestamp = base;
-                ByteBuffer rowTtl = cursor.getBytes(ROW_TTL);
+                ByteBuffer rowTtl = cursor.getBytes(rowTtlSlot);
                 builder.addPrimaryKeyLivenessInfo(rowTtl == null
                                                   ? LivenessInfo.create(base)
-                                                  : LivenessInfo.withExpirationTime(base, Int32Type.instance.compose(rowTtl),
-                                                                                    LongType.instance.compose(cursor.getBytes(ROW_LDT))));
+                                                  : LivenessInfo.withExpirationTime(base, intAt(rowTtl), longAt(cursor.getBytes(rowLdtSlot))));
             }
             else
             {
-                base = LongType.instance.compose(cursor.getBytes(ROW_BASE));
+                base = longAt(cursor.getBytes(rowBaseSlot));
             }
 
-            for (int i = 0; i < emitted.size(); i++)
+            for (int i = 0; i < c; i++)
             {
-                ColumnMetadata column = emitted.get(i);
-                String name = column.name.toString();
-                ByteBuffer delta = cursor.getBytes(WT + name);
+                ByteBuffer delta = cursor.getBytes(wtSlot[i]);
                 if (delta == null)
                     continue;                                             // no cell for this column on this row
-                long timestamp = base + LongType.instance.compose(delta);
+                long timestamp = base + longAt(delta);
                 if (!queried[i] && timestamp < livenessTimestamp)
                     continue;                                             // the row marker already proves the row live
-                if (cursor.getBytes(DEL + name) != null)
+                ColumnMetadata column = emitted.get(i);
+                if (cursor.getBytes(delSlot[i]) != null)
                 {
-                    builder.addCell(new BufferCell(column, timestamp, Cell.NO_TTL, LongType.instance.compose(cursor.getBytes(LDT + name)),
+                    builder.addCell(new BufferCell(column, timestamp, Cell.NO_TTL, longAt(cursor.getBytes(ldtSlot[i])),
                                                    ByteBufferUtil.EMPTY_BYTE_BUFFER, null));
                     continue;
                 }
-                ByteBuffer value = queried[i] ? cursor.getBytes(name) : ByteBufferUtil.EMPTY_BYTE_BUFFER;
-                ByteBuffer cellTtl = cursor.getBytes(TTL + name);
+                ByteBuffer value = queried[i] ? cursor.getBytes(valueSlot[i]) : ByteBufferUtil.EMPTY_BYTE_BUFFER;
+                ByteBuffer cellTtl = cursor.getBytes(ttlSlot[i]);
                 builder.addCell(cellTtl == null
                                 ? BufferCell.live(column, timestamp, value)
-                                : new BufferCell(column, timestamp, Int32Type.instance.compose(cellTtl),
-                                                 LongType.instance.compose(cursor.getBytes(LDT + name)), value, null));
+                                : new BufferCell(column, timestamp, intAt(cellTtl), longAt(cursor.getBytes(ldtSlot[i])), value, null));
             }
             rows.add(builder.build());
         }
         if (isDescending(metadata))
             Collections.reverse(rows);
         return rows;
+    }
+
+    private static long longAt(ByteBuffer serialized)
+    {
+        return serialized.getLong(serialized.position());
+    }
+
+    private static int intAt(ByteBuffer serialized)
+    {
+        return serialized.getInt(serialized.position());
     }
 
     private static boolean isDescending(TableMetadata metadata)

@@ -41,6 +41,7 @@ import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.db.rows.UnfilteredSerializer;
+import org.apache.cassandra.db.timeseries.RowBlockCodec;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
@@ -59,12 +60,12 @@ final class ColumnarPartitions
     }
 
     /**
-     * @param in positioned just after the partition key; left just after the partition's end-of-partition byte
-     * @param slices the clusterings the caller will read, used only to skip blocks that cannot intersect them;
-     *               {@link Slices#ALL} decodes every block
+     * @param in positioned just after the partition key; left just after the partition's end-of-partition byte (every
+     *           byte the iterator needs is read before this returns, so the caller may close {@code in} at once)
+     * @param slices the clusterings to return; blocks that cannot intersect them are not even read
      */
-    static ImmutableBTreePartition read(SSTableReader sstable, FileDataInput in, DecoratedKey key,
-                                        ColumnFilter columns, Slices slices) throws IOException
+    static UnfilteredRowIterator read(SSTableReader sstable, FileDataInput in, DecoratedKey key,
+                                      ColumnFilter columns, Slices slices, boolean reversed) throws IOException
     {
         TableMetadata metadata = sstable.metadata();
         DeserializationHelper helper = new DeserializationHelper(metadata, sstable.descriptor.version.correspondingMessagingVersion(),
@@ -80,31 +81,26 @@ final class ColumnarPartitions
                 staticRow = UnfilteredSerializer.serializer.deserializeStaticRow(in, sstable.header, helper);
         }
 
-        List<Unfiltered> unfiltereds = new ArrayList<>();
         int kind = in.readUnsignedByte();
-        if (kind == TscolPartitionWriter.KIND_ROWS)
+        if (kind == TscolPartitionWriter.KIND_COLUMNAR)
         {
-            Row.Builder builder = BTreeRow.sortedBuilder();
-            Unfiltered unfiltered;
-            while ((unfiltered = UnfilteredSerializer.serializer.deserialize(in, sstable.header, helper, builder)) != null)
-                unfiltereds.add(unfiltered);
+            // No range tombstones and no row deletions in a columnar body: rows in clustering order, filtered by the
+            // slices, are the whole answer. Decoded lazily, one block at a time, in the direction asked for.
+            List<ByteBuffer> blocks = TscolBody.readBlocks(metadata, in, (min, max) -> mayIntersect(metadata, slices, min, max));
+            return new BlockIterator(metadata, key, partitionDeletion, columns, staticRow, reversed, sstable, blocks, slices);
         }
-        else if (kind == TscolPartitionWriter.KIND_COLUMNAR)
-        {
-            unfiltereds.addAll(TscolBody.readColumnar(metadata, in, columns, (min, max) -> mayIntersect(metadata, slices, min, max)));
-        }
-        else
-        {
+        if (kind != TscolPartitionWriter.KIND_ROWS)
             throw new CorruptSSTableException(new IOException("unknown partition body kind " + kind + " for " + key), in.getPath());
-        }
 
-        return ImmutableBTreePartition.create(new ListIterator(metadata, key, partitionDeletion, columns, staticRow, unfiltereds, sstable),
-                                              unfiltereds.size(), true);
-    }
-
-    /** The partition, restricted to {@code slices} in the requested direction. */
-    static UnfilteredRowIterator iterator(ImmutableBTreePartition partition, Slices slices, boolean reversed)
-    {
+        // The row-format fallback (range tombstones, row deletions): materialised so slicing clips markers exactly as
+        // an in-memory partition does. Rare by construction.
+        List<Unfiltered> unfiltereds = new ArrayList<>();
+        Row.Builder builder = BTreeRow.sortedBuilder();
+        Unfiltered unfiltered;
+        while ((unfiltered = UnfilteredSerializer.serializer.deserialize(in, sstable.header, helper, builder)) != null)
+            unfiltereds.add(unfiltered);
+        ImmutableBTreePartition partition = ImmutableBTreePartition.create(new ListIterator(metadata, key, partitionDeletion, columns, staticRow, unfiltereds, sstable),
+                                                                           unfiltereds.size(), true);
         return partition.unfilteredIterator(ColumnFilter.all(partition.columns()), slices, reversed);
     }
 
@@ -119,6 +115,48 @@ final class ColumnarPartitions
         Slice block = Slice.make(ClusteringBound.inclusiveStartOf(descending ? high : low),
                                  ClusteringBound.inclusiveEndOf(descending ? low : high));
         return slices.intersects(block);
+    }
+
+    /** A columnar partition's rows, decoded block by block as they are pulled, kept to {@code slices}. */
+    private static final class BlockIterator extends AbstractUnfilteredRowIterator
+    {
+        private final TableMetadata table;
+        private final List<ByteBuffer> blocks;
+        private final ColumnFilter columns;
+        private final Slices slices;
+        private int nextBlock;
+        private List<Row> current = List.of();
+        private int position;
+
+        BlockIterator(TableMetadata metadata, DecoratedKey key, DeletionTime partitionDeletion, ColumnFilter columns,
+                      Row staticRow, boolean reversed, SSTableReader sstable, List<ByteBuffer> blocks, Slices slices)
+        {
+            super(metadata, key, partitionDeletion, columns.fetchedColumns(), staticRow, reversed, sstable.stats());
+            this.table = metadata;
+            this.blocks = blocks;
+            this.columns = columns;
+            this.slices = slices;
+            this.nextBlock = reversed ? blocks.size() - 1 : 0;
+            this.position = reversed ? -1 : 0;                       // nothing decoded yet, in either direction
+        }
+
+        @Override
+        protected Unfiltered computeNext()
+        {
+            while (true)
+            {
+                while (isReverseOrder ? position >= 0 : position < current.size())
+                {
+                    Row row = current.get(isReverseOrder ? position-- : position++);
+                    if (slices.selects(row.clustering()))
+                        return row;
+                }
+                if (isReverseOrder ? nextBlock < 0 : nextBlock >= blocks.size())
+                    return endOfData();
+                current = RowBlockCodec.decode(table, blocks.get(isReverseOrder ? nextBlock-- : nextBlock++), columns);
+                position = isReverseOrder ? current.size() - 1 : 0;
+            }
+        }
     }
 
     private static final class ListIterator extends AbstractUnfilteredRowIterator
