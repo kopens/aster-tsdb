@@ -88,6 +88,8 @@ public class TscolSSTableTest extends CQLTester
         assertTrue("columnar " + columnar.uncompressedLength() + " vs rows " + rows.uncompressedLength(),
                    columnar.uncompressedLength() < rows.uncompressedLength());
 
+        // Cell for cell, as a replica next to a row-format one must answer; the one-replica shortcut has its own test.
+        ColumnarPartitions.exactCellsForTesting = true;
         ColumnMetadata v = cfs.metadata().getColumn(org.apache.cassandra.cql3.ColumnIdentifier.getInterned("v", false));
         List<ColumnFilter> filters = List.of(ColumnFilter.all(cfs.metadata()),
                                              ColumnFilter.selection(cfs.metadata(), RegularAndStaticColumns.of(v), false));
@@ -119,6 +121,7 @@ public class TscolSSTableTest extends CQLTester
             }
             assertTrue(!b.hasNext());
         }
+        ColumnarPartitions.exactCellsForTesting = false;
         columnar.selfRef().release();
     }
 

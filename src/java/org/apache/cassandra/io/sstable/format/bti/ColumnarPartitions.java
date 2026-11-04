@@ -24,10 +24,13 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ClusteringBound;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
+import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.Slice;
 import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.filter.ColumnFilter;
@@ -45,6 +48,7 @@ import org.apache.cassandra.db.timeseries.RowBlockCodec;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
+import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
 
 /**
@@ -55,8 +59,20 @@ import org.apache.cassandra.schema.TableMetadata;
  */
 final class ColumnarPartitions
 {
+    /** Test-only: read every table as if it had several replicas, so rows match row format's cell for cell. */
+    @VisibleForTesting
+    static volatile boolean exactCellsForTesting;
+
     private ColumnarPartitions()
     {
+    }
+
+    /** With one replica no digest is ever compared with another format's, so redundant cells can be left out. */
+    private static boolean skipRedundantCells(TableMetadata metadata)
+    {
+        // Not Keyspace.open: an offline tool has no keyspace to open, and reads cell for cell anyway.
+        Keyspace keyspace = Schema.instance.getKeyspaceInstance(metadata.keyspace);
+        return !exactCellsForTesting && keyspace != null && keyspace.getReplicationStrategy().getReplicationFactor().allReplicas == 1;
     }
 
     /**
@@ -124,6 +140,7 @@ final class ColumnarPartitions
         private final List<ByteBuffer> blocks;
         private final ColumnFilter columns;
         private final Slices slices;
+        private final boolean skipRedundant;
         private int nextBlock;
         private List<Row> current = List.of();
         private int position;
@@ -136,6 +153,7 @@ final class ColumnarPartitions
             this.blocks = blocks;
             this.columns = columns;
             this.slices = slices;
+            this.skipRedundant = skipRedundantCells(metadata);
             this.nextBlock = reversed ? blocks.size() - 1 : 0;
             this.position = reversed ? -1 : 0;                       // nothing decoded yet, in either direction
         }
@@ -153,7 +171,7 @@ final class ColumnarPartitions
                 }
                 if (isReverseOrder ? nextBlock < 0 : nextBlock >= blocks.size())
                     return endOfData();
-                current = RowBlockCodec.decode(table, blocks.get(isReverseOrder ? nextBlock-- : nextBlock++), columns);
+                current = RowBlockCodec.decode(table, blocks.get(isReverseOrder ? nextBlock-- : nextBlock++), columns, skipRedundant);
                 position = isReverseOrder ? current.size() - 1 : 0;
             }
         }

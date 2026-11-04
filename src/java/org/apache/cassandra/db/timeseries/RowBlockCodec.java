@@ -76,6 +76,12 @@ public final class RowBlockCodec
     private static final String TTL = "\0ttl.";
     private static final String LDT = "\0ldt.";
     private static final String DEL = "\0del.";
+    /**
+     * Present (and all null, so O(1)) when every cell of the column in this block is live, never expires and carries
+     * its row's own timestamp. Such a column has nothing but values to say, which is what lets
+     * {@link #decode(TableMetadata, ByteBuffer, ColumnFilter, boolean)} pass over it entirely when it is not queried.
+     */
+    private static final String PLAIN = "\0plain.";
 
     private RowBlockCodec()
     {
@@ -186,9 +192,12 @@ public final class RowBlockCodec
             inputs.put(name, new ChunkV4Codec.ColumnInput(ChunkColumnTypes.typeCodeFor(column.type),
                                                           ChunkColumnTypes.statOrderFor(column.type), values[i]));
             put(inputs, WT + name, LongType.instance, wt[i]);
-            put(inputs, TTL + name, Int32Type.instance, ttl[i]);
-            put(inputs, LDT + name, LongType.instance, ldt[i]);
-            put(inputs, DEL + name, BooleanType.instance, del[i]);
+            // All null is the usual case; a column left out costs no directory entry and no per-cell lookup.
+            putUnlessAllNull(inputs, TTL + name, Int32Type.instance, ttl[i]);
+            putUnlessAllNull(inputs, LDT + name, LongType.instance, ldt[i]);
+            putUnlessAllNull(inputs, DEL + name, BooleanType.instance, del[i]);
+            if (allNull(ttl[i]) && allNull(del[i]) && deltasAllZero(wt[i]))
+                put(inputs, PLAIN + name, BooleanType.instance, new ByteBuffer[n]);
         }
         return ColumnarChunkCodec.encode(timestamps, n, inputs);
     }
@@ -202,6 +211,18 @@ public final class RowBlockCodec
      * @return the rows {@link #encode} was given, in the table's clustering order, filtered as above
      */
     public static List<Row> decode(TableMetadata metadata, ByteBuffer payload, ColumnFilter columns)
+    {
+        return decode(metadata, payload, columns, false);
+    }
+
+    /**
+     * @param skipRedundantCells leave out the value-less cells of unqueried columns where they prove nothing: a plain
+     *                           column's cell on a row with a non-expiring marker has the marker's own timestamp, so
+     *                           anything that shadows the one shadows the other and the row's liveness does not depend
+     *                           on it. The answer is the same, and most of a narrow scan's work is gone, but the rows
+     *                           differ from row format's, and so would their digest: only for a table with one replica.
+     */
+    public static List<Row> decode(TableMetadata metadata, ByteBuffer payload, ColumnFilter columns, boolean skipRedundantCells)
     {
         List<ColumnMetadata> emitted = new ArrayList<>();
         for (ColumnMetadata column : metadata.regularColumns())
@@ -217,7 +238,7 @@ public final class RowBlockCodec
             ColumnMetadata column = emitted.get(i);
             names[i] = column.name.toString();
             queried[i] = columns == null || columns.fetchedColumnIsQueried(column);
-            Collections.addAll(projection, WT + names[i], TTL + names[i], LDT + names[i], DEL + names[i]);
+            Collections.addAll(projection, WT + names[i], TTL + names[i], LDT + names[i], DEL + names[i], PLAIN + names[i]);
             if (queried[i])
                 projection.add(names[i]);                                 // an unqueried column's values are never read
         }
@@ -227,6 +248,7 @@ public final class RowBlockCodec
         int rowTsSlot = cursor.columnSlot(ROW_TS), rowTtlSlot = cursor.columnSlot(ROW_TTL);
         int rowLdtSlot = cursor.columnSlot(ROW_LDT), rowBaseSlot = cursor.columnSlot(ROW_BASE);
         int[] valueSlot = new int[c], wtSlot = new int[c], ttlSlot = new int[c], ldtSlot = new int[c], delSlot = new int[c];
+        boolean[] skippable = new boolean[c];
         for (int i = 0; i < c; i++)
         {
             valueSlot[i] = queried[i] ? cursor.columnSlot(names[i]) : ColumnarCursor.ABSENT_COLUMN;
@@ -234,6 +256,7 @@ public final class RowBlockCodec
             ttlSlot[i] = cursor.columnSlot(TTL + names[i]);
             ldtSlot[i] = cursor.columnSlot(LDT + names[i]);
             delSlot[i] = cursor.columnSlot(DEL + names[i]);
+            skippable[i] = skipRedundantCells && !queried[i] && cursor.columnSlot(PLAIN + names[i]) != ColumnarCursor.ABSENT_COLUMN;
         }
 
         List<Row> rows = new ArrayList<>(ColumnarChunkCodec.rowCount(payload));
@@ -243,12 +266,14 @@ public final class RowBlockCodec
             builder.newRow(Clustering.make(TimestampType.instance.fromTimeInMillis(cursor.timestamp())));
             long base;
             long livenessTimestamp = LivenessInfo.NO_TIMESTAMP;
+            boolean permanentMarker = false;
             ByteBuffer ts = cursor.getBytes(rowTsSlot);
             if (ts != null)
             {
                 base = longAt(ts);
                 livenessTimestamp = base;
                 ByteBuffer rowTtl = cursor.getBytes(rowTtlSlot);
+                permanentMarker = rowTtl == null;
                 builder.addPrimaryKeyLivenessInfo(rowTtl == null
                                                   ? LivenessInfo.create(base)
                                                   : LivenessInfo.withExpirationTime(base, intAt(rowTtl), longAt(cursor.getBytes(rowLdtSlot))));
@@ -260,6 +285,8 @@ public final class RowBlockCodec
 
             for (int i = 0; i < c; i++)
             {
+                if (permanentMarker && skippable[i])
+                    continue;
                 ByteBuffer delta = cursor.getBytes(wtSlot[i]);
                 if (delta == null)
                     continue;                                             // no cell for this column on this row
@@ -284,6 +311,29 @@ public final class RowBlockCodec
         if (isDescending(metadata))
             Collections.reverse(rows);
         return rows;
+    }
+
+    private static boolean allNull(ByteBuffer[] values)
+    {
+        for (ByteBuffer value : values)
+            if (value != null)
+                return false;
+        return true;
+    }
+
+    private static boolean deltasAllZero(ByteBuffer[] deltas)
+    {
+        for (ByteBuffer delta : deltas)
+            if (delta != null && longAt(delta) != 0)
+                return false;
+        return true;
+    }
+
+    private static void putUnlessAllNull(SortedMap<String, ChunkV4Codec.ColumnInput> inputs, String name,
+                                         org.apache.cassandra.db.marshal.AbstractType<?> type, ByteBuffer[] values)
+    {
+        if (!allNull(values))
+            put(inputs, name, type, values);
     }
 
     private static long longAt(ByteBuffer serialized)

@@ -175,6 +175,40 @@ public class RowBlockCodecTest
         assertEquals(rows.get(1).getCell(col(t, "s")).withSkippedValue(), second.getCell(col(t, "s")));
     }
 
+    /**
+     * With one replica the value-less cells of unqueried plain columns are left out -- but only where they prove
+     * nothing: a row without a marker, with an expiring marker, or a column with any cell of its own timestamp, TTL
+     * or tombstone in the block keeps them, because those cells can be all that keeps the row alive.
+     */
+    @Test
+    public void redundantCellsAreSkippedOnlyWhereTheyProveNothing()
+    {
+        TableMetadata t = table(false);
+        ColumnFilter onlyV = ColumnFilter.selection(t, RegularAndStaticColumns.of(col(t, "v")), false);
+
+        List<Row> plain = List.of(full(t, 1_000, 1000), full(t, 2_000, 1001));
+        for (Row row : RowBlockCodec.decode(t, RowBlockCodec.encode(t, plain), onlyV, true))
+        {
+            assertEquals("only the queried column", 1, row.columnCount());
+            assertTrue(!row.primaryKeyLivenessInfo().isEmpty());
+        }
+
+        Row.Builder noMarker = newRow(1_000);                                 // made by UPDATE alone
+        noMarker.addCell(BufferCell.live(col(t, "s"), 500, UTF8Type.instance.decompose("x")));
+        Row.Builder expiring = newRow(2_000);
+        expiring.addPrimaryKeyLivenessInfo(LivenessInfo.expiring(600, 60, NOW_SEC));
+        expiring.addCell(BufferCell.live(col(t, "s"), 600, UTF8Type.instance.decompose("y")));
+        List<Row> kept = RowBlockCodec.decode(t, RowBlockCodec.encode(t, List.of(noMarker.build(), expiring.build())), onlyV, true);
+        assertEquals("the row has no marker: its cell is its liveness", 1, kept.get(0).columnCount());
+        assertEquals("the marker can expire before the cell", 1, kept.get(1).columnCount());
+
+        Row.Builder late = newRow(1_000);
+        late.addPrimaryKeyLivenessInfo(LivenessInfo.create(700));
+        late.addCell(BufferCell.live(col(t, "s"), 900, UTF8Type.instance.decompose("z")));   // newer than the marker
+        assertEquals("a cell newer than the marker can outlive it", 1,
+                     RowBlockCodec.decode(t, RowBlockCodec.encode(t, List.of(late.build())), onlyV, true).get(0).columnCount());
+    }
+
     @Test
     public void cellWritetimesSurviveLateColumnUpdates()
     {
