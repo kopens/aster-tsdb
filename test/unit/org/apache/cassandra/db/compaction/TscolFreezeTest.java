@@ -94,6 +94,41 @@ public class TscolFreezeTest extends CQLTester
         assertEquals(99.0, execute("SELECT v FROM %s WHERE tag = 't1' AND ts = ?", new Date(1000L)).one().getDouble("v"), 0.0);
     }
 
+    /**
+     * Windows frozen before frozen_format = 'columnar' was set -- or restored by nodetool untier -- are single
+     * row-format sstables that nothing would ever rewrite. Turning the option on makes each of them one freeze
+     * candidate, converted once to tscol and then left alone.
+     */
+    @Test
+    public void windowsFrozenInRowFormatConvertOnceTheOptionIsSet() throws Throwable
+    {
+        createTable("CREATE TABLE %s (tag text, ts timestamp, v double, PRIMARY KEY (tag, ts)) WITH compaction = " +
+                    "{'class': 'TimeSeriesCompactionStrategy', 'window_size': '1m', 'freeze_after': '1m'}");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        long windowMicros = ((System.currentTimeMillis() - 3_600_000L) / 60_000L * 60_000L) * 1000L;
+        for (int sstable = 0; sstable < 2; sstable++)
+        {
+            for (int i = 0; i < 100; i++)
+                execute("INSERT INTO %s (tag, ts, v) VALUES ('a', ?, ?) USING TIMESTAMP ?", new Date(sstable * 100_000L + i * 1000L), (double) i, windowMicros + i);
+            flush();
+        }
+        runOnlyFreezeTask(cfs);
+        assertFalse(TscolFormat.is(Iterables.getOnlyElement(cfs.getLiveSSTables()).descriptor.getFormat()));
+        List<UntypedResultSet> expected = run(List.of("SELECT * FROM %s"));
+
+        alterTable("ALTER TABLE %s WITH compaction = {'class': 'TimeSeriesCompactionStrategy', 'window_size': '1m', " +
+                   "'freeze_after': '1m', 'frozen_format': 'columnar'}");
+        cfs.disableAutoCompaction();
+        runOnlyFreezeTask(cfs);
+        assertTrue(TscolFormat.is(Iterables.getOnlyElement(cfs.getLiveSSTables()).descriptor.getFormat()));
+        assertSame(List.of("SELECT * FROM %s"), expected, run(List.of("SELECT * FROM %s")));
+
+        TimeSeriesCompactionStrategy tscs = (TimeSeriesCompactionStrategy)
+            cfs.getCompactionStrategyManager().getCompactionStrategyFor(cfs.getLiveSSTables().iterator().next());
+        assertTrue("a converted window is FROZEN: nothing more to do", tscs.getNextBackgroundTasks(FBUtilities.nowInSeconds()).isEmpty());
+    }
+
     @Test
     public void rowFormatIsTheDefaultAndUnsupportedShapesStayRowFormat() throws Throwable
     {

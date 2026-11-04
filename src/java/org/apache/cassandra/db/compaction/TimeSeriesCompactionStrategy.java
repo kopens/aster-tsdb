@@ -54,6 +54,7 @@ import org.apache.cassandra.index.Index;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableMultiWriter;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.bti.TscolFormat;
 import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.Clock;
@@ -284,7 +285,9 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
             // starts from the ELIGIBLE subset, never the whole window: see RewriteCandidate.
             Set<SSTableReader> toFreeze = new HashSet<>(AbstractCompactionStrategy.filterSuspectSSTables(freeze.eligible));
             toFreeze.retainAll(cfs.getLiveSSTables());
-            if (toFreeze.size() > 1)                      // a single survivor is already "frozen enough"; self-heals next round
+            // A single survivor is already "frozen enough" -- unless it is the one sstable of a window awaiting
+            // conversion to the columnar format, which is the whole point of the candidate.
+            if (toFreeze.size() > 1 || (toFreeze.size() == 1 && toFreeze.size() == freeze.window.size() && convertsAlone(toFreeze)))
             {
                 LifecycleTransaction txn = cfs.getTracker().tryModify(toFreeze, OperationType.COMPACTION);
                 if (txn != null)
@@ -760,10 +763,32 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
         if (windowSSTables.size() == 1)
         {
             SSTableReader only = windowSSTables.iterator().next();
-            if (tsOptions.windowStartFor(minTimestampMillis(only)) == tsOptions.windowStartFor(maxTimestampMillis(only)))
+            if (contained(only) && !awaitsColumnarConversion(only))
                 return WindowState.FROZEN;
         }
         return WindowState.FREEZING;
+    }
+
+    private boolean convertsAlone(Set<SSTableReader> window)
+    {
+        SSTableReader only = window.iterator().next();
+        return contained(only) && awaitsColumnarConversion(only);
+    }
+
+    private boolean contained(SSTableReader sstable)
+    {
+        return tsOptions.windowStartFor(minTimestampMillis(sstable)) == tsOptions.windowStartFor(maxTimestampMillis(sstable));
+    }
+
+    /**
+     * A window frozen before {@code frozen_format = 'columnar'} was set (or restored by {@code nodetool untier}) is one
+     * row-format sstable: without this it would stay FROZEN in row format forever, since nothing ever rewrites a
+     * frozen window that gains no data. With it the window is FREEZING until one freeze has rewritten it as tscol.
+     */
+    private boolean awaitsColumnarConversion(SSTableReader sstable)
+    {
+        // The option first: it is false on every table that has not asked for columnar, where nothing else need be read.
+        return FreezeCompactionTask.writesColumnar(cfs, tsOptions.columnarFreeze) && !TscolFormat.is(sstable.descriptor.getFormat());
     }
 
     /**
@@ -825,7 +850,10 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
             // future predicate change cannot silently start freeze-judging garbage timestamps.
             if (tsOptions.isFarFutureWindow(window.getKey(), round.nowMillis))
                 continue;
-            if (window.getValue().size() < 2)
+            // One contained sstable is a candidate only to convert it to the columnar format (see
+            // awaitsColumnarConversion); a spanning one belongs to the split branch.
+            int minimum = window.getValue().size() == 1 && convertsAlone(window.getValue()) ? 1 : 2;
+            if (window.getValue().size() < minimum)
                 continue;
             if (classify(window.getKey(), window.getValue(), round.nowMillis) != WindowState.FREEZING)
                 continue;
@@ -835,7 +863,7 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
             if (oldest != null)
                 continue;                                 // already picked; keep counting the backlog
             Set<SSTableReader> eligible = round.eligible(window.getValue());
-            if (eligible.size() < 2)
+            if (eligible.size() < minimum)
                 continue;                                 // blocked this round, not done: try the next-oldest
             oldest = new RewriteCandidate(window.getKey(), window.getValue(), eligible);
         }
@@ -870,6 +898,8 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
                 continue;                                 // same precondition hygiene as nextFreezeCandidate
             if (window.getValue().size() != 1)
                 continue;
+            if (convertsAlone(window.getValue()))
+                continue;                                 // contained, awaiting columnar conversion: the freeze branch's
             if (classify(window.getKey(), window.getValue(), round.nowMillis) != WindowState.FREEZING)
                 continue;                                 // FROZEN (contained) or still active/expired
             if (isParked(window.getKey(), window.getValue()))
