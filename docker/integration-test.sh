@@ -938,6 +938,61 @@ check "and the rows still read back through the merge" \
       WHERE tag_id='s' AND timestamp >= $SWEPT_WIN_MS AND timestamp < $(( SWEPT_WIN_MS + 3600000 ));" \
     '^ *2$'
 
+section "tscol: closed windows freeze into the columnar sstable format"
+# frozen_format = 'columnar' makes TSCS write each frozen window as a tscol sstable (columnar blocks of the chunk
+# codec inside a BTI-derived sstable). Everything else about the table is ordinary: the same CQL, the same answers,
+# late writes and deletes into the frozen window just land in a new sstable and the window refreezes.
+TSCOL_W=$(( (NOW_MS / 60000 - 30) * 60000 ))      # one window, 30 minutes ago
+cql "
+CREATE TABLE IF NOT EXISTS it.tscolfz (
+    tag text, ts timestamp, v double, q int,
+    PRIMARY KEY (tag, ts)
+) WITH compaction = {'class':'TimeSeriesCompactionStrategy',
+                     'timestamp_resolution':'MICROSECONDS',
+                     'window_size':'1m','freeze_after':'1m','frozen_format':'columnar'};
+" > /dev/null
+sleep 3
+for f in 0 1; do
+    STMTS=""
+    for i in $(seq 0 99); do
+        TS_MS=$(( TSCOL_W + f * 100 + i ))
+        STMTS="$STMTS INSERT INTO it.tscolfz (tag, ts, v, q) VALUES ('pump-$(( i % 4 ))', $TS_MS, $(( i % 7 )).5, $(( i % 3 ))) USING TIMESTAMP $(( TSCOL_W * 1000 + f * 100 + i ));"
+    done
+    cql "$STMTS" > /dev/null
+    ntool flush it tscolfz > /dev/null
+done
+
+tscol_files() { $RUNTIME exec "$CONTAINER" sh -c "find / -path '*/data/it/tscolfz-*' -name '*-tscol-Data.db' 2>/dev/null | wc -l" | tr -dc '0-9'; }
+printf '   waiting for the columnar freeze'
+for _ in $(seq 1 24); do
+    [ "$(sstable_count tscolfz)" = 1 ] && [ "$(tscol_files)" = 1 ] && break
+    printf '.'; sleep 5
+done
+printf '\n'
+assert "the closed window froze into one tscol sstable" "$(sstable_count tscolfz)/$(tscol_files)" "1/1"
+check "every row reads back from the columnar sstable (200)" \
+    "SELECT count(*) FROM it.tscolfz;" '^ *200'
+check "aggregates over the columnar window" \
+    "SELECT count(*), max(v) FROM it.tscolfz WHERE tag='pump-1';" '^ *50 \| +6\.5'
+check "a filter on a non-key column works (no refusal)" \
+    "SELECT count(*) FROM it.tscolfz WHERE q = 2 ALLOW FILTERING;" '^ *66'
+
+# Late overwrite and delete into the frozen window: plain writes, then a refreeze back into tscol.
+cql "UPDATE it.tscolfz USING TIMESTAMP $(( TSCOL_W * 1000 + 5000 )) SET v = 99 WHERE tag='pump-1' AND ts=$(( TSCOL_W + 1 ));
+     DELETE FROM it.tscolfz USING TIMESTAMP $(( TSCOL_W * 1000 + 5001 )) WHERE tag='pump-2' AND ts=$(( TSCOL_W + 2 ));" > /dev/null
+ntool flush it tscolfz > /dev/null
+printf '   waiting for the refreeze'
+for _ in $(seq 1 24); do
+    [ "$(sstable_count tscolfz)" = 1 ] && [ "$(tscol_files)" = 1 ] && break
+    printf '.'; sleep 5
+done
+printf '\n'
+assert "late data refroze into one tscol sstable" "$(sstable_count tscolfz)/$(tscol_files)" "1/1"
+check "the late overwrite is read back" \
+    "SELECT v FROM it.tscolfz WHERE tag='pump-1' AND ts=$(( TSCOL_W + 1 ));" '^ *99'
+check "the late delete is applied (199 rows)" \
+    "SELECT count(*) FROM it.tscolfz;" '^ *199'
+
 section "restart: everything above survives a real process boot"
 # Every assertion so far ran against a node that has been up the whole time, with schema in memory
 # and data possibly still in memtables. The failure class this covers is the one that only appears
@@ -994,6 +1049,9 @@ assert "frozen sstables come back unchanged (still one per window)" "$(sstable_c
 check "the SAI index still answers LIKE after the restart" \
     "SELECT count(*) FROM it.logs WHERE device='pump-01' AND msg LIKE '%timeout%' ALLOW FILTERING;" \
     '^ *1$'
+check "the tscol table still reads back after the restart (199)" \
+    "SELECT count(*) FROM it.tscolfz;" '^ *199'
+assert "the tscol sstable comes back unchanged" "$(sstable_count tscolfz)/$(tscol_files)" "1/1"
 
 echo
 echo "== $PASS passed, $FAIL failed =="

@@ -24,6 +24,7 @@ import java.util.Date;
 import java.util.List;
 
 import com.google.common.collect.Iterables;
+
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.CQLTester;
