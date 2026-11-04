@@ -88,7 +88,7 @@ ORDER BY timestamp ASC;
 
 **2. Old data compresses itself; queries stay the same.** With `frozen_format = 'columnar'`, TSCS freezes each closed window into one columnar `tscol` SSTable. It is still the same table: `SELECT`, late writes, deletes, TTL, filters and SAI all behave as ordinary Cassandra.
 
-**3. The compression numbers are yet to be re-measured.** The earlier figures in this project (7.1× on disk, 3–6× on aggregates, 20M rows of `tm_tag_point`, host 234) came from the shadow-table chunk store, which has been removed. `tscol` uses the same chunk codec but also keeps every cell's writetime, TTL and deletion time, so those figures do not carry over; the [old benchmark](doc/timeseries/tiering-benchmark.md) stays as a historical record. Measure your own table shape before committing.
+**3. How much it saves depends on your data.** On 20M rows of the `tm_tag_point` shape with a 3650-day TTL (host 234), `tscol` took 34.7 MB against 237.8 MB in row format, about 6.8× smaller. That shape has many constant or all-null columns. Random `double` values with few columns shrink only about 2×. Compared with the removed shadow-table chunk store, `tscol` is about 7% larger, single-tag day reads are 13–23% slower and aggregates about 2× slower, in exchange for ordinary Cassandra behaviour on frozen data ([measurements](doc/timeseries/tiering-benchmark.md#tscol과-r8-청크-비교-2026-11-04-호스트-234)). Measure your own table shape before committing.
 
 **4. Compaction and retention that fit time series.** SSTables are ordered by time window and frozen one-per-window; windows past their retention are dropped whole, without compacting. Late backfill from edge devices is isolated into its own window automatically.
 
