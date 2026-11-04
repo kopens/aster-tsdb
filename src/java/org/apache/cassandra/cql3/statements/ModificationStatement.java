@@ -715,9 +715,6 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
             Guardrails.writeConsistencyLevels.guard(EnumSet.of(options.getConsistency(), options.getSerialConsistency()),
                                                     queryState.getClientState());
 
-        // Tiered storage: a sub-quorum write can be missed by the re-encoder's quorum read and range-deleted.
-        org.apache.cassandra.db.timeseries.tiering.TieredWrites.guardWriteConsistency(metadata(), options.getConsistency());
-
         return hasConditions()
              ? executeWithCondition(queryState, options, requestTime)
              : executeWithoutCondition(queryState, options, requestTime);
@@ -934,21 +931,10 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
 
         SinglePartitionReadQuery readCommand = request.readCommand(nowInSeconds);
         FilteredPartition current;
-        // Tiered storage: a CAS precondition read must see the RAW base rows, never the hot+chunk
-        // merge. A condition is a compare-and-set on a base row, and Paxos can only linearize what it
-        // owns -- a chunk is a blob in another table that no ballot orders, so "IF col = x" evaluated
-        // against reconstructed cold data would be a guarantee nothing can honour. Chunked data is
-        // therefore invisible to LWT conditions (documented); writing to it is separately governed by
-        // TieredWrites, which still runs on the update this request builds.
-        org.apache.cassandra.db.timeseries.tiering.TransparentReads.enterInternalBypass();
         try (ReadExecutionController executionController = readCommand.executionController();
              PartitionIterator iter = readCommand.executeInternal(executionController))
         {
             current = FilteredPartition.create(PartitionIterators.getOnlyElement(iter, readCommand));
-        }
-        finally
-        {
-            org.apache.cassandra.db.timeseries.tiering.TransparentReads.exitInternalBypass();
         }
 
         if (!request.appliesTo(current))
@@ -986,7 +972,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
             SingleTableSinglePartitionUpdatesCollector collector = new SingleTableSinglePartitionUpdatesCollector(metadata, updatedColumns);
             addUpdates(collector, keys, state, options, local, timestamp, nowInSeconds, requestTime);
             // local means this is test or internal things that are bypassing distributed system modification/checks
-            return guardTieredColdWrites(collector.toMutations(state, local ? PotentialTxnConflicts.ALLOW : PotentialTxnConflicts.DISALLOW));
+            return collector.toMutations(state, local ? PotentialTxnConflicts.ALLOW : PotentialTxnConflicts.DISALLOW);
         }
         else
         {
@@ -994,30 +980,8 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
             SingleTableUpdatesCollector collector = new SingleTableUpdatesCollector(metadata, updatedColumns, perPartitionKeyCounts);
             addUpdates(collector, keys, state, options, local, timestamp, nowInSeconds, requestTime);
             // local means this is test or internal things that are bypassing distributed system modification/checks
-            return guardTieredColdWrites(collector.toMutations(state, local ? PotentialTxnConflicts.ALLOW : PotentialTxnConflicts.DISALLOW));
+            return collector.toMutations(state, local ? PotentialTxnConflicts.ALLOW : PotentialTxnConflicts.DISALLOW);
         }
-    }
-
-    /**
-     * Tiered storage: cold data is immutable once chunked, so a mutation that tombstones it is
-     * rejected here rather than allowed to mask the chunk's copy until gc_grace purges the tombstone
-     * and the data silently reappears. Inspecting the built mutations (rather than the statement)
-     * means DELETE, {@code UPDATE ... SET col = null} and {@code INSERT ... VALUES (..., null)} are
-     * all caught by the same test -- what matters is whether a tombstone lands on cold clusterings.
-     * No-op for every table without a timeseries_tiering policy.
-     *
-     * Conditional (LWT) statements do not come through here at all -- see
-     * {@code TieredWrites.guardColdUpdate}, called from {@code CQL3CasRequest.makeUpdates}.
-     *
-     * @return {@code mutations}, for chaining
-     */
-    private <T extends IMutation> List<T> guardTieredColdWrites(List<T> mutations)
-    {
-        // The statement type, not the built mutations: an INSERT that binds null and a DELETE of the
-        // same column produce the identical row, and in a batch they are merged into one before the
-        // guard can look. Only the caller still knows which it was. See TieredWrites.guardColdMutations.
-        org.apache.cassandra.db.timeseries.tiering.TieredWrites.guardColdMutations(mutations, type.isInsert());
-        return mutations;
     }
 
     public List<PartitionUpdate> getTxnUpdate(ClientState state, QueryOptions options)

@@ -564,6 +564,12 @@ public class CompactionTask extends AbstractCompactionTask
         return true;
     }
 
+    /** aster-tsdb (tscol): false for a task whose output format the cursor pipeline cannot write. */
+    protected boolean cursorCompactionAllowed()
+    {
+        return true;
+    }
+
     protected int getLevel()
     {
         return 0;

@@ -16,13 +16,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Cassandra configuration applied by BOTH halves of the tiering benchmark before the node starts.
+# Cassandra configuration applied by every benchmark harness before the node starts.
 #
-# This file is not executed on the host: scale-test.sh (untiered baseline) and tiering-bench.sh
-# (tiered run) each read it and splice it into the container's `bash -c` entrypoint, so the two
-# runs cannot drift. They *did* drift once -- tiering-bench.sh was missing native_transport_timeout
-# while scale-test.sh set it to 600s, so every tiered query over the 12s default was truncated
-# server-side and read as a product regression. Keeping the block in one file is the fix.
+# This file is not executed on the host: scale-test.sh and cluster-test.sh each read it and splice
+# it into the container's `bash -c` entrypoint, so the harnesses cannot drift. They *did* drift once
+# -- one was missing native_transport_timeout while scale-test.sh set it to 600s, so every query over
+# the 12s default was truncated server-side and read as a product regression. Keeping the block in
+# one file is the fix.
 #
 # Reads GC_CHOICE from the environment (zgc = as shipped, g1 = the alternative block).
 # Everything not touched here is the shipped configuration.

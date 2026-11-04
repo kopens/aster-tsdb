@@ -55,7 +55,8 @@ abstract class AbstractCompactionPipeline extends CompactionInfo.Holder implemen
         long nowInSec,
         TimeUUID compactionId)
     {
-        if (DatabaseDescriptor.cursorCompactionEnabled()) {
+        // aster-tsdb (tscol): a freeze writing tscol must go through the writer it chose; the cursor writes BIG itself.
+        if (DatabaseDescriptor.cursorCompactionEnabled() && task.cursorCompactionAllowed()) {
             if (CursorCompactor.isSupported(scanners, controller))
             {
                 CURSOR_PIPELINES_CREATED.increment();

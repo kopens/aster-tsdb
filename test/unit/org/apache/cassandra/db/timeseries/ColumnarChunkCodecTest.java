@@ -45,8 +45,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 /**
- * Tests the {@link ColumnarChunkCodec} <em>entry point</em> -- the surface the tiering tree
- * consumes -- against the chunk format it now routes to (v4, {@link ChunkV4Codec}). These are the
+ * Tests the {@link ColumnarChunkCodec} <em>entry point</em> against the chunk format it now routes to (v4, {@link ChunkV4Codec}). These are the
  * codec's cross-version CONTRACTS, deliberately re-proven through the facade rather than through
  * {@code ChunkV4Codec} directly, so a routing regression fails here even while the v4 tests stay
  * green: round-trip fidelity for every type-code family, O(1) constant/all-null columns,

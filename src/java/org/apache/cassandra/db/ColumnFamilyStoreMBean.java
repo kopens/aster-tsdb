@@ -337,7 +337,7 @@ public interface ColumnFamilyStoreMBean
      * A parked window is deliberately skipped by freeze and split selection, so it drops out of the
      * backlogs and out of {@code getEstimatedRemainingTasks()} - the table then looks exactly like one
      * with nothing to do. It is not: a parked window never reaches FROZEN, so nothing downstream of the
-     * freeze (tiered-storage compression included) runs for it. Un-parking is automatic on any change
+     * freeze (columnar conversion included) runs for it. Un-parking is automatic on any change
      * to the window; the remedy for a window that stays parked is named in the WARN logged when it was
      * parked (usually a partition too large to window-route, or {@code nodetool relocatesstables}).
      *

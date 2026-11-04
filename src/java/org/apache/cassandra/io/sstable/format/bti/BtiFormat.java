@@ -117,6 +117,12 @@ public class BtiFormat extends AbstractSSTableFormat<BtiTableReader, BtiTableWri
         super(NAME, options);
     }
 
+    // aster-tsdb (tscol): TscolFormat is BTI with a different partition body; it shares every component type.
+    protected BtiFormat(String name, Map<String, String> options)
+    {
+        super(name, options);
+    }
+
     public static boolean is(SSTableFormat<?, ?> format)
     {
         return format.name().equals(NAME);

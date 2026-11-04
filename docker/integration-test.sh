@@ -471,259 +471,6 @@ check "LIKE combines with time_bucket aggregation" \
       GROUP BY device, time_bucket(1h, ts);" \
     '^ *2024-01-01 09:00:00.* 2'
 
-section "tiered storage: policy, retier, chunk re-encode, late merge"
-# Every tiered table below is TSCS: since e3bec50b TieringPolicy.unsupportedSchemaError refuses any other
-# compaction (only TSCS's freeze reclaims the rows the re-encoder hides). This script was not run between that
-# commit and 2026-10-30, so its tables kept the default compaction and 15 tiering checks failed.
-# The simplest supported shape (TieringPolicy.unsupportedSchemaError accepts far more -- composite
-# partition keys, many regular columns, static columns): one text partition key, timestamp
-# clustering, one double value, which is also all the re-encoder can encode until it goes columnar.
-cql "
-CREATE TABLE IF NOT EXISTS it.sensor (
-    tag_id text, timestamp timestamp, value double,
-    PRIMARY KEY (tag_id, timestamp)
-) WITH compaction = {'class':'TimeSeriesCompactionStrategy'};
-" > /dev/null
-
-# Policy: hot_window 1h / chunk_window 1h, so the rows inserted 4 hours in the past below are
-# already closed. The policy JSON goes in as a plain string (this fork stores non-0x extension
-# values as their UTF-8 bytes), so no hex encoding step is needed.
-TIERING_JSON='{"hot_window":"1h","chunk_window":"1h","interval":"5m"}'
-
-# Hour-aligned chunk window 4 hours in the past (epoch-millis CQL timestamp literals throughout,
-# so the assertions do not depend on any date-formatting tool).
-NOW_MS=$(date +%s%3N)
-WIN_MS=$(( (NOW_MS / 3600000 - 4) * 3600000 ))
-WIN_END_MS=$(( WIN_MS + 3600000 ))
-
-check "ALTER TABLE installs the tiering policy (plain JSON string)" \
-    "ALTER TABLE it.sensor WITH extensions = {'timeseries_tiering': '$TIERING_JSON'};
-     SELECT extensions FROM system_schema.tables WHERE keyspace_name='it' AND table_name='sensor';" \
-    'timeseries_tiering'
-
-cql "
-INSERT INTO it.sensor (tag_id, timestamp, value) VALUES ('pump-01', $(( WIN_MS +  300000 )), 10);
-INSERT INTO it.sensor (tag_id, timestamp, value) VALUES ('pump-01', $(( WIN_MS +  900000 )), 20);
-INSERT INTO it.sensor (tag_id, timestamp, value) VALUES ('pump-01', $(( WIN_MS + 1500000 )), 30);
-" > /dev/null
-
-check_nodetool "nodetool retier runs one re-encode cycle" '' retier it sensor
-check "chunk row created for the window (samples = 3)" \
-    "SELECT samples FROM it.sensor__chunks WHERE tag_id='pump-01' AND window_start=$WIN_MS;" \
-    '^ *3'
-check "re-encoded rows stay transparently readable (SP3: merged from the chunk)" \
-    "SELECT count(*) FROM it.sensor WHERE tag_id='pump-01' AND timestamp >= $WIN_MS AND timestamp < $WIN_END_MS;" \
-    '^ *3'
-check "transparent point lookup returns the encoded value" \
-    "SELECT value FROM it.sensor WHERE tag_id='pump-01' AND timestamp = $(( WIN_MS + 900000 ));" \
-    '^ *20'
-check "window remains queryable via the chunk table" \
-    "SELECT tag_id, window_start, codec, samples FROM it.sensor__chunks WHERE tag_id='pump-01';" \
-    '\(1 rows\)'
-
-# Late row into the already-encoded window: its server-side writetime is newer than the range
-# tombstone the first cycle issued (USING TIMESTAMP maxWt), so it survives to be merged.
-cql "INSERT INTO it.sensor (tag_id, timestamp, value) VALUES ('pump-01', $(( WIN_MS + 2100000 )), 40);" > /dev/null
-check "late row joins the merged view (3 chunk samples + 1 live late row)" \
-    "SELECT count(*) FROM it.sensor WHERE tag_id='pump-01' AND timestamp >= $WIN_MS AND timestamp < $WIN_END_MS;" \
-    '^ *4'
-
-check_nodetool "nodetool retier merges the late row" '' retier it sensor
-check "chunk re-encoded merged (samples 3 -> 4)" \
-    "SELECT samples FROM it.sensor__chunks WHERE tag_id='pump-01' AND window_start=$WIN_MS;" \
-    '^ *4'
-check "merged view still complete after the late row is re-encoded (4 chunk samples)" \
-    "SELECT count(*) FROM it.sensor WHERE tag_id='pump-01' AND timestamp >= $WIN_MS AND timestamp < $WIN_END_MS;" \
-    '^ *4'
-check "aggregate spans the chunk transparently (avg of 10,20,30,40)" \
-    "SELECT avg(value) FROM it.sensor WHERE tag_id='pump-01' AND timestamp >= $WIN_MS AND timestamp < $WIN_END_MS;" \
-    '^ *25'
-
-check_nodetool "nodetool tieringstatus lists it.sensor (interval 5m)" 'it +sensor +300000' tieringstatus
-check "system_views.timeseries_tiering exposes policy and run stats" \
-    "SELECT keyspace_name, table_name, windows_encoded, rows_encoded, late_merges
-       FROM system_views.timeseries_tiering;" \
-    'it \| +sensor \| +1 \| +1 \| +1'
-
-# The delete timestamp: the re-encoder tombstones the encoded window with USING TIMESTAMP
-# max_row_writetime, so a chunk that recorded no writetime could not have deleted anything safely.
-check "chunk records max_row_writetime (the delete's USING TIMESTAMP)" \
-    "SELECT max_row_writetime FROM it.sensor__chunks WHERE tag_id='pump-01' AND window_start=$WIN_MS;" \
-    '^ *1[0-9]{15}'
-
-# --- the deletion gate ---
-# Every assertion above is satisfied whether or not the re-encoder ever deleted the base rows:
-# transparent reads reconcile the chunk's rows with any live base rows at the same clustering, so
-# count(*) is 4 and avg(value) is 25 either way. A regression that silently stopped issuing the
-# range delete -- the thing that actually reclaims the disk -- would pass all of them green.
-#
-# A shell script cannot reach TransparentReads.enterInternalBypass to read the raw hot rows, so the
-# one signal available from cqlsh that the merge cannot fabricate is to take the chunk away: with
-# the chunk row deleted there is nothing left to reconstruct from, and anything the base table still
-# returns for that window is a row the re-encoder failed to delete. 0 rows means the delete ran;
-# 4 rows means it did not.
-cql "DELETE FROM it.sensor__chunks WHERE tag_id='pump-01' AND window_start=$WIN_MS;" > /dev/null
-check "re-encoded base rows are physically gone (window empty once the chunk is removed)" \
-    "SELECT count(*) FROM it.sensor WHERE tag_id='pump-01' AND timestamp >= $WIN_MS AND timestamp < $WIN_END_MS;" \
-    '^ *0$'
-
-section "tiered storage: the production table shape (tm_tag_point)"
-# pp.tm_tag_point's exact shape -- 7 statics, 7 regular columns spanning text/int/double/boolean and
-# a frozen map, DESC clustering -- written with pp's measured column behaviour: quality constantly
-# 192, error_code constantly 0, attribute constantly {}, value_numeric and value_boolean never
-# written, latency high-entropy, value a short numeric-looking text. Those are exactly the v3
-# columnar format's CONSTANT / all-null / dictionary paths.
-cql "
-CREATE TABLE IF NOT EXISTS it.tm_tag_point (
-    tag_id text,
-    timestamp timestamp,
-    area_id text static, asset_id text static, line_id text static,
-    opc_id text static, site_id text static, tag_name text static, type text static,
-    attribute frozen<map<text,text>>,
-    error_code int, latency int, quality int,
-    value text, value_boolean boolean, value_numeric double,
-    PRIMARY KEY (tag_id, timestamp)
-) WITH CLUSTERING ORDER BY (timestamp DESC) AND compaction = {'class':'TimeSeriesCompactionStrategy'};
-" > /dev/null
-
-check "ALTER TABLE installs the tiering policy on the production shape" \
-    "ALTER TABLE it.tm_tag_point WITH extensions = {'timeseries_tiering': '$TIERING_JSON'};
-     SELECT extensions FROM system_schema.tables WHERE keyspace_name='it' AND table_name='tm_tag_point';" \
-    'timeseries_tiering'
-
-cql "
-INSERT INTO it.tm_tag_point (tag_id, area_id, asset_id, line_id, opc_id, site_id, tag_name, type)
-     VALUES ('TAG-001', 'A1', 'AS1', 'L1', 'OPC1', 'S1', 'boiler.temp', 'analog');
-INSERT INTO it.tm_tag_point (tag_id, timestamp, attribute, error_code, latency, quality, value)
-     VALUES ('TAG-001', $(( WIN_MS +  60000 )), {}, 0,  17, 192, '23.4');
-INSERT INTO it.tm_tag_point (tag_id, timestamp, attribute, error_code, latency, quality, value)
-     VALUES ('TAG-001', $(( WIN_MS + 120000 )), {}, 0, 431, 192, '23.6');
-INSERT INTO it.tm_tag_point (tag_id, timestamp, attribute, error_code, latency, quality, value)
-     VALUES ('TAG-001', $(( WIN_MS + 180000 )), {}, 0,   3, 192, '23.5');
-INSERT INTO it.tm_tag_point (tag_id, timestamp, attribute, error_code, latency, quality, value)
-     VALUES ('TAG-001', $(( WIN_MS + 240000 )), {}, 0, 902, 192, '23.9');
-INSERT INTO it.tm_tag_point (tag_id, timestamp, attribute, error_code, latency, quality, value)
-     VALUES ('TAG-001', $(( WIN_MS + 300000 )), {}, 0,  44, 192, '24.1');
-" > /dev/null
-
-check_nodetool "nodetool retier encodes the production-shaped window" '' retier it tm_tag_point
-check "chunk row created for the production shape (samples = 5)" \
-    "SELECT samples FROM it.tm_tag_point__chunks WHERE tag_id='TAG-001' AND window_start=$WIN_MS;" \
-    '^ *5'
-
-check "every column of a re-encoded row reads back through the merge" \
-    "SELECT attribute, error_code, latency, quality, value FROM it.tm_tag_point
-      WHERE tag_id='TAG-001' AND timestamp = $(( WIN_MS + 120000 ));" \
-    '\{\} \| +0 \| +431 \| +192 \| +23\.6'
-check "columns that were never written stay null after re-encoding" \
-    "SELECT value_boolean, value_numeric FROM it.tm_tag_point
-      WHERE tag_id='TAG-001' AND timestamp = $(( WIN_MS + 120000 ));" \
-    'null \| +null'
-check "static columns survive the re-encoder's range delete" \
-    "SELECT site_id, tag_name, type FROM it.tm_tag_point WHERE tag_id='TAG-001' LIMIT 1;" \
-    'S1 \| +boiler\.temp \| +analog'
-
-# DESC clustering end to end. A bound-arithmetic bug here previously returned ZERO cold rows with no
-# error at all, so both bound directions and both orderings are asserted, not just the row count.
-# `check` greps line by line, so ordering is asserted with LIMIT 1 (which row comes FIRST) rather
-# than with a multi-line regex -- and LIMIT 1 through the merge is itself worth pinning.
-check "unqualified SELECT returns the whole merged window (5 rows)" \
-    "SELECT timestamp, value FROM it.tm_tag_point WHERE tag_id='TAG-001';" \
-    '\(5 rows\)'
-check "DESC table serves the merged window newest-first (LIMIT 1 = 24.1)" \
-    "SELECT value FROM it.tm_tag_point WHERE tag_id='TAG-001' LIMIT 1;" \
-    '^ *24\.1'
-check "WHERE timestamp < X on a DESC table (3 of 5 rows)" \
-    "SELECT count(*) FROM it.tm_tag_point WHERE tag_id='TAG-001' AND timestamp < $(( WIN_MS + 240000 ));" \
-    '^ *3'
-check "WHERE timestamp > X on a DESC table (2 of 5 rows)" \
-    "SELECT count(*) FROM it.tm_tag_point WHERE tag_id='TAG-001' AND timestamp > $(( WIN_MS + 180000 ));" \
-    '^ *2'
-check "ORDER BY timestamp ASC re-reverses the merged window (LIMIT 1 = 23.4)" \
-    "SELECT value FROM it.tm_tag_point WHERE tag_id='TAG-001' ORDER BY timestamp ASC LIMIT 1;" \
-    '^ *23\.4'
-check "ORDER BY timestamp ASC still returns every merged row (5 rows)" \
-    "SELECT timestamp, value FROM it.tm_tag_point WHERE tag_id='TAG-001' ORDER BY timestamp ASC;" \
-    '\(5 rows\)'
-
-# Cold immutability (Task 3 rule C): once a clustering is older than hot_window it is immutable,
-# because a tombstone against it would only mask the chunk's copy until gc_grace_seconds purged it.
-check "a cold row DELETE is rejected and points at cold_window" \
-    "DELETE FROM it.tm_tag_point WHERE tag_id='TAG-001' AND timestamp = $(( WIN_MS + 120000 ));" \
-    'cold_window'
-check "UPDATE ... SET col = null on a cold row is rejected (it writes a cell tombstone)" \
-    "UPDATE it.tm_tag_point SET latency = null WHERE tag_id='TAG-001' AND timestamp = $(( WIN_MS + 120000 ));" \
-    'cold_window'
-check "a whole-partition DELETE is rejected (it has no clustering bound at all)" \
-    "DELETE FROM it.tm_tag_point WHERE tag_id='TAG-001';" \
-    'cold_window'
-check "the rejected deletes changed nothing (all 5 rows still there)" \
-    "SELECT count(*) FROM it.tm_tag_point WHERE tag_id='TAG-001';" \
-    '^ *5'
-# Each refusal is counted, so an operator sees it without a log search -- and this run can tell a
-# refusal that was counted from one that only reached the log.
-check "system_views.timeseries_tiering counts the three refused cold writes" \
-    "SELECT cold_writes_refused FROM system_views.timeseries_tiering WHERE keyspace_name='it' AND table_name='tm_tag_point';" \
-    '^ *3 *$'
-
-# Range scans merge chunks since r4 (range_scan defaults to "merge"). Every one of this table's 5 rows
-# lives only in the chunk now -- the base rows were range-deleted -- so a hot-rows-only answer would be
-# 0 (what builds before r3 returned as a success; r3 refused the scan). 5 proves the merge.
-check "a full-scan count(*) on a tiered table merges the chunk (5 rows, all of them cold)" \
-    "SELECT count(*) FROM it.tm_tag_point;" \
-    '^ *5 *$'
-check "...DISTINCT finds the partition that only the chunk table holds" \
-    "SELECT DISTINCT tag_id FROM it.tm_tag_point;" \
-    'TAG-001'
-check "...and the merged scans are counted" \
-    "SELECT range_scans_merged FROM system_views.timeseries_tiering WHERE keyspace_name='it' AND table_name='tm_tag_point';" \
-    '^ *[1-9][0-9]* *$'
-
-# ...and a write inside the hot window is untouched by the rule. Two rows, because the interesting
-# one is not the obvious one.
-#
-# NOW2 is read fresh rather than reusing NOW_MS: this runs minutes after the tiering section began,
-# and the guard compares against the CURRENT hot boundary.
-NOW2_MS=$(date +%s%3N)
-# The ordinary case: a row written just now.
-# The worst case: the last millisecond before the current chunk_window boundary. It is always inside
-# the hot window (at most one chunk_window old, and hot_window == chunk_window == 1h here), yet it is
-# the newest row a coverage ledger that claimed the CYCLE CUTOFF as its top would call cold -- such a
-# ledger reports top = alignDown(now - hot_window) + chunk_window = alignDown(now), and this row sits
-# one millisecond below that. Picking the timestamp this way rather than "now" is what makes the
-# check deterministic: with "now" it only reproduced when the test happened to run in the first
-# minutes of an hour, which is how the bug survived two green runs before a third caught it.
-HOT_EDGE_MS=$(( (NOW2_MS / 3600000) * 3600000 - 1 ))
-cql "INSERT INTO it.tm_tag_point (tag_id, timestamp, latency, quality, value)
-          VALUES ('TAG-001', $NOW2_MS, 9, 192, '25.0');
-     INSERT INTO it.tm_tag_point (tag_id, timestamp, latency, quality, value)
-          VALUES ('TAG-001', $HOT_EDGE_MS, 8, 192, '25.1');" > /dev/null
-check "a DELETE inside the hot window still works" \
-    "DELETE FROM it.tm_tag_point WHERE tag_id='TAG-001' AND timestamp = $NOW2_MS;
-     SELECT count(*) FROM it.tm_tag_point WHERE tag_id='TAG-001' AND timestamp = $NOW2_MS;" \
-    '^ *0$'
-# If this one fails and the one above passes, the write guard is refusing rows the re-encoder never
-# touched -- look at what the coverage ledger claims as its top, not at the hot window.
-# (It shares one race with every other wall-clock assertion here: if the hour turns between the
-# INSERT and the DELETE, this row really has aged out of the hot window. ~2s in 3600.)
-check "a DELETE just below the chunk_window boundary still works (hot, never encoded)" \
-    "DELETE FROM it.tm_tag_point WHERE tag_id='TAG-001' AND timestamp = $HOT_EDGE_MS;
-     SELECT count(*) FROM it.tm_tag_point WHERE tag_id='TAG-001' AND timestamp = $HOT_EDGE_MS;" \
-    '^ *0$'
-
-# Same deletion gate as above, on the shape that matters: with the chunk removed, a base table that
-# still answers for this window is one the re-encoder never deleted.
-# The clustering bound is not decoration: an unrestricted count on a partition whose clustered rows
-# have all been deleted still returns 1, for the static-only row (the statics are meant to survive).
-cql "DELETE FROM it.tm_tag_point__chunks WHERE tag_id='TAG-001' AND window_start=$WIN_MS;" > /dev/null
-check "production-shaped rows are physically gone once their chunk is removed" \
-    "SELECT count(*) FROM it.tm_tag_point
-      WHERE tag_id='TAG-001' AND timestamp >= $WIN_MS AND timestamp < $WIN_END_MS;" \
-    '^ *0$'
-check "...and the statics are still there, because the range delete never reached them" \
-    "SELECT site_id, tag_name FROM it.tm_tag_point WHERE tag_id='TAG-001';" \
-    'S1 \| +boiler\.temp'
-
 section "TimeSeriesCompactionStrategy: window split and freeze"
 # TSCS is otherwise absent from this gate -- every other table here is on UCS or the default -- so a
 # regression in window classification, the flush-time split (T3) or the freeze (T2) that only shows
@@ -733,6 +480,7 @@ section "TimeSeriesCompactionStrategy: window split and freeze"
 # Windows are one minute wide and freeze a minute after closing. Every write carries an explicit
 # USING TIMESTAMP (microseconds, TSCS's configured resolution) minutes in the past, so which window
 # a row lands in is fixed by this script rather than by the wall clock when it runs.
+NOW_MS=$(date +%s%3N)
 TSCS_W0=$(( (NOW_MS / 60000 - 20) * 60000 ))     # first window start, 20 minutes ago
 TSCS_WINDOWS=3
 TSCS_FLUSHES=3
@@ -847,144 +595,145 @@ assert "the three expired windows are dropped" "${RET_REMAINING:-<none>}" "0"
 check "the current window is untouched by retention" \
     "SELECT value FROM it.tscs_retention WHERE tag='keep';" '^ *99'
 
-section "tiered storage: cold_window is the only retention for chunked data, and it works"
-# Cell TTLs are dropped when a window is chunked, so cold_window is the ONLY thing that ever removes
-# cold data -- and it had no end-to-end coverage at all. As with retention above, the assertion that
-# matters is selectivity: the chunk past cold_window goes, the one inside it stays.
-#
-# The base rows for both windows were already deleted by the re-encoder, so "0 rows" for the expired
-# window means the data is genuinely gone rather than merely hidden.
+section "tscol: closed windows freeze into the columnar sstable format"
+# frozen_format = 'columnar' makes TSCS write each frozen window as a tscol sstable (columnar blocks of the chunk
+# codec inside a BTI-derived sstable). Everything else about the table is ordinary: the same CQL, the same answers,
+# late writes and deletes into the frozen window just land in a new sstable and the window refreezes.
+TSCOL_W=$(( (NOW_MS / 60000 - 30) * 60000 ))      # one window, 30 minutes ago
 cql "
-CREATE TABLE IF NOT EXISTS it.cold_expiry (
-    tag_id text, timestamp timestamp, value double,
-    PRIMARY KEY (tag_id, timestamp)
-) WITH compaction = {'class':'TimeSeriesCompactionStrategy'};
+CREATE TABLE IF NOT EXISTS it.tscolfz (
+    tag text, ts timestamp, v double, q int,
+    PRIMARY KEY (tag, ts)
+) WITH compaction = {'class':'TimeSeriesCompactionStrategy',
+                     'timestamp_resolution':'MICROSECONDS',
+                     'window_size':'1m','freeze_after':'1m','frozen_format':'columnar'};
 " > /dev/null
-# The window choice depends on which hour "now" is in, so read the clock HERE, and never in the last
-# minutes of an hour: NOW2_MS dates from minutes earlier, and on 2026-11-02 a run that crossed 10:00
-# between choosing the windows and the expiry cycle expired NEW_WIN as well (its start fell past
-# now - cold_window), failing two assertions on a correct build. Everything below until the second
-# retier takes about a minute; 5 minutes of margin pins it inside one hour.
-NOW3_MS=$(date +%s%3N)
-LEFT_MS=$(( 3600000 - NOW3_MS % 3600000 ))
-if [ "$LEFT_MS" -lt 300000 ]; then
-    sleep $(( LEFT_MS / 1000 + 5 ))
-    NOW3_MS=$(date +%s%3N)
-fi
-OLD_WIN_MS=$(( (NOW3_MS / 3600000 - 5) * 3600000 ))     # expires under cold_window 3h
-NEW_WIN_MS=$(( (NOW3_MS / 3600000 - 2) * 3600000 ))     # cold (past hot_window 1h) but inside 3h
-cql "ALTER TABLE it.cold_expiry WITH extensions = {'timeseries_tiering': '$TIERING_JSON'};" > /dev/null
-cql "
-INSERT INTO it.cold_expiry (tag_id, timestamp, value) VALUES ('t', $(( OLD_WIN_MS + 60000 )), 1);
-INSERT INTO it.cold_expiry (tag_id, timestamp, value) VALUES ('t', $(( OLD_WIN_MS + 120000 )), 2);
-INSERT INTO it.cold_expiry (tag_id, timestamp, value) VALUES ('t', $(( NEW_WIN_MS + 60000 )), 3);
-INSERT INTO it.cold_expiry (tag_id, timestamp, value) VALUES ('t', $(( NEW_WIN_MS + 120000 )), 4);
-" > /dev/null
-check_nodetool "both windows are encoded" '' retier it cold_expiry
-check "two chunks exist, one per window" \
-    "SELECT count(*) FROM it.cold_expiry__chunks WHERE tag_id='t';" '^ *2$'
-
-# Now declare a 3h cold window. The 5h-old chunk is past it; the 2h-old one is not.
-cql "ALTER TABLE it.cold_expiry WITH extensions =
-       {'timeseries_tiering': '{\"hot_window\":\"1h\",\"chunk_window\":\"1h\",\"cold_window\":\"3h\",\"interval\":\"5m\"}'};" > /dev/null
 sleep 3
-check_nodetool "a cycle under the new cold_window expires the old chunk" '' retier it cold_expiry
-check "only the chunk inside cold_window is left" \
-    "SELECT count(*) FROM it.cold_expiry__chunks WHERE tag_id='t';" '^ *1$'
-check "the expired window returns nothing -- the data is gone, not hidden" \
-    "SELECT count(*) FROM it.cold_expiry
-      WHERE tag_id='t' AND timestamp >= $OLD_WIN_MS AND timestamp < $(( OLD_WIN_MS + 3600000 ));" \
-    '^ *0$'
-check "the window inside cold_window still reads back through the merge" \
-    "SELECT count(*) FROM it.cold_expiry
-      WHERE tag_id='t' AND timestamp >= $NEW_WIN_MS AND timestamp < $(( NEW_WIN_MS + 3600000 ));" \
-    '^ *2$'
-check "system_views.timeseries_tiering counts the expiry" \
-    "SELECT keyspace_name, table_name, chunks_expired FROM system_views.timeseries_tiering;" \
-    'cold_expiry'
+for f in 0 1; do
+    STMTS=""
+    for i in $(seq 0 99); do
+        TS_MS=$(( TSCOL_W + f * 100 + i ))
+        STMTS="$STMTS INSERT INTO it.tscolfz (tag, ts, v, q) VALUES ('pump-$(( i % 4 ))', $TS_MS, $(( i % 7 )).5, $(( i % 3 ))) USING TIMESTAMP $(( TSCOL_W * 1000 + f * 100 + i ));"
+    done
+    cql "$STMTS" > /dev/null
+    ntool flush it tscolfz > /dev/null
+done
 
-section "tiered storage: the background sweeper encodes without nodetool"
-# Every tiering assertion above drives the re-encoder through `nodetool retier`. Production does not
-# -- the 60s sweeper does, on the policy's interval. That is a different entry point, and it is the
-# one the coverage-ledger bug surfaced through: the manual path looked fine while a sweep in the
-# background moved the write guard's boundary. Nothing covered it.
-#
-# dueForSweep treats a table it has never attempted as due, so a freshly-configured table is picked
-# up on the next tick rather than after a full interval.
-cql "
-CREATE TABLE IF NOT EXISTS it.swept (
-    tag_id text, timestamp timestamp, value double,
-    PRIMARY KEY (tag_id, timestamp)
-) WITH compaction = {'class':'TimeSeriesCompactionStrategy'};
-" > /dev/null
-SWEPT_WIN_MS=$(( (NOW2_MS / 3600000 - 4) * 3600000 ))
-cql "
-INSERT INTO it.swept (tag_id, timestamp, value) VALUES ('s', $(( SWEPT_WIN_MS + 60000 )), 7);
-INSERT INTO it.swept (tag_id, timestamp, value) VALUES ('s', $(( SWEPT_WIN_MS + 120000 )), 8);
-" > /dev/null
-cql "ALTER TABLE it.swept WITH extensions = {'timeseries_tiering': '$TIERING_JSON'};" > /dev/null
-
-printf '   waiting for the background sweeper (no nodetool retier)'
-SWEPT_CHUNKS=""
-for _ in $(seq 1 30); do
-    SWEPT_CHUNKS=$(cql "SELECT count(*) FROM it.swept__chunks WHERE tag_id='s';" | grep -E '^ *[0-9]+$' | tr -dc '0-9')
-    [ "${SWEPT_CHUNKS:-0}" -ge 1 ] 2> /dev/null && break
+tscol_files() { $RUNTIME exec "$CONTAINER" sh -c "find / -path '*/data/it/tscolfz-*' -name '*-tscol-Data.db' 2>/dev/null | wc -l" | tr -dc '0-9'; }
+printf '   waiting for the columnar freeze'
+for _ in $(seq 1 24); do
+    [ "$(sstable_count tscolfz)" = 1 ] && [ "$(tscol_files)" = 1 ] && break
     printf '.'; sleep 5
 done
-echo
-assert "the sweeper encoded the closed window on its own" "${SWEPT_CHUNKS:-<none>}" "1"
-check "and the rows still read back through the merge" \
-    "SELECT count(*) FROM it.swept
-      WHERE tag_id='s' AND timestamp >= $SWEPT_WIN_MS AND timestamp < $(( SWEPT_WIN_MS + 3600000 ));" \
-    '^ *2$'
+printf '\n'
+assert "the closed window froze into one tscol sstable" "$(sstable_count tscolfz)/$(tscol_files)" "1/1"
+check "every row reads back from the columnar sstable (200)" \
+    "SELECT count(*) FROM it.tscolfz;" '^ *200'
+check "aggregates over the columnar window" \
+    "SELECT count(*), max(v) FROM it.tscolfz WHERE tag='pump-1';" '^ *50 \| +6\.5'
+check "a filter on a non-key column works (no refusal)" \
+    "SELECT count(*) FROM it.tscolfz WHERE q = 2 ALLOW FILTERING;" '^ *66'
+
+# Late overwrite and delete into the frozen window: plain writes, then a refreeze back into tscol.
+cql "UPDATE it.tscolfz USING TIMESTAMP $(( TSCOL_W * 1000 + 5000 )) SET v = 99 WHERE tag='pump-1' AND ts=$(( TSCOL_W + 1 ));
+     DELETE FROM it.tscolfz USING TIMESTAMP $(( TSCOL_W * 1000 + 5001 )) WHERE tag='pump-2' AND ts=$(( TSCOL_W + 2 ));" > /dev/null
+ntool flush it tscolfz > /dev/null
+printf '   waiting for the refreeze'
+for _ in $(seq 1 24); do
+    [ "$(sstable_count tscolfz)" = 1 ] && [ "$(tscol_files)" = 1 ] && break
+    printf '.'; sleep 5
+done
+printf '\n'
+assert "late data refroze into one tscol sstable" "$(sstable_count tscolfz)/$(tscol_files)" "1/1"
+check_nodetool "nodetool tablestats reports the one sstable" 'SSTable count: 1$' tablestats it.tscolfz
+check "the late overwrite is read back" \
+    "SELECT v FROM it.tscolfz WHERE tag='pump-1' AND ts=$(( TSCOL_W + 1 ));" '^ *99'
+check "the late delete is applied (199 rows)" \
+    "SELECT count(*) FROM it.tscolfz;" '^ *199'
+
+section "tscol: tm_tag_point's production shape"
+# Statics, a frozen map, DESC clustering and a table-wide TTL, as the platform creates it. Every row of a freeze must
+# land in a columnar body here, not fall back to row form, or the table silently loses the compression it is for.
+cql "
+CREATE TABLE IF NOT EXISTS it.tagpoint (
+    tag_id text, timestamp timestamp,
+    area_id text static, asset_id text static, line_id text static, opc_id text static,
+    site_id text static, tag_name text static, type text static,
+    attribute frozen<map<text, text>>, error_code int, latency int, quality int,
+    value text, value_boolean boolean, value_numeric double,
+    PRIMARY KEY (tag_id, timestamp)
+) WITH CLUSTERING ORDER BY (timestamp DESC) AND default_time_to_live = 315360000
+  AND compaction = {'class':'TimeSeriesCompactionStrategy','timestamp_resolution':'MICROSECONDS',
+                    'window_size':'1m','freeze_after':'1m','frozen_format':'columnar'};
+" > /dev/null
+sleep 3
+for f in 0 1; do
+    STMTS=""
+    for i in $(seq 0 49); do
+        TS_MS=$(( TSCOL_W + f * 50 + i ))
+        STMTS="$STMTS INSERT INTO it.tagpoint (tag_id, timestamp, site_id, tag_name, attribute, quality, value, value_numeric) VALUES ('tag-$(( i % 2 ))', $TS_MS, 'S1', 'T$(( i % 2 ))', {'unit':'C'}, 192, '$i.5', $i.5) USING TIMESTAMP $(( TSCOL_W * 1000 + f * 50 + i ));"
+    done
+    cql "$STMTS" > /dev/null
+    ntool flush it tagpoint > /dev/null
+done
+tagpoint_files() { $RUNTIME exec "$CONTAINER" sh -c "find / -path '*/data/it/tagpoint-*' -name '*-tscol-Data.db' 2>/dev/null | wc -l" | tr -dc '0-9'; }
+printf '   waiting for the columnar freeze'
+for _ in $(seq 1 24); do
+    [ "$(sstable_count tagpoint)" = 1 ] && [ "$(tagpoint_files)" = 1 ] && break
+    printf '.'; sleep 5
+done
+printf '\n'
+assert "the production shape froze into one tscol sstable" "$(sstable_count tagpoint)/$(tagpoint_files)" "1/1"
+check "every row reads back (100)" "SELECT count(*) FROM it.tagpoint;" '^ *100'
+check "DESC order: the newest row of tag-1 comes first" \
+    "SELECT value_numeric FROM it.tagpoint WHERE tag_id='tag-1' LIMIT 1;" '^ *49\.5'
+check "statics survive the freeze" "SELECT DISTINCT tag_id, tag_name FROM it.tagpoint WHERE tag_id='tag-0';" 'T0'
+check "the frozen map survives" "SELECT attribute FROM it.tagpoint WHERE tag_id='tag-0' LIMIT 1;" "unit"
+check "the table TTL survives on the cells" \
+    "SELECT ttl(value_numeric) FROM it.tagpoint WHERE tag_id='tag-0' LIMIT 1;" '^ *3[0-9]{8}'
+check "a filter on a regular column works" "SELECT count(*) FROM it.tagpoint WHERE quality = 192 ALLOW FILTERING;" '^ *100'
 
 section "restart: everything above survives a real process boot"
 # Every assertion so far ran against a node that has been up the whole time, with schema in memory
 # and data possibly still in memtables. The failure class this covers is the one that only appears
-# when the process starts again and replays what it wrote -- exactly the shape of the chunk-table
-# TCM bug (a committed metadata log entry that could not be parsed back, so the node that wrote it
+# when the process starts again and replays what it wrote -- exactly the shape of the 2026 TCM log
+# bug (a committed metadata log entry that could not be parsed back, so the node that wrote it
 # could not replay its own log). The jvm-dtests restart an in-JVM instance; only this restarts a
 # real process through the image's entrypoint, off a real commit log on disk.
 #
-# The tiered tables above cannot be reused: both tiering sections end by DELETING their chunk row,
-# which is the only way a shell script can prove the re-encoder issued its range delete. So this
-# builds its own tiered table and leaves it intact across the restart.
+# it.restarted also carries a leftover timeseries_tiering extension, the shape of a table the removed
+# shadow-table tiering once managed: the value means nothing now, but the schema holding it has to replay.
+RESTART_MS=$(( (NOW_MS / 3600000 - 4) * 3600000 ))
+TIERING_JSON='{"hot_window":"1h","chunk_window":"1h","interval":"5m"}'
 cql "
 CREATE TABLE IF NOT EXISTS it.restarted (
     tag_id text, timestamp timestamp, value double,
     PRIMARY KEY (tag_id, timestamp)
 ) WITH compaction = {'class':'TimeSeriesCompactionStrategy'};
 " > /dev/null
-cql "ALTER TABLE it.restarted WITH extensions = {'timeseries_tiering': '$TIERING_JSON'};" > /dev/null
+check "a leftover timeseries_tiering extension is accepted and stored" \
+    "ALTER TABLE it.restarted WITH extensions = {'timeseries_tiering': '$TIERING_JSON'};
+     SELECT extensions FROM system_schema.tables WHERE keyspace_name='it' AND table_name='restarted';" \
+    'timeseries_tiering'
 cql "
-INSERT INTO it.restarted (tag_id, timestamp, value) VALUES ('pump-09', $(( WIN_MS +  300000 )), 11);
-INSERT INTO it.restarted (tag_id, timestamp, value) VALUES ('pump-09', $(( WIN_MS +  900000 )), 22);
-INSERT INTO it.restarted (tag_id, timestamp, value) VALUES ('pump-09', $(( WIN_MS + 1500000 )), 33);
+INSERT INTO it.restarted (tag_id, timestamp, value) VALUES ('pump-09', $(( RESTART_MS +  300000 )), 11);
+INSERT INTO it.restarted (tag_id, timestamp, value) VALUES ('pump-09', $(( RESTART_MS +  900000 )), 22);
+INSERT INTO it.restarted (tag_id, timestamp, value) VALUES ('pump-09', $(( RESTART_MS + 1500000 )), 33);
 " > /dev/null
-check_nodetool "a fresh window is re-encoded before the restart" '' retier it restarted
-check "its chunk row exists before the restart (samples = 3)" \
-    "SELECT samples FROM it.restarted__chunks WHERE tag_id='pump-09' AND window_start=$WIN_MS;" \
-    '^ *3'
 
 $RUNTIME restart "$CONTAINER" > /dev/null 2>&1
 wait_for_cql
 
 check "the node comes back up and still reports 6.0.0" \
     "SELECT release_version FROM system.local;" '^ *6\.0\.0 *$'
-check "the tiering policy survived the restart" \
+check "the leftover extension survived the restart" \
     "SELECT extensions FROM system_schema.tables WHERE keyspace_name='it' AND table_name='restarted';" \
     'timeseries_tiering'
-check "the chunk table survived the restart" \
-    "SELECT table_name FROM system_schema.tables WHERE keyspace_name='it' AND table_name='restarted__chunks';" \
-    'restarted__chunks'
-check "the chunk row survived the restart (samples = 3)" \
-    "SELECT samples FROM it.restarted__chunks WHERE tag_id='pump-09' AND window_start=$WIN_MS;" \
-    '^ *3'
-check "re-encoded rows still read back through the merge after the restart" \
-    "SELECT count(*) FROM it.restarted WHERE tag_id='pump-09' AND timestamp >= $WIN_MS AND timestamp < $WIN_END_MS;" \
+check "rows replayed from the commit log read back after the restart" \
+    "SELECT count(*) FROM it.restarted WHERE tag_id='pump-09' AND timestamp >= $RESTART_MS AND timestamp < $(( RESTART_MS + 3600000 ));" \
     '^ *3$'
-check "an aggregate still spans the chunk transparently after the restart" \
-    "SELECT avg(value) FROM it.restarted WHERE tag_id='pump-09' AND timestamp >= $WIN_MS AND timestamp < $WIN_END_MS;" \
+check "an aggregate over them still answers after the restart" \
+    "SELECT avg(value) FROM it.restarted WHERE tag_id='pump-09' AND timestamp >= $RESTART_MS AND timestamp < $(( RESTART_MS + 3600000 ));" \
     '^ *22'
 check "the TSCS table still returns every row after the restart" \
     "SELECT count(*) FROM it.tscs;" "^ *$((TSCS_WINDOWS * TSCS_FLUSHES))$"
@@ -994,6 +743,9 @@ assert "frozen sstables come back unchanged (still one per window)" "$(sstable_c
 check "the SAI index still answers LIKE after the restart" \
     "SELECT count(*) FROM it.logs WHERE device='pump-01' AND msg LIKE '%timeout%' ALLOW FILTERING;" \
     '^ *1$'
+check "the tscol table still reads back after the restart (199)" \
+    "SELECT count(*) FROM it.tscolfz;" '^ *199'
+assert "the tscol sstable comes back unchanged" "$(sstable_count tscolfz)/$(tscol_files)" "1/1"
 
 echo
 echo "== $PASS passed, $FAIL failed =="

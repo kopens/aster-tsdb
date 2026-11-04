@@ -19,13 +19,22 @@
 package org.apache.cassandra.db.compaction;
 
 import java.util.Collection;
+import java.util.Set;
 
 import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.compaction.timeseries.WindowFrozenListeners;
+import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
+import org.apache.cassandra.db.compaction.writers.DefaultCompactionWriter;
+import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.timeseries.RowBlockCodec;
+import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.bti.TscolFormat;
+import org.apache.cassandra.io.util.File;
 
 /**
  * Freezes one closed time window of {@link TimeSeriesCompactionStrategy}: a major compaction of every sstable
@@ -39,6 +48,7 @@ public class FreezeCompactionTask extends CompactionTask
 {
     private final long windowStartMillis;
     private final Runnable onCompleted;
+    private boolean columnar;
 
     public FreezeCompactionTask(ColumnFamilyStore cfs, LifecycleTransaction txn, long gcBefore, long windowStartMillis)
     {
@@ -58,6 +68,49 @@ public class FreezeCompactionTask extends CompactionTask
         super(cfs, txn, gcBefore);
         this.windowStartMillis = windowStartMillis;
         this.onCompleted = onCompleted;
+    }
+
+    /**
+     * Write the frozen window as a {@code tscol} (columnar) sstable when {@code frozen_format} asks for it and the
+     * table's shape is one the columnar codec carries; otherwise the selected format, as before.
+     */
+    public FreezeCompactionTask withColumnarOutput(boolean requested)
+    {
+        this.columnar = writesColumnar(cfs, requested);
+        return this;
+    }
+
+    static boolean writesColumnar(ColumnFamilyStore cfs, boolean requested)
+    {
+        return requested && RowBlockCodec.supports(cfs.metadata());
+    }
+
+    @VisibleForTesting
+    boolean columnar()
+    {
+        return columnar;
+    }
+
+    @Override
+    public CompactionAwareWriter getCompactionAwareWriter(ColumnFamilyStore cfs, Directories directories,
+                                                          ILifecycleTransaction transaction, Set<SSTableReader> nonExpiredSSTables)
+    {
+        if (!columnar)
+            return super.getCompactionAwareWriter(cfs, directories, transaction, nonExpiredSSTables);
+        return new DefaultCompactionWriter(cfs, directories, transaction, nonExpiredSSTables, keepOriginals, getLevel())
+        {
+            @Override
+            protected Descriptor newDescriptor(File directory)
+            {
+                return cfs.newSSTableDescriptor(directory, TscolFormat.instance());
+            }
+        };
+    }
+
+    @Override
+    protected boolean cursorCompactionAllowed()
+    {
+        return !columnar;
     }
 
     @VisibleForTesting

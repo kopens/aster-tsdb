@@ -459,11 +459,17 @@ public class BtiTableReader extends SSTableReaderWithFilter
             return new SSTableIterator(this, dataFileInput, shouldCloseFile, key, indexEntry, slices, selectedColumns, rowIndexFile);
     }
 
+    // aster-tsdb (tscol): clones of a TscolTableReader must stay TscolTableReaders.
+    protected Builder newBuilder()
+    {
+        return new Builder(descriptor);
+    }
+
     @VisibleForTesting
     @Override
     public BtiTableReader cloneAndReplace(IFilter filter)
     {
-        return unbuildTo(new Builder(descriptor).setFilter(filter), true).build(owner().orElse(null), true, true);
+        return unbuildTo(newBuilder().setFilter(filter), true).build(owner().orElse(null), true, true);
     }
 
     @Override
@@ -497,7 +503,7 @@ public class BtiTableReader extends SSTableReaderWithFilter
      */
     private BtiTableReader cloneAndReplace(DecoratedKey newFirst, OpenReason reason)
     {
-        return unbuildTo(new Builder(descriptor), true)
+        return unbuildTo(newBuilder(), true)
                .setFirst(newFirst)
                .setOpenReason(reason)
                .build(owner().orElse(null), true, true);

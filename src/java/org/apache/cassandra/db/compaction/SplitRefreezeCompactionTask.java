@@ -50,6 +50,7 @@ import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.SSTableRewriter;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableWriter;
+import org.apache.cassandra.io.sstable.format.bti.TscolFormat;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.utils.FBUtilities;
@@ -92,6 +93,7 @@ public class SplitRefreezeCompactionTask extends AbstractCompactionTask
     private final LongUnaryOperator windowStartOfMillis;
     private final TimeUnit tableResolution;
     private final Runnable onCompleted;
+    private boolean columnar;
     /**
      * Chosen once in {@link #runMayThrow} and used by both the disk-space pre-flight and every writer.
      * Sizing the pre-flight against the originals' directories while writing somewhere else clears the
@@ -373,9 +375,17 @@ public class SplitRefreezeCompactionTask extends AbstractCompactionTask
         return rewriter;
     }
 
+    /** As {@link FreezeCompactionTask#withColumnarOutput}: the re-split windows are frozen windows too. */
+    public SplitRefreezeCompactionTask withColumnarOutput(boolean requested)
+    {
+        this.columnar = FreezeCompactionTask.writesColumnar(cfs, requested);
+        return this;
+    }
+
     private SSTableWriter createWriter(ILifecycleTransaction shared, Set<SSTableReader> originals)
     {
-        Descriptor descriptor = cfs.newSSTableDescriptor(writeDirectory);
+        Descriptor descriptor = columnar ? cfs.newSSTableDescriptor(writeDirectory, TscolFormat.instance())
+                                         : cfs.newSSTableDescriptor(writeDirectory);
         return descriptor.getFormat().getWriterFactory().builder(descriptor)
                          .setKeyCount(originals.iterator().next().estimatedKeys())
                          .setRepairedAt(CompactionTask.getMinRepairedAt(originals))

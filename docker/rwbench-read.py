@@ -64,7 +64,7 @@ QUERIES = {
 
 
 def connect(attempts=3):
-    """A node that just finished a bulk operation (retier, major compaction) can stall the burst
+    """A node that just finished a bulk operation (a major compaction) can stall the burst
     of concurrent control connections a worker pool opens; one refused handshake must not kill a
     60-second benchmark, so connection setup retries with a short backoff."""
     from cassandra.cluster import Cluster, NoHostAvailable

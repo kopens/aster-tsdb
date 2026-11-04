@@ -32,8 +32,7 @@ import org.apache.cassandra.utils.JVMStabilityInspector;
 
 /**
  * Static registry for {@link WindowFrozenListener}s, mirroring the LocalSessions listener pattern
- * (repair/consistent/LocalSessions.java). No default listeners in v1 - the tiering re-encoder is the first
- * consumer. Listener failures are logged and never affect the compaction result (design spec section 5).
+ * (repair/consistent/LocalSessions.java). No default listeners. Listener failures are logged and never affect the compaction result (design spec section 5).
  */
 public final class WindowFrozenListeners
 {

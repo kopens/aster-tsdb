@@ -457,7 +457,7 @@ public final class ChunkV4Directory
             entry.write(dst);
         // Explicitly zero-filled: §5 rule 5 exists because an encoder writing into a reused scratch
         // buffer leaks stale bytes into padding, produces byte-different output for identical
-        // input, livelocks the re-encoder -- and leaves every round-trip test green.
+        // input -- and leaves every round-trip test green.
         while (dst.position() - base < length)
             dst.put((byte) 0);
         assert dst.position() - base == length : "wrote " + (dst.position() - base) + ", sized " + length;

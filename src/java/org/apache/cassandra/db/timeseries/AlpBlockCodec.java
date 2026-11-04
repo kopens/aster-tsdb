@@ -76,9 +76,8 @@ import java.util.Arrays;
  * is the half of the decision that matters: {@link AlpCodec#exponentCandidates} is the only
  * {@code (e, f)} search in the build and {@link AlpCodec#selectRdDictionary} is the only ALP-RD
  * dictionary in the build. A second copy of either is how two replicas start disagreeing about which
- * exponent pair or which eight left parts a block uses -- a byte difference, which
- * {@code chunkUnchanged} reports forever, which rewrites every chunk every cycle and presents as a
- * capacity problem rather than as a codec bug (§12). What this class adds around them is the exact
+ * exponent pair or which eight left parts a block uses -- a byte difference from the
+ * same input (§12). What this class adds around them is the exact
  * v4 cost of a candidate, which is a different function from the v3 cost and has to be, because the
  * bytes are different.
  *

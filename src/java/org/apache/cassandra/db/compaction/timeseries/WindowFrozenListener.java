@@ -26,7 +26,7 @@ import org.apache.cassandra.schema.TableMetadata;
  * time a window is frozen (or re-frozen after late data) into a single sstable. Design spec section 5.
  * <p>
  * The event is a latency optimisation, not the sole trigger: consumers must be able to fall back to scanning
- * for "frozen windows without downstream output" themselves (e.g. the tiering re-encoder's watermark scan),
+ * for "frozen windows without downstream output" themselves,
  * because events can be lost across restarts. Events are scoped to one strategy-instance slice (the
  * CompactionStrategyManager splits instances per repair status and per disk).
  */

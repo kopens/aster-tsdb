@@ -79,9 +79,8 @@ import org.apache.cassandra.db.marshal.AbstractType;
  * and this class adds no choice of its own that is not a total function of the input.
  *
  * <p>Two properties follow and are pinned by tests: encoding the same input twice is byte-identical,
- * and {@code encode(decode(encode(x)))} equals {@code encode(x)}. The second is not a nicety, it is
- * the tiering re-encoder's late-merge path: a chunk that decoded and re-encoded to different bytes
- * would be reported changed on every cycle and rewritten forever.
+ * and {@code encode(decode(encode(x)))} equals {@code encode(x)}. The second is not a nicety: a chunk that decoded and
+ * re-encoded to different bytes would look changed to anything comparing payloads.
  *
  * <h2>The decoded-value contract</h2>
  *
@@ -622,11 +621,9 @@ public final class ChunkV4Codec
      * The chunk's columns as encoder inputs, taking each column's type code and declared order from
      * the directory rather than from a schema.
      *
-     * <p>This is the re-encoder's late-merge path in miniature, and the reason
-     * {@code encode(toTimestamps(p), rowCount(p), toColumnInputs(p), blockSizeLog2(p))} must equal
-     * {@code p} byte for byte: the merge path decodes chunks it did not write and re-encodes the
-     * union, and a chunk that came back different would be reported changed on every cycle and
-     * rewritten forever.
+     * <p>{@code encode(toTimestamps(p), rowCount(p), toColumnInputs(p), blockSizeLog2(p))} must equal
+     * {@code p} byte for byte: a chunk that came back different would look changed to anything
+     * comparing payloads.
      */
     public static SortedMap<String, ColumnInput> toColumnInputs(ByteBuffer payload)
     {
@@ -1066,8 +1063,7 @@ public final class ChunkV4Codec
      * that calls {@code rank} at all. {@link Chunk#rankCalls} exists so that stays true.
      *
      * <p>Implements v3's {@link ColumnarCursor} and {@link ColumnarChunkCodec.ArrayValueCursor}
-     * unchanged, so the transparent-read and re-encode paths do not have to learn a second shape when
-     * v4 is wired in. The buffer contract is v3's too, and is documented on {@link ChunkV4Codec}:
+     * unchanged, so readers do not have to learn a second shape. The buffer contract is v3's too, and is documented on {@link ChunkV4Codec}:
      * treat every returned buffer as immutable, and never turn one into a read-only buffer.
      */
     public static final class Cursor implements ColumnarCursor, ColumnarChunkCodec.ArrayValueCursor

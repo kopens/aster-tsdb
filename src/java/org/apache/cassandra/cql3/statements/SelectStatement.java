@@ -639,8 +639,6 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                                        Dispatcher.RequestTime requestTime,
                                        boolean unmask)
     {
-        // SP3/SP4 transparent tiered reads happen inside the read machinery, on the UNFILTERED
-        // stream (see TransparentReads.maybeWrap), so nothing is wrapped here.
         try (PartitionIterator data = query.execute(options.getConsistency(), state, requestTime))
         {
             return processResults(data, options, selectors, nowInSec, userLimit, aggregationSpec, unmask, state);
@@ -767,10 +765,6 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                   + " you must either remove the ORDER BY or the IN and sort client side, or disable paging for this query");
 
         ResultMessage.Rows msg;
-        // SP3/SP4 transparent tiered reads happen inside the read machinery (see
-        // TransparentReads.maybeWrap), on each page's own read command, so chunk rows now flow
-        // through the same limits and counters as hot rows and paging composes with the merge --
-        // which is why there is no longer a "merged read spans multiple pages" guard here.
         try (PartitionIterator page = pager.fetchPage(pageSize, requestTime))
         {
             msg = processResults(page, options, selectors, nowInSec, userLimit, aggregationSpec, unmask, state.getClientState());
@@ -837,8 +831,6 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
             {
                 try (PartitionIterator data = query.executeInternal(executionController))
                 {
-                    // SP3/SP4 transparent tiered reads happen inside executeInternal, on the
-                    // unfiltered stream (see TransparentReads.maybeWrap).
                     return processResults(data, options, selectors, nowInSec, userLimit, null, unmask, state.getClientState());
                 }
             }
@@ -992,9 +984,6 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         if (filter == null || filter.isEmpty(table.comparator))
             return ReadQuery.empty(table);
 
-        // Chunk rows would join a filtered read unfiltered; see TransparentReads.guardFilteredPartitionRead.
-        org.apache.cassandra.db.timeseries.tiering.TransparentReads.guardFilteredPartitionRead(table, filter, rowFilter, state, options.getConsistency());
-
         List<DecoratedKey> decoratedKeys;
         if (keys.size() == 1) // reduce allocations in collections for keys
         {
@@ -1078,11 +1067,6 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         AbstractBounds<PartitionPosition> keyBounds = restrictions.getPartitionKeyBounds(options);
         if (keyBounds == null)
             return ReadQuery.empty(table);
-
-        // A range scan on a tiered table that could reach chunks it cannot merge (range_scan 'refuse', a
-        // row filter...) is refused rather than answered with the hot rows alone. See
-        // TransparentReads.guardRangeRead.
-        org.apache.cassandra.db.timeseries.tiering.TransparentReads.guardRangeRead(table, clusteringIndexFilter, rowFilter, state, options.getConsistency());
 
         ReadQuery command =
             PartitionRangeReadQuery.create(table, nowInSec, columnFilter, rowFilter, limit, new DataRange(keyBounds, clusteringIndexFilter), potentialTxnConflicts);

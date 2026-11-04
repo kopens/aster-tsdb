@@ -40,6 +40,7 @@ import org.apache.cassandra.io.sstable.SSTableRewriter;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableWriter;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.concurrent.Transactional;
@@ -233,9 +234,15 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
         return newWriter;
     }
 
+    /** aster-tsdb (tscol): lets time-series compaction's freeze write its output in another sstable format. */
+    protected Descriptor newDescriptor(File directory)
+    {
+        return cfs.newSSTableDescriptor(directory);
+    }
+
     protected SSTableWriter sstableWriter(Directories.DataDirectory directory, DecoratedKey nextKey)
     {
-        Descriptor descriptor = cfs.newSSTableDescriptor(getDirectories().getLocationForDisk(directory));
+        Descriptor descriptor = newDescriptor(getDirectories().getLocationForDisk(directory));
         MetadataCollector collector = new MetadataCollector(txn.originals(), cfs.metadata().comparator)
                                       .sstableLevel(sstableLevel());
         SerializationHeader header = SerializationHeader.make(cfs.metadata(), nonExpiredSSTables);

@@ -115,11 +115,6 @@
       "score": 1.2477551308600527,
       "unit": "us/op"
     },
-    "ChunkReadBench.assembledScan": {
-      "error": 15.562571689236997,
-      "score": 376.27124157072575,
-      "unit": "us/op"
-    },
     "ChunkReadBench.fullScan": {
       "error": 14.170822008344436,
       "score": 788.9465900370523,

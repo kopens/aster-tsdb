@@ -227,9 +227,11 @@ public enum CassandraRelevantProperties
      *  The limits are not enforced across a range tombstone span (for correctness reasons).
      * **/
     DATA_RESPONSE_IN_MEMORY_MAX_ROWS("cassandra.data_response_in_memory_max_rows", "128"),
-    DATA_RESPONSE_IN_MEMORY_MAX_ROWS_CL_ONE("cassandra.data_response_in_memory_max_rows_cl_one", "512"),
+    // aster-tsdb: 512 / 64KiB upstream. A day of one tag overflowed them, and serializing the page to read it straight
+    // back was over half of a columnar read. Worst case is this size times concurrent_reads, for the length of a read.
+    DATA_RESPONSE_IN_MEMORY_MAX_ROWS_CL_ONE("cassandra.data_response_in_memory_max_rows_cl_one", "20000"),
     DATA_RESPONSE_IN_MEMORY_MAX_SIZE("cassandra.data_response_in_memory_max_size", "16KiB"),
-    DATA_RESPONSE_IN_MEMORY_MAX_SIZE_CL_ONE("cassandra.data_response_in_memory_max_size_cl_one", "64KiB"),
+    DATA_RESPONSE_IN_MEMORY_MAX_SIZE_CL_ONE("cassandra.data_response_in_memory_max_size_cl_one", "16MiB"),
     DECAYING_ESTIMATED_HISTOGRAM_RESERVOIR_STRIPE_COUNT("cassandra.dehr_stripe_count", "2"),
     DEFAULT_PROVIDE_OVERLAPPING_TOMBSTONES("default.provide.overlapping.tombstones"),
     /** determinism properties for testing */

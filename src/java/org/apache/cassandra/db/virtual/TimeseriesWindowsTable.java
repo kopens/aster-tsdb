@@ -37,7 +37,7 @@ import org.apache.cassandra.schema.TableMetadata;
  * using it, on this node. Answers the questions the 2026-09-24 production timeout needed answered by hand:
  * is any sstable spanning windows ({@code spanning_sstables > 0} should never happen once flushes and
  * delegate compactions are window-contained), and does a window hold far more rows than it should (rows
- * the tiering re-encoder has deleted but no rewrite has yet merged with their tombstones)?
+ * deleted but not yet merged with their tombstones by a rewrite)?
  * <pre>
  * SELECT * FROM system_views.timeseries_windows WHERE keyspace_name = 'pp' AND table_name = 'tm_tag_point';
  * </pre>

@@ -43,15 +43,15 @@ public final class ChunkCodecs
     /**
      * Version byte 2 was the chimp128 single-column format, the last codec this class dispatched
      * to. Its encoder and decoder were deleted together with the v3 columnar implementation (no
-     * production deployment ever wrote a single-column chunk -- tiering was never enabled), but the
+     * production deployment ever wrote a single-column chunk), but the
      * byte still names a known format and is never reassigned.
      */
     static final byte CHIMP128_V2_VERSION_REMOVED = 2;
 
     /**
      * Version byte 3 was the delta-of-delta/RLE columnar format, replaced outright by the
-     * block-based v4 layout (v4 spec §0, §10) before tiering was ever enabled on a production
-     * table, so no v3 read path was kept. Never reassigned: a v3 payload must be reported as an
+     * block-based v4 layout (v4 spec §0, §10) before any production table used it, so no v3 read
+     * path was kept. Never reassigned: a v3 payload must be reported as an
      * unreadable <em>format</em> -- systematic, propagated, never swallowed -- rather than skipped
      * as one corrupt chunk. Without this branch a v3 payload would fall through to the
      * names-no-format {@link IllegalArgumentException} below, and the read path would silently skip
@@ -84,8 +84,8 @@ public final class ChunkCodecs
         if (version == COLUMNAR_V3_VERSION_REMOVED)
             return new UnsupportedChunkFormatException(
                 "Unsupported " + what + " version: 3 -- version 3 was the columnar chunk format replaced outright " +
-                "by the block-based v4 layout, and no v3 read path was kept (tiering was never enabled in " +
-                "production, so no v3 chunk should exist); chunks written by a v3 build cannot be read by this one");
+                "by the block-based v4 layout, and no v3 read path was kept (no v3 chunk " +
+                "should exist in production); chunks written by a v3 build cannot be read by this one");
         if (version == CHIMP128_V2_VERSION_REMOVED || version == ColumnarChunkCodec.VERSION)
             return new UnsupportedChunkFormatException(
                 "Unsupported " + what + " version: " + version + " -- that is a known chunk format, but not one " +

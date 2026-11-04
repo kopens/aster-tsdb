@@ -65,7 +65,6 @@ import org.apache.cassandra.db.SizeEstimatesRecorder;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.SystemKeyspaceMigrator41;
 import org.apache.cassandra.db.commitlog.CommitLog;
-import org.apache.cassandra.db.timeseries.tiering.TieredStorageService;
 import org.apache.cassandra.db.virtual.AccordDebugKeyspace;
 import org.apache.cassandra.db.virtual.AccordDebugRemoteKeyspace;
 import org.apache.cassandra.db.virtual.ExceptionsTable;
@@ -434,16 +433,6 @@ public class CassandraDaemon
         AuditLogManager.instance.initialize();
 
         StorageService.instance.doAutoRepairSetup();
-
-        try
-        {
-            TieredStorageService.instance.setup();
-        }
-        catch (Throwable t)
-        {
-            JVMStabilityInspector.inspectThrowable(t);
-            logger.warn("Unable to start tiered storage service", t);
-        }
 
         // schedule periodic background compaction task submission. this is simply a backstop against compactions stalling
         // due to scheduling errors or race conditions

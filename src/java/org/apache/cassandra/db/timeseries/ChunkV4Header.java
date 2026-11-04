@@ -29,7 +29,7 @@ import java.nio.ByteOrder;
  * nostalgia, it is the whole of §3's stated requirement -- {@link #rowCount(ByteBuffer)},
  * {@link #firstTimestamp(ByteBuffer)} and {@link #lastTimestamp(ByteBuffer)} stay constant-time
  * peeks that read one field out of the first 21 bytes and <b>never parse the directory, a block
- * table or a section</b>. Tiering asks every chunk for its time bounds to decide whether to open it
+ * table or a section</b>. A reader asks a chunk for its time bounds to decide whether to open it
  * at all, so a peek that had to decode anything would make "skip this chunk" cost as much as
  * reading it. Keep those four offsets where they are; a field inserted ahead of them is not a
  * layout change, it is a performance regression in the one path that runs on chunks nobody wants.
@@ -367,8 +367,7 @@ public final class ChunkV4Header
     // These check the version byte and the header's own length, and nothing else. That is
     // deliberate on two counts. They must stay usable on a header-only prefix -- a future index or
     // a partially read frame has no sections to validate against -- and they must stay constant
-    // time in the tiering path that asks every chunk for its bounds in order to decide not to read
-    // it. The value they return is the header's claim about itself; read() is what validates.
+    // time for a reader that asks a chunk for its bounds in order to decide not to read it. The value they return is the header's claim about itself; read() is what validates.
 
     /** §3, offset 1: the chunk's row count, without touching a section. */
     public static int rowCount(ByteBuffer payload)

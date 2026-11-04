@@ -731,22 +731,8 @@ public class Paxos
                 // read the current values and check they validate the conditions
                 Tracing.trace("Reading existing values for CAS precondition");
 
-                // Tiered storage: a CAS precondition read must see the RAW base rows, never the
-                // hot+chunk merge -- see ModificationStatement.casInternal for why (a condition is a
-                // compare-and-set on a base row, and Paxos can only linearize what it owns). Both the
-                // read's execution inside begin() and its consumption below are bracketed, because
-                // the merge hook can engage in either.
-                BeginResult begin;
-                org.apache.cassandra.db.timeseries.tiering.TransparentReads.enterInternalBypass();
-                try
-                {
-                    begin = begin(proposeDeadline, readCommand, consistencyForConsensus,
-                            true, Ballot.atUnixMicrosWithLsb(minHLC, 0, GLOBAL), failedAttemptsDueToContention, requestTime);
-                }
-                finally
-                {
-                    org.apache.cassandra.db.timeseries.tiering.TransparentReads.exitInternalBypass();
-                }
+                BeginResult begin = begin(proposeDeadline, readCommand, consistencyForConsensus,
+                        true, Ballot.atUnixMicrosWithLsb(minHLC, 0, GLOBAL), failedAttemptsDueToContention, requestTime);
 
                 if (begin.retryWithNewConsenusProtocol)
                 {
@@ -759,14 +745,9 @@ public class Paxos
                 failedAttemptsDueToContention = begin.failedAttemptsDueToContention;
 
                 FilteredPartition current;
-                org.apache.cassandra.db.timeseries.tiering.TransparentReads.enterInternalBypass();
                 try (RowIterator iter = PartitionIterators.getOnlyElement(begin.readResponse, readCommand))
                 {
                     current = FilteredPartition.create(iter);
-                }
-                finally
-                {
-                    org.apache.cassandra.db.timeseries.tiering.TransparentReads.exitInternalBypass();
                 }
 
                 Proposal proposal;

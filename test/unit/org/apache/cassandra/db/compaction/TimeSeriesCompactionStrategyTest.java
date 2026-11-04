@@ -320,51 +320,16 @@ public class TimeSeriesCompactionStrategyTest
     }
 
 
+    /** The option belonged to the removed shadow-table tiering: a schema still carrying it must keep validating. */
     @Test
-    public void tieredWindowFreezesOnceFullyEncodedInsteadOfWaitingOutFreezeAfter()
-    {
-        // A closed window still inside freeze_after is CLOSING (the delegate's) -- unless the table is tiered
-        // and the chunk coverage ledger already reaches the window's end: then every row in it has been
-        // re-encoded and range-deleted, and freezing now is what merges those deletions with the rows.
-        TimeSeriesCompactionStrategy tscs = strategy(mock(UnifiedCompactionStrategy.class));
-        TimeSeriesCompactionStrategyOptions o = new TimeSeriesCompactionStrategyOptions(options());
-        long windowStart = o.windowStartFor(NOW - 2 * HOUR - 60_000);  // closed, within freeze_after 2h
-        SSTableReader closing = sstableAt(NOW - 2 * HOUR - 60_000);
-
-        tscs.tieredThroughForTesting = () -> windowStart + HOUR - 1;   // one ms short of the window's end
-        assertEquals(TimeSeriesCompactionStrategy.WindowState.CLOSING, tscs.classify(windowStart, Set.of(closing), NOW));
-
-        tscs.tieredThroughForTesting = () -> windowStart + HOUR;       // covers the whole window
-        assertEquals(TimeSeriesCompactionStrategy.WindowState.FROZEN, tscs.classify(windowStart, Set.of(closing), NOW));
-        assertFalse(tscs.isActive(windowStart, NOW));
-
-        // The current window stays active whatever the ledger says: it is still being written.
-        long current = o.windowStartFor(NOW);
-        tscs.tieredThroughForTesting = () -> Long.MAX_VALUE;
-        assertTrue(tscs.isActive(current, NOW));
-    }
-
-    @Test
-    public void tieringAwareFreezeCanBeSwitchedOff()
+    public void leftoverTieringAwareFreezeIsAcceptedAndIgnored()
     {
         Map<String, String> opts = options();
         opts.put(TimeSeriesCompactionStrategyOptions.TIERING_AWARE_FREEZE, "false");
-        ColumnFamilyStore cfs = mock(ColumnFamilyStore.class, Mockito.RETURNS_DEEP_STUBS);
-        TimeSeriesCompactionStrategy tscs = new TimeSeriesCompactionStrategy(cfs, opts, mock(UnifiedCompactionStrategy.class));
-        TimeSeriesCompactionStrategyOptions o = new TimeSeriesCompactionStrategyOptions(opts);
-        long windowStart = o.windowStartFor(NOW - 2 * HOUR - 60_000);
-
-        tscs.tieredThroughForTesting = () -> Long.MAX_VALUE;
-        assertEquals(TimeSeriesCompactionStrategy.WindowState.CLOSING,
-                     tscs.classify(windowStart, Set.of(sstableAt(NOW - 2 * HOUR - 60_000)), NOW));
-    }
-
-    @Test(expected = org.apache.cassandra.exceptions.ConfigurationException.class)
-    public void tieringAwareFreezeRejectsNonBoolean()
-    {
-        Map<String, String> opts = options();
-        opts.put(TimeSeriesCompactionStrategyOptions.TIERING_AWARE_FREEZE, "yes");
-        TimeSeriesCompactionStrategyOptions.validateOptions(opts, new HashMap<>(opts));
+        assertFalse(TimeSeriesCompactionStrategyOptions.validateOptions(opts, new HashMap<>(opts))
+                                                       .containsKey(TimeSeriesCompactionStrategyOptions.TIERING_AWARE_FREEZE));
+        assertFalse(new TimeSeriesCompactionStrategyOptions(opts).delegateOptions(opts)
+                                                                 .containsKey(TimeSeriesCompactionStrategyOptions.TIERING_AWARE_FREEZE));
     }
 
     @Test

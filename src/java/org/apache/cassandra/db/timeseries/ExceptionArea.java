@@ -43,9 +43,8 @@ import java.nio.ByteOrder;
  * is §5 rule 6's "specified filler" and the reason is byte determinism, not tidiness: the lane slot
  * is dead -- whatever it holds is discarded and replaced by the exception's verbatim value -- so
  * without a specified value an encoder is free to leave the truncated residual, or a stale scratch
- * byte, or zero, and three encoders produce three different chunks from one input.
- * {@code chunkUnchanged} then reports a difference forever and every chunk is rewritten every cycle,
- * a failure that presents as a capacity problem rather than as a codec bug (§12). Zero is cheap to
+ * byte, or zero, and three encoders produce three different chunks from one input
+ * (§12). Zero is cheap to
  * write, cheap to assert, and the check costs one array read per exception.
  *
  * <p><b>A position is an index into the lane this area accompanies</b>, not a row offset and not a
@@ -172,8 +171,7 @@ public final class ExceptionArea
      *
      * <p>Every byte of the range is written, the header pads and the trailing pad included, because
      * §5 rule 5 exists precisely for encoders that write into a reused scratch buffer: leaked stale
-     * bytes make identical input produce different bytes, livelock the re-encoder, and leave every
-     * round-trip test green.
+     * bytes make identical input produce different bytes and leave every round-trip test green.
      */
     public static int encode(int[] positions, long[] values, int count, int valueBytes, ByteBuffer dst)
     {

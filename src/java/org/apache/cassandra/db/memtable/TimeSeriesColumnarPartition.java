@@ -1893,8 +1893,7 @@ public final class TimeSeriesColumnarPartition implements TimeSeriesMemtable.Sha
             // ColumnFilter.all(columns()) — the RegularAndStaticColumns overload, Slices.ALL,
             // forward: the exact arguments AbstractBTreePartition.unfilteredIterator() passes, so
             // the iterator's columns() and the unfiltereds it yields are what the rebuild yielded.
-            // This is the call the flush path makes (Flushing.writeSortedContents, and the tiering
-            // hook's ColdWindowChunkFlush.encodePartition).
+            // This is the call the flush path makes (Flushing.writeSortedContents).
             return streamOrRebuild(ColumnFilter.all(columns()), Slices.ALL, false);
         }
 

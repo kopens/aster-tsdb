@@ -39,8 +39,7 @@ import java.util.Arrays;
  * byte modes win outright when they apply; otherwise the smaller of the two byte counts wins and an
  * exact tie resolves to the smaller mode code, i.e. {@code BITMAP}. Nothing here trial-encodes,
  * samples, or consults a threshold: a replica that resolved a tie differently would produce a
- * byte-different chunk, {@code chunkUnchanged} would report a difference, and every chunk would be
- * rewritten every cycle.
+ * byte-different chunk from the same input.
  *
  * <p><b>Mode codes.</b> §4 lists the four modes in the low two bits of {@code blockFlags} but does
  * not number them; this class takes the listing order, which also puts {@code ALL_PRESENT} at 0 so
@@ -236,8 +235,7 @@ public final class BlockPresence
      * Encodes into {@code dst} at its position, advancing it by {@link #encodedLength} and
      * returning the bytes written. Every byte in that range is written, padding included: §5 rule 5
      * exists because a reused scratch buffer that leaks stale bytes into padding makes identical
-     * input produce different bytes and livelocks the re-encoder while every round-trip test stays
-     * green.
+     * input produce different bytes while every round-trip test stays green.
      */
     public static int encode(int mode, long[] words, int blockRows, ByteBuffer dst)
     {
@@ -413,8 +411,8 @@ public final class BlockPresence
     // These deliberately did not reuse v3's varint reader (ColumnarChunkCodec.readVarLong, deleted
     // with the v3 implementation): that one accepted a non-minimal encoding, which was harmless in
     // v3 (nothing re-encoded a chunk byte-for-byte) and fatal here, because a payload that decodes
-    // to the same runs but re-encodes to different bytes makes chunkUnchanged report a difference
-    // forever. Package-private so a later phase can lift them into a shared helper when the
+    // to the same runs but re-encodes to different bytes gives one chunk two byte forms.
+    // Package-private so a later phase can lift them into a shared helper when the
     // directory and dictionary paths need the same rule.
 
     /** Bytes the canonical encoding of {@code value} occupies. */

@@ -1,6 +1,6 @@
 ---
 name: docker-integration-test
-description: The pre-release verification procedure for this fork — the full local gate (.build/sh/ci-local), the three-node cluster test, the performance regression gate, and the trial-run protocol that must precede enabling tiered storage on real data. Use this whenever the user asks to run integration or e2e tests, to verify a build, to check whether something is ready to ship or "문제없나 / 출시해도 되나 / 프로덕션 써도 되나", before cutting a release tag, and whenever a change touches tiering, compaction, the chunk codec or the read path. Also use it when one of these runs fails and the failure needs diagnosing.
+description: The pre-release verification procedure for this fork — the full local gate (.build/sh/ci-local), the three-node cluster test, and the performance regression gate. Use this whenever the user asks to run integration or e2e tests, to verify a build, to check whether something is ready to ship or "문제없나 / 출시해도 되나 / 프로덕션 써도 되나", before cutting a release tag, and whenever a change touches tscol, compaction, the chunk codec or the read path. Also use it when one of these runs fails and the failure needs diagnosing.
 ---
 
 # Verifying a build before it ships
@@ -10,8 +10,8 @@ runs the same invariants through a **real node built from the image that will ac
 is the only way to catch what appears once the code is packaged, started by the entrypoint and
 driven from outside the process.
 
-Treat this as a checklist, not a menu. The features it covers — tiered storage above all — delete
-base rows and cannot be rolled back, so "we ran the unit tests" is not a release decision.
+Treat this as a checklist, not a menu. The features it covers rewrite data on disk, so "we ran the
+unit tests" is not a release decision.
 
 ## 0. Know what CI is and is not telling you
 
@@ -60,19 +60,20 @@ with hundreds of `package org.slf4j does not exist` errors that read as a broken
 
 `.gitlab-ci.yml` marks `docker-cluster-test` manual and explicitly not a release gate, on the
 argument that three 2G JVMs plus the job may not fit a shared runner. That argument is about runner
-capacity, not about risk — and it leaves the only coverage of tiering's *cluster* invariants outside
+capacity, not about risk — and it leaves the only coverage of these *cluster* invariants outside
 every gate:
 
-- each tag encoded exactly once across the cluster (every node re-encodes only its own primary
-  ranges, so all three have to run and none may double-encode);
 - TSCS freezing each closed window to one sstable **on every replica independently** — compaction is
   node-local, and a node that never converged answers every read correctly while keeping its disk;
+- `frozen_format = 'columnar'` on RF 3: exactly one `-tscol-Data.db` per node for the window, the same
+  answers through every coordinator, `nodetool repair` over it, a read at QUORUM with a replica stopped,
+  and a late write that reaches the stopped node by repair and refreezes everywhere;
 - a real repair stream between operating-system processes, and the window-split layout of what the
   receiving node ends up with;
 - aggregation and gap-fill computed by each coordinator in turn.
 
 Run it on a machine with the headroom, once, before any release that touches compaction, streaming,
-repair or tiering. It leaves its three containers up on purpose so a failure can be inspected;
+repair or tscol. It leaves its three containers up on purpose so a failure can be inspected;
 `docker rm -f cassandra-ts-cluster-{1,2,3}` when done.
 
 ## 2.5 The upgrade boot test — required before any release that a running node will take
@@ -105,8 +106,8 @@ per release that writes metadata in a new layout.
 ```
 
 Runs the chunk codec and cursor JMH classes and fails on a regression beyond the threshold (25% by
-default). It is a *regression* gate, not a benchmark: `docker/scale-test.sh` and
-`docker/tiering-bench.sh` answer "how fast on production-shaped data" and take hours with a 16G heap.
+default). It is a *regression* gate, not a benchmark: `docker/scale-test.sh` answers
+"how fast on production-shaped data" and takes hours with a 16G heap.
 
 Two rules it enforces so the gate keeps meaning something:
 
@@ -152,32 +153,10 @@ value-index rule the v4 cursor enforces with `rankCalls() == 0`. A regression th
 means a design invariant broke, not that something got slower.
 
 **The benchmarks are not the product measurement.** `ci-perf` says "the decode path did not get
-slower". It says nothing about query latency on real data — that is
-[tiering-benchmark.md](../../../doc/timeseries/tiering-benchmark.md) (host 234: storage 7.1× smaller,
-aggregates 3–6× faster, re-encode 108k rows/s), and those figures do not transfer to the production
-node either. Quote the right one for the question being asked.
-
-## 4. Before enabling tiered storage on real data
-
-Tiering deletes the base rows. From that moment `<table>__chunks` is the only copy, a build that
-cannot read v4 chunks cannot read the data, and dropping the chunk table destroys it. Read
-[production-rollout.md](../../../doc/timeseries/production-rollout.md) §0 in full — it is short and
-every item is a one-way door.
-
-Do not skip the trial run:
-
-1. **Every node on a v4 build first.** v4 chunks are unreadable by older builds and v1/v2/v3 chunks
-   are unreadable by this one, with no converter. Any chunk table left by an older build must be
-   `DROP`ped before enabling — that data does not come back.
-2. **A table whose data can be regenerated**, or a copy, for at least a full retention cycle. Long
-   enough that the re-encoder, cold-window expiry and at least one node restart have all happened.
-3. **Restart a node during the trial** and confirm it comes back and still serves the merged view.
-   The chunk-table TCM bug was invisible until a node replayed its own metadata log.
-4. **Confirm backups include `<table>__chunks`** before the first re-encode, not after.
-5. **Watch `system_views.timeseries_tiering`** and the ledger through the trial rather than only at
-   the end — a cycle that stops making progress is the signal, and it is silent otherwise.
-
-Only then consider a real table, one table at a time.
+slower". It says nothing about query latency on real data. The last such measurement,
+[tiering-benchmark.md](../../../doc/timeseries/tiering-benchmark.md), is of the removed shadow-table
+design, so it does not describe tscol and tscol has yet to be measured. Quote the right number for the
+question being asked.
 
 ## What the runs assert
 
@@ -194,33 +173,21 @@ fixture:
 - SAI `LIKE` with `index_analyzer`: substring, prefix, suffix, Korean fragments including one that
   crosses a space, that `=` keeps exact semantics on the analyzed column, and composition with
   `time_bucket`
-- tiered storage end to end, twice: on the simplest shape and on **`tm_tag_point`'s exact production
-  shape** (7 statics, 7 regular columns across text/int/double/boolean and a frozen map, DESC
-  clustering) — policy install, `nodetool retier`, chunk creation, transparent merged reads, late-row
-  merge, statics surviving the range delete, DESC bound arithmetic both directions and both
-  orderings, cold-write rejection, and `system_views.timeseries_tiering`
 - TSCS: the flush split at window boundaries (T3), each closed window freezing to exactly one sstable
   (T2), that a converged window is then *not* rewritten again — a freeze/split livelock is invisible
   to every read and only shows as an sstable set that keeps changing — and that no row was lost
-- a **restart** through the image's entrypoint, re-asserting the tiering policy, chunk table, chunk
-  row, merged reads, aggregates, the TSCS sstable layout and the SAI index on the other side
+- tscol: a closed window freezing into one `-tscol-Data.db`, reads, aggregates and non-key filters over
+  it, and a late update and delete refreezing back into one tscol sstable
+- a **restart** through the image's entrypoint, re-asserting a table carrying a leftover
+  `timeseries_tiering` extension, rows replayed from the commit log, aggregates, the TSCS sstable
+  layout, the tscol sstable and the SAI index on the other side
 
-Two things to know before editing that script:
+One thing to know before editing that script:
 
-**The deletion gate.** Every other tiering assertion passes whether or not the re-encoder actually
-deleted the base rows, because transparent reads reconcile chunk rows with live base rows either
-way. So the section ends by deleting the chunk row and asserting the window then returns *nothing* —
-the one signal from cqlsh the merge cannot fabricate. If you add a tiering assertion, ask whether it
-would survive the re-encoder silently skipping its range delete. If it would, it is not testing what
-you think. (This is also why the restart section builds its own tiered table: the earlier ones have
-no chunk left to come back from.)
-
-**Wall-clock assertions must be pinned to the worst case, not to "now".** The hot-window DELETE
-checks use the last millisecond before the current `chunk_window` boundary, because that is the
-newest row a coverage ledger claiming the cycle cutoff as its top would call cold. Written against
-`now` it only reproduced when the test happened to run in the first minutes of an hour — which is
-how a real write-guard bug survived two green runs before a third caught it. Any new assertion that
-depends on where `now` sits inside a window needs the same treatment.
+**Wall-clock assertions must be pinned to the worst case, not to "now".** A check written against
+`now` once only reproduced its bug when the test happened to run in the first minutes of an hour —
+which is how a real write-guard bug survived two green runs before a third caught it. Any new
+assertion that depends on where `now` sits inside a window has to choose that boundary explicitly.
 
 **`docker/cluster-test.sh`** — the cluster invariants listed in §2, plus one schema version across
 three nodes and QUORUM behaviour with a replica actually stopped.
@@ -233,11 +200,8 @@ before re-running. Then:
 - **Node never became ready** — `docker logs <container>`. Usually the image, not the test.
 - **A CQL assertion fails** — reproduce by hand against the still-running container
   (`docker exec <c> cqlsh -e '<the CQL from the report>'`) before changing anything.
-- **A tiering assertion fails** — check `system_views.timeseries_tiering` for whether the cycle ran
-  at all; a policy that failed to install makes every downstream assertion fail confusingly. If a
-  write was refused as cold, compare the boundary in the error message against what the coverage
-  ledger claims — the guard and the read path share `ColdBoundary.coldBelowMs`, and an overstated
-  ledger top refuses rows that were never encoded.
+- **A tscol assertion fails** — `ls <data>/<ks>/<table>-*/*tscol*` and `nodetool tablestats` on the node
+  say whether the freeze ran at all; `system_views.timeseries_windows` shows the window's state.
 - **A cluster assertion fails** — the containers are still up: `nodetool status`, `nodetool
   tablestats`, and the per-node sstable listing are all still reachable.
 

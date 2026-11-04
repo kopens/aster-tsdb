@@ -182,8 +182,7 @@ AccordStaleReplicas dropped) without bumping the TCM serialization `Version`
 (`IllegalArgumentException: No enum constant ...MultiStepOperation.Kind.`, exit 3 — node 41, 2026-11-01).
 `main` was backed out to r3's content, and **r4 reverted that back-out** and added
 `service/accord/topology/LegacyAccordLayout.java`: `MetadataSnapshots.fromBytes` falls back to the old layout
-when the current one does not consume a snapshot exactly, and `CassandraDaemon` (next to
-`TieredStorageService.setup()`) calls `LegacyAccordLayout.rewriteSnapshotIfLegacyWasRead()` so the node
+when the current one does not consume a snapshot exactly, and `CassandraDaemon` called `LegacyAccordLayout.rewriteSnapshotIfLegacyWasRead()` so the node
 rewrites it in the current layout. Node 41 (the only pre-r4 node) booted r4 and rewrote its snapshot, so
 **r6 deleted all of it**: `MetadataSnapshots.java` and `ClusterMetadata.java` are upstream's again, and the
 next merge is a plain merge with no hunks to keep there. `ClusterMetadataSnapshotLayoutTest` pins the
@@ -193,17 +192,12 @@ with a copy of node 41's system metadata (see the `docker-integration-test` skil
 does not catch this class of break; if upstream changes a format without a `Version` bump again, add a
 version-gated reader the same way.
 
-**Fork feature touchpoints** — `SelectStatement.java` (gap-fill wiring, and the
-`TransparentReads.guardRangeRead(table, filter, rowFilter, ...)` call in `getRangeCommand` that refuses range
-scans which reach chunked data and cannot merge it), `ModificationStatement.execute` and
-`BatchStatement.execute` (`TieredWrites.guardWriteConsistency` — r4's write CL floor), `CQL3CasRequest.readCommand`
-(`TieredWrites.refuseConditionsOnColdData` — r4's LWT refusal), `ClusteringIndexSliceFilter`/`ClusteringIndexNamesFilter`
+**Fork feature touchpoints** — `SelectStatement.java` (gap-fill wiring), `ModificationStatement.java` and `BatchStatement.java` (the
+`validatePrepare` overrides of the `prepared_statements_require_parameters` guardrail), `ClusteringIndexSliceFilter`/`ClusteringIndexNamesFilter`
 (`FilterNotIndexed.applyToPartitionColumns`, HCD-585 backport from datastax/cassandra — drop if upstream fixes it), `QueryOptions.OptionsWithNames` (overrides `getValue`/`getValuesSize` and turns off the `byte[]` fast path so unprepared named values bind by name — a fix for upstream 8a72868066, pinned by `NamedBindValuesTest`; drop if upstream fixes it), `db/compaction/TimeSeries*.java`,
-`FreezeCompactionTask.java`, `db/compaction/timeseries/`, `TableAttributes.java`, `CassandraDaemon.java`,
-`SystemViewsKeyspace.java`, `NodetoolCommand.java`, `NodeProbe.java`, `DataResolver.java`/`DigestResolver.java`,
-`ColumnFamilyStore.java`/`ColumnFamilyStoreMBean.java`, `metrics/CassandraMetricsRegistry.java` (one line in
-the static `metricGroups` list declaring `TieringMetrics.TYPE_NAME`; without it every node fails tiering
-with "Unknown metric group: TimeSeriesTiering"). These usually auto-merge. When they don't, the
+`FreezeCompactionTask.java`, `db/compaction/timeseries/`, `TableAttributes.java`,
+`SystemViewsKeyspace.java` (`timeseries_windows`), `NodeProbe.java` (`userDefinedGarbageCollect`),
+`ColumnFamilyStore.java`/`ColumnFamilyStoreMBean.java`. These usually auto-merge. When they don't, the
 rule is *keep both*: upstream's fix and the fork's feature. Never resolve one of these by taking a
 side wholesale without reading the hunk.
 

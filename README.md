@@ -5,24 +5,16 @@
 # Aster Timeseries Database
 
 **A database tuned for the time-series workloads of industrial sites.** 21 CQL functions, gap-fill,
-and tiered storage that compresses itself — **7.1× smaller on disk and 3–6× faster to query**.
+and time-window compaction that freezes closed windows into a columnar SSTable format.
 
 **Apache Cassandra compatible.** The same CQL, the same drivers, the same operational tooling, and
 the same on-disk format: it reads an existing 6.0 dataset as it stands. Installing it on a running
 cluster is one jar, and every new feature is opt-in.
 
-| Measured against stock Cassandra 6.0.0 | Stock | Aster TSDB |
+| Against stock Cassandra 6.0.0 | Stock | Aster TSDB |
 | --- | --- | --- |
-| 20M rows on disk | 237.8 MB | **33.3 MB** — 7.1× smaller |
-| `count(*)`, 40k-row partition | 303 ms | **50 ms** — 6.1× faster |
-| p95 per tag, 90 tags (3.6M rows) | 14.2 s | **2.6 s** — 5.4× faster |
-| Hourly average, 90 tags | 14.9 s | **4.2 s** — 3.5× faster |
 | Time-series computation | the application pulls raw rows and computes | **finishes on the server** |
 | Compression & retention | the application's problem | **a table policy** |
-
-> **Every query measured is the same or faster after tiering** — unbounded scans, single-row lookups
-> and static-column reads included. Compression here buys storage *and* latency; usually you spend
-> one to get the other. Full numbers and caveats: [tiering benchmark](doc/timeseries/).
 
 ## Against TimescaleDB and InfluxDB
 
@@ -33,7 +25,7 @@ cluster is one jar, and every new feature is opt-in.
 | Bucketing | `time_bucket` | `date_bin_gapfill` | `time_bucket` / `time_bucket_gapfill` |
 | Gap-fill (`locf` / `interpolate`) | yes | yes | yes |
 | Time-series functions | Toolkit | SQL built-ins | **21, Timescale's vocabulary** |
-| Compression | yes | yes | yes — **7.1× measured** |
+| Compression | yes | yes | yes — **columnar `tscol`** |
 | Retention | policy | policy | **whole-window drop (TSCS)** |
 | Full-text search | PostgreSQL FTS | limited | SAI `LIKE` + analyzer |
 | **Scale-out, in the open-source product** | multi-node deprecated after 2.13 — application-level sharding | single node | **add nodes** |
@@ -75,10 +67,10 @@ Spark integration comes from the companion project
 | **21 time-series CQL functions** | `time_bucket`, `first`/`last`, `delta`/`rate`/`derivative`, reset-aware `counter_delta`/`counter_rate`, `percentile`, `time_weighted_average`, `integral`, `variance`/`stddev`, `histogram`, `approx_count_distinct`, bivariate `corr`/`covar_*`/`regr_*` | [Usage §2–9](#using-time-series-cql) |
 | **Gap-fill** | `GROUP BY time_bucket_gapfill(width, ts, start, finish)` — materialises empty buckets, with `locf()`/`interpolate()` fill policies | [Usage §3](#3-filling-gaps-time_bucket_gapfill) |
 | **Full-text search** | SAI `LIKE` with `index_analyzer` (ngram/standard/cjk/keyword or JSON) — true substring matching including mid-word fragments, fragments spanning a space, and Korean, with no `ALLOW FILTERING` | [fulltext-search.md](doc/timeseries/fulltext-search.md) |
-| **Time-series compaction (TSCS)** | `TimeSeriesCompactionStrategy` — window ordering, in-window UCS delegation, whole-window retention drops, closed-window freeze (one SSTable per window, `WindowFrozenListener` event hook, far-future guard `max_future_window`, and reclamation of data already expired **at the moment of freeze** without retention — data expiring after the freeze needs `retention`), plus late-data isolation (flush and streaming split at window boundaries so backfill lands locally in its own past window; legacy spanning SSTables are split automatically) and a **dedicated memtable** (opt-in per table — rows are assigned to their TSCS window at write time, removing flush routing and the 64 MiB partition cap; primitive-array column storage measured at **5.5× less heap per row**; cold windows on a tiered table flush straight to chunks) | [timeseries-compaction.md](doc/timeseries/timeseries-compaction.md) · [timeseries-memtable.md](doc/timeseries/timeseries-memtable.md) |
-| **Column-oriented chunk codec (chunk format v4)** *(tiered storage, stage 1)* | One window = a shared timestamp axis plus an independent section per regular column, losslessly compressed, every block independently decodable and randomly addressable. `double` uses ALP/ALP-RD (the only double codec); integers and time types use FOR/delta bit-packing; `boolean` packs to one bit; `text` and opaque bytes use a dictionary (DICT) or RAW. A column whose value never changes becomes CONSTANT and an all-null column becomes ALL_NULL, both O(1). Measured at **~1.7 B/row** on 20M rows of the production shape — **7.1×** against row storage's 11.9 B/row, host 234 | [Format spec](doc/timeseries/chunk-format-v4.md) · [Codec bake-off](doc/timeseries/codec-bakeoff.md) |
-| **Tiered storage (chunk store)** *(tiered storage, stage 2)* | A `timeseries_tiering` table extension policy — a background re-encoder compresses windows past `hot_window` into chunks and moves them to `<table>__chunks` (late-row merge, `cold_window` expiry, a consistency-level quorum floor). `nodetool retier`/`tieringstatus`, `system_views.timeseries_tiering`. **Transparent reads**: a `SELECT` on the base table merges hot rows with chunks automatically — ranges, point lookups, aggregates, gap-fill and `LIMIT`/`DESC` all work across hot and cold | [tiered-storage.md](doc/timeseries/tiered-storage.md) |
-| **Test infrastructure** | 107 docker integration assertions (the release gate), a 49-assertion three-node cluster test, a 100-million-row scale harness, jvm-dtests, a JMH performance regression gate, and a GC comparison (ZGC vs G1) | [Reports](doc/timeseries/) |
+| **Time-series compaction (TSCS)** | `TimeSeriesCompactionStrategy` — window ordering, in-window UCS delegation, whole-window retention drops, closed-window freeze (one SSTable per window, `WindowFrozenListener` event hook, far-future guard `max_future_window`, and reclamation of data already expired **at the moment of freeze** without retention — data expiring after the freeze needs `retention`), plus late-data isolation (flush and streaming split at window boundaries so backfill lands locally in its own past window; legacy spanning SSTables are split automatically) and a **dedicated memtable** (opt-in per table — rows are assigned to their TSCS window at write time, removing flush routing and the 64 MiB partition cap; primitive-array column storage measured at **5.5× less heap per row**) | [timeseries-compaction.md](doc/timeseries/timeseries-compaction.md) · [timeseries-memtable.md](doc/timeseries/timeseries-memtable.md) |
+| **Column-oriented chunk codec (chunk format v4)** | One window = a shared timestamp axis plus an independent section per regular column, losslessly compressed, every block independently decodable and randomly addressable. `double` uses ALP/ALP-RD (the only double codec); integers and time types use FOR/delta bit-packing; `boolean` packs to one bit; `text` and opaque bytes use a dictionary (DICT) or RAW. A column whose value never changes becomes CONSTANT and an all-null column becomes ALL_NULL, both O(1). It is the block format inside `tscol` SSTables | [Format spec](doc/timeseries/chunk-format-v4.md) · [Codec bake-off](doc/timeseries/codec-bakeoff.md) |
+| **Columnar frozen SSTables (`tscol`)** | A third SSTable format derived from BTI: TSCS option `frozen_format = 'columnar'` freezes each closed window into one `tscol` SSTable whose partition bodies are chunk-codec blocks that round-trip **exactly** (values plus every cell's writetime, TTL, deletion time and cell tombstones), so a columnar replica answers, digests and repairs like a row-format one. Late writes, updates, deletes, TTL, non-key filters and SAI on frozen data are ordinary Cassandra — nothing is refused and nothing is tombstoned on the side; the window simply refreezes | [design](docs/superpowers/specs/2026-11-04-columnar-frozen-sstable-design.md) · [rollout](doc/timeseries/tscol-rollout.md) |
+| **Test infrastructure** | Docker integration assertions (the release gate), a three-node cluster test, a 100-million-row scale harness, jvm-dtests, a JMH performance regression gate, and a GC comparison (ZGC vs G1) | [Reports](doc/timeseries/) |
 | **Packaging / CI** | Testcontainers-compatible docker image, GitLab CI (build → test → image → integration gate → release), automated tag releases | [.gitlab-ci.yml](.gitlab-ci.yml) |
 
 ## 🎯 What it buys you (against stock Cassandra 6.0.0)
@@ -94,27 +86,9 @@ GROUP BY tag_id, time_bucket_gapfill(1h, timestamp, '2026-07-01', '2026-07-02')
 ORDER BY timestamp ASC;
 ```
 
-**2. Old data compresses itself; queries stay the same.** Tiered storage moves past windows into column-oriented chunks, and `SELECT` does not need to know — transparent reads merge them back automatically.
+**2. Old data compresses itself; queries stay the same.** With `frozen_format = 'columnar'`, TSCS freezes each closed window into one columnar `tscol` SSTable. It is still the same table: `SELECT`, late writes, deletes, TTL, filters and SAI all behave as ordinary Cassandra.
 
-**3. Compression makes queries faster too — it wins on storage *and* latency.** Measured on the production table shape (`tm_tag_point`, 8 regular columns) at 20 million rows — host 234 (Xeon Silver 4114T, 40 threads), chunk format v4 — [full benchmark](doc/timeseries/tiering-benchmark.md):
-
-| Metric | Before tiering | After tiering (v4) | Effect |
-| --- | --- | --- | --- |
-| Storage | 237.8 MB | **33.3 MB** | **7.1× smaller** (11.9 → ~1.7 B/row) |
-| `count(*)` (40k-row partition) | 303 ms | **50 ms** | **6.1× faster** |
-| `time_bucket` + aggregates | 150–270 ms | **31–64 ms** | **3–6× faster** |
-| Gap-fill (locf / interpolate) | 162–284 ms | **30–53 ms** | **5.4× faster** |
-| p95 per tag, 90 tags (3.6M rows) | 14.2 s | **2.6 s** | **5.4× faster** |
-| Hourly average, 90 tags (3.6M rows) | 14.9 s | **4.2 s** | **3.5× faster** |
-| 1-hour range + column projection | 55–56 ms | **30–33 ms** | **1.8× faster** |
-| Newest 1,000 rows, `SELECT *` (no time range) | 52–56 ms | **38–45 ms** | Equal or better |
-| Re-encode throughput | — | **108k rows/s** | 2.2× the design gate (50k) |
-
-> **Every query measured is the same or faster after tiering** — including unbounded scans, single-row lookups and static-column reads. An unbounded `LIMIT` query decodes windows one at a time in query order (newest first on a `DESC` table) and stops once `LIMIT` is satisfied, so it does not slow down.
->
-> **A query inside `hot_window` costs nothing** — a query starting above the cold boundary skips the merge entirely and returns the hot iterator unchanged. The figures above are the maximum-load case, with the whole range forced cold.
->
-> **Two caveats.** On a tiered table, a full scan with no partition key (aggregates, `DISTINCT` and Spark's full-table read included) cannot merge chunks, so it is **refused** rather than answered wrongly — query by partition key instead ([production checklist §3.1](doc/timeseries/production-rollout.md)). And the storage saving depends on shape — a minimal shape with no constant or all-null columns to fold (one high-entropy `double`) has not been re-measured on v4, so measure your own table before committing.
+**3. How much it saves depends on your data.** On 20M rows of the `tm_tag_point` shape with a 3650-day TTL (host 234), `tscol` took 34.7 MB against 237.8 MB in row format, about 6.8× smaller. That shape has many constant or all-null columns. Random `double` values with few columns shrink only about 2×. Compared with the removed shadow-table chunk store, `tscol` is about 7% larger, single-tag day reads are 13–23% slower and aggregates about 2× slower, in exchange for ordinary Cassandra behaviour on frozen data ([measurements](doc/timeseries/tiering-benchmark.md#tscol과-r8-청크-비교-2026-11-04-호스트-234)). Measure your own table shape before committing.
 
 **4. Compaction and retention that fit time series.** SSTables are ordered by time window and frozen one-per-window; windows past their retention are dropped whole, without compacting. Late backfill from edge devices is isolated into its own window automatically.
 
@@ -139,20 +113,21 @@ cp apache-cassandra-6.0.0.jar $CASSANDRA_HOME/lib/
 | [gapfill-design.md](doc/timeseries/gapfill-design.md) | `time_bucket_gapfill` CQL syntax, interpolation rules, guardrails |
 | [continuous-aggregates-design.md](doc/timeseries/continuous-aggregates-design.md) | Time-bucket rollups (continuous aggregates) — design in progress |
 | **[fulltext-search.md](doc/timeseries/fulltext-search.md)** | SAI `LIKE` with `index_analyzer` — substring search over log and message bodies, Korean included |
-| **[production-rollout.md](doc/timeseries/production-rollout.md)** | The checklist before enabling tiering on a real table — one-way doors, schema requirements, migrating TTL to `cold_window`, application impact, verification procedure, and what is still unverified |
-| **[tiering-benchmark.md](doc/timeseries/tiering-benchmark.md)** | Before/after on 20M rows of the production shape (host 234, chunk v4) — storage **7.1×↓**, aggregates **3–6×↑**, gap-fill **5.4×↑**, every query equal or better including unbounded ones, re-encode 108k rows/s |
-| **[operations-tuning.md](doc/timeseries/operations-tuning.md)** | Practical guide to moving to long retention (10 years) — capacity arithmetic, order of application, tuning values for the base **and chunk** tables with reasoning, how TTL relates to tiering, a checklist |
+| [production-rollout.md](doc/timeseries/production-rollout.md) | Historical — the checklist for the removed shadow-table tiering. For moving to `tscol`, see [tscol-rollout.md](doc/timeseries/tscol-rollout.md) |
+| [tiering-benchmark.md](doc/timeseries/tiering-benchmark.md) | Historical — before/after measurements of the removed shadow-table chunk store on 20M rows of the production shape (host 234, chunk v4) |
+| **[operations-tuning.md](doc/timeseries/operations-tuning.md)** | Practical guide to moving to long retention (10 years) — capacity arithmetic, order of application, tuning values with reasoning, a checklist. Written for the removed shadow-table tiering, so its chunk-table parts are historical |
 | **[timeseries-compaction.md](doc/timeseries/timeseries-compaction.md)** | `TimeSeriesCompactionStrategy` — window size, freeze and `retention` settings, the life of a window, late-data isolation, the two causes of a parked window and how to tell them apart, why `retention` rather than TTL owns expiry, **measurements from the production node** |
-| **[timeseries-memtable.md](doc/timeseries/timeseries-memtable.md)** | `TimeSeriesMemtable` — how to enable it (a yaml key *and* an `ALTER TABLE`, and why that two-step is easy to get wrong), supported and unsupported schemas with fallback behaviour, removing the causes of parking, 5.5× less heap per row, **streaming reads** (binary search over slices, assembling only the rows needed, zero retention), cold-window direct chunk flush and its durability ordering, how to verify |
+| **[timeseries-memtable.md](doc/timeseries/timeseries-memtable.md)** | `TimeSeriesMemtable` — how to enable it (a yaml key *and* an `ALTER TABLE`, and why that two-step is easy to get wrong), supported and unsupported schemas with fallback behaviour, removing the causes of parking, 5.5× less heap per row, **streaming reads** (binary search over slices, assembling only the rows needed, zero retention), how to verify |
 | **[prod-ops-report-2026-08-02.md](doc/timeseries/prod-ops-report-2026-08-02.md)** | Twelve hours on a real node — five deployments, two incidents in full with their fixes, the judgements that reversed, the measured procedures |
 | **[prod-tscs-settings.md](doc/timeseries/prod-tscs-settings.md)** | Current settings across 75 tables and why, the diagnostic that separates the two causes of a parked window, values measured under 24k rows/s ingest |
-| **[tiered-storage.md](doc/timeseries/tiered-storage.md)** | The `timeseries_tiering` policy and chunk re-encoder — configuration, chunk query patterns, operations (nodetool and virtual tables), invariants and limitations |
+| [tiered-storage.md](doc/timeseries/tiered-storage.md) | Historical — the removed `timeseries_tiering` policy and chunk re-encoder |
+| **[tscol-rollout.md](doc/timeseries/tscol-rollout.md)** | Moving to columnar frozen SSTables — what an install with an old chunk store loses and keeps, and the rollout order |
 | **[compression.md](doc/timeseries/compression.md)** | What shrinks, why and by how much, column by column — how the two compression layers relate, per-type encoding and per-row cost, the saving broken down by column (4 of 8 columns cost zero bytes), how to estimate for your own table and how to measure it |
 | **[chunk-format-v4.md](doc/timeseries/chunk-format-v4.md)** | **Wire format specification** for the one chunk format — header, directory, block table, the four presence modes, per-type block encodings including ALP, determinism rules, size limits. (v1–v3 are removed formats; reading one raises `UnsupportedChunkFormatException`) |
 | [codec-bakeoff.md](doc/timeseries/codec-bakeoff.md) | Measured comparison of double codecs — why it settled on **ALP/ALP-RD alone**, with bytes-per-value by distribution (against Gorilla and Chimp128) |
 | [integration-test-report.md](doc/timeseries/integration-test-report.md) | The CQL, results and timings of every assertion, as run in a real container |
-| [scale-test-report.md](doc/timeseries/scale-test-report.md) | 100-million-row capacity verification — load and aggregate linearity in rows scanned (recorded on an older host; current figures are in the tiering benchmark) |
-| **[rw-throughput-benchmark.md](doc/timeseries/rw-throughput-benchmark.md)** | Measured throughput — ingest **233k rows/s** (host 234), write path 424k rows/s, chunk encoding 684k rows/s, chunk full scan 740 µs / 3,600 rows (host 237, JMH), re-encode 108k rows/s; per-pattern read ops/s awaiting re-measurement on v4 |
+| [scale-test-report.md](doc/timeseries/scale-test-report.md) | 100-million-row capacity verification — load and aggregate linearity in rows scanned (recorded on an older host) |
+| **[rw-throughput-benchmark.md](doc/timeseries/rw-throughput-benchmark.md)** | Measured throughput — ingest **233k rows/s** (host 234), write path 424k rows/s, chunk encoding 684k rows/s, chunk full scan 740 µs / 3,600 rows (host 237, JMH); per-pattern read ops/s awaiting re-measurement on v4 |
 | **[memtable-write-tuning.md](doc/timeseries/memtable-write-tuning.md)** | The write-path optimisation record — the two fast paths `DESC` turns off, the limits of configuration tuning, three rounds of code changes (min guard, reverse-order long store, tail index), the `ALTER` ordering trap |
 | [sp4-plan.md](doc/timeseries/sp4-plan.md) | SP4 roadmap — insertion points, milestones and verification gates for compressed query, vectorised aggregation kernels, SIMD (see the document for current status) |
 | [gc-comparison.md](doc/timeseries/gc-comparison.md) | Generational ZGC vs G1 on the same 100M rows — query time and write throughput (raw data) |
@@ -216,7 +191,7 @@ CREATE TABLE tm_tag_point (
     PRIMARY KEY (tag_id, timestamp)
 ) WITH CLUSTERING ORDER BY (timestamp DESC)
    AND compaction = {'class': 'TimeSeriesCompactionStrategy',
-                     'window_size': '1d',          -- window width (match the tiering chunk_window)
+                     'window_size': '1d',          -- window width
                      'freeze_after': '2h',         -- freeze to one SSTable this long after a window closes
                      'scaling_parameters': 'T4',   -- inside the current window, delegate to UCS (write-optimised 4-way)
                      'retention': '62d'}           -- drop a window whole once its upper bound passes 62 days
@@ -246,11 +221,12 @@ The columns you can do arithmetic on are `latency` (`int`, always present — th
 
 | Option | Description |
 | --- | --- |
-| `window_size` | Window width (`<int><m\|h\|d>`). Match the tiering `chunk_window` |
+| `window_size` | Window width (`<int><m\|h\|d>`) |
 | `freeze_after` | Freeze once this long has passed since the window closed — the grace period for late data |
 | `scaling_parameters`, `target_sstable_size` | UCS delegation parameters for the current window (UCS syntax verbatim: `T4` = write-optimised 4-way tiered, etc.) |
 | `retention` | Optional — drop the SSTable whole once the window's upper bound passes `now - retention` (must be at least `window_size + freeze_after`) |
 | `max_future_window` | Guard against future timestamps (default `1d`) — keeps bad input from polluting windows |
+| `frozen_format` | `row` (default) or `columnar` — freeze closed windows into `tscol` SSTables (§12) |
 
 At the moment of freeze (one SSTable per window), TTL data that has already expired is reclaimed without `retention`, and read amplification for partition+range queries is minimised. But a window that is already down to one SSTable never becomes a freeze candidate again, so **data expiring after the freeze needs `retention` to be reclaimed.** Late (backfill) data is separated at window boundaries on flush and lands locally in its own window. Detail: [§11 TSCS configuration](#11-time-series-compaction-tscs-configuration)
 
@@ -437,7 +413,7 @@ WHERE  tag_id = 'TAG-001'
 GROUP  BY tag_id, time_bucket(1m, timestamp);
 ```
 
-`tm_tag_point` has no monotonic column, hence the separate table. Note too that a table using the CQL `counter` **type** **cannot be tiered at all** — the re-encoder deletes and re-inserts rows, and a deleted counter can never be written again. A `bigint` gauge is the tiering-compatible choice.
+`tm_tag_point` has no monotonic column, hence the separate table. Note too that a table using the CQL `counter` **type** always freezes in row format; a `bigint` gauge is what `tscol` can store.
 
 ## 6. Percentiles and SLOs — `percentile`
 
@@ -560,7 +536,7 @@ A dedicated strategy combining TWCS's time ordering and whole-window drops with 
 ```sql
 ALTER TABLE pp.tm_tag_point WITH compaction = {
   'class': 'TimeSeriesCompactionStrategy',
-  'window_size': '1d',           -- window width (MUST match the tiering chunk_window)
+  'window_size': '1d',           -- window width
   'freeze_after': '2h',          -- freeze this long after the window closes (converges to 1 SSTable/window)
   'scaling_parameters': 'T4',    -- inside the current window, delegate to UCS (UCS syntax verbatim)
   'target_sstable_size': '256MiB',
@@ -579,139 +555,37 @@ ALTER TABLE pp.tm_tag_point WITH compaction = {
 | `retention` must be **at least `window_size + freeze_after`** | Rejected at `ALTER` time with an explicit error. The floor exists so a window cannot be dropped while it is still being written to and frozen |
 | **A frozen window never freezes again** | Once a window is down to one SSTable it stops being a freeze candidate, so data that expires *after* that point is never reclaimed by the freeze. If rows expire on a TTL longer than `freeze_after`, you need `retention` — `default_time_to_live` alone will leave them on disk |
 | Real retention is **`retention` + `window_size`** | A window is dropped when `windowStart <= now - retention - window_size`, so the newest row in it survives roughly one extra window beyond the number you wrote. Budget for it rather than being surprised by it |
-| `window_size` should equal the tiering **`chunk_window`** | Not enforced, but a mismatch makes one chunk span two compaction windows, so a window can freeze while part of its data is already chunked. Keep them the same number |
 | `timestamp_resolution` must match your writers | It decides how a `USING TIMESTAMP` value is read as a wall-clock time. Set it to `MICROSECONDS` (the default) unless your writers really use milliseconds — get it wrong and every row is classified into a window 1000× away, which looks like data vanishing into the far future |
-| `max_future_window` (default `1d`) is a guard, not a filter | Rows whose timestamp is beyond it are **parked**: excluded from compaction, freeze, retention and tiering, and they accumulate one SSTable per flush for as long as the bad clock persists. The table's `FarFutureTimeSeriesSSTables` MBean attribute should be empty; if it is not, fix the writer, then rewrite them with a user-defined or maximal compaction |
+| `max_future_window` (default `1d`) is a guard, not a filter | Rows whose timestamp is beyond it are **parked**: excluded from compaction, freeze and retention, and they accumulate one SSTable per flush for as long as the bad clock persists. The table's `FarFutureTimeSeriesSSTables` MBean attribute should be empty; if it is not, fix the writer, then rewrite them with a user-defined or maximal compaction |
 
 Choosing `window_size`: too small and a long retention means thousands of SSTables; too large and freeze and retention both become coarse (you cannot drop less than one window). One day per window with 62 days of retention is 62 SSTables per table, which is comfortable.
 
 
-## 12. Tiered storage configuration
+## 12. Columnar frozen SSTables (`tscol`)
 
-Compresses old windows into column-oriented chunks (all regular columns onto the window's single timestamp axis), moves them to `<table>__chunks`, and leaves **`SELECT` unchanged** — transparent reads merge hot and cold automatically. The policy goes into the table's `extensions` as a JSON string.
-
-### 12.1 Supported schemas
-
-**Any time-series table with a single time axis (one `timestamp` clustering column) works, whatever its shape.** The partition key may be composite, regular columns are unrestricted in count and type, and any number of static columns is preserved as-is (static cells are not chunked, and the re-encoder's clustering range delete does not touch them).
-
-Below is the industrial table the release gate actually verifies tiering against — 7 statics and 8 regular columns, `DESC` clustering:
+Add `frozen_format` to a TSCS table and each closed window freezes into one `tscol` SSTable, whose partition bodies are chunk-codec blocks ([chunk-format-v4.md](doc/timeseries/chunk-format-v4.md)):
 
 ```sql
-CREATE TABLE pp.tm_tag_point (
-    tag_id     text,                              -- partition key: any number of columns (composite allowed)
-    timestamp  timestamp,                         -- exactly one clustering column, timestamp (ASC or DESC)
-    area_id    text static, asset_id text static, line_id text static,
-    opc_id     text static, site_id  text static, tag_name text static,
-    type       text static,                       -- statics: any count and type, preserved after tiering
-    attribute  frozen<map<text,text>>,            -- always {} -> CONSTANT (0 bytes)
-    error_code int,                               -- always 0 -> CONSTANT
-    latency    int,                               -- high entropy -> zigzag varint delta
-    quality    int,                               -- always 192 -> CONSTANT
-    value      text,                              -- string copy of the reading
-    value_boolean boolean,                        -- populated only for type=boolean tags
-    value_numeric double,                         -- populated only when type is numeric
-    PRIMARY KEY (tag_id, timestamp)
-) WITH CLUSTERING ORDER BY (timestamp DESC);
-```
-
-**`DESC` clustering is the industrial default idiom** — reading newest-first dominates. If transparent reads' bound arithmetic assumed ascending order it would return zero cold rows **with no error**, so both bound directions and both orderings are pinned in the integration test.
-
-Whether a reading lands in `value_boolean` or `value_numeric` is decided by the **static `type`**. Being static, it is fixed per tag, and one chunk = one tag × one window, so within a chunk each value column is either entirely populated or entirely empty — the used one gets its dedicated codec, the unused one becomes ALL_NULL at zero bytes. `value` (text) is a string copy of the reading (`value_numeric = 20.76` ↔ `value = '20.76'`).
-
-Apply a policy to an unsupported shape and it is skipped, with an ERROR log **stating the reason** every 60 seconds. There are only five grounds for refusal:
-
-| Shape | Reason |
-| --- | --- |
-| A `counter` column | The re-encoder deletes and re-inserts rows, and a deleted counter can never be written again |
-| A non-frozen collection as a **regular** column | Multi-cell values cannot be encoded into a chunk — wrap in `frozen<...>` and it is supported |
-| Zero or two-plus clustering columns, or one that is not a `timestamp` | There is no time axis to encode |
-| A secondary index (SAI included) on a **non-static column** | Index entries are per row, so when a re-encoded row disappears the index query silently misses cold data — this covers regular columns, clustering columns and columns of a composite partition key. **Only indexes on static columns** are fine |
-| A materialized view over this table | Transparent reads restore only the base table, so the view would permanently lose old history |
-
-> If `default_time_to_live` is set and `hot_window >= TTL`, the TTL erases data before the re-encoder ever sees it and **nothing is ever compressed**. This is not refused, but it logs a WARN naming both values.
-
-> **⚠️ Two things to know before enabling tiering** (detail: [tiered-storage.md §1.1, §5.1.2](doc/timeseries/tiered-storage.md))
-> 1. **Cold data is immutable** — a `DELETE` past the hot window (cell, row, range or partition) and `SET col = null` are **rejected**. The chunk is the only copy, so a tombstone would mask it only until `gc_grace`, after which the data would come back. Use `cold_window` expiry to remove cold data. Deletes inside the hot window, and a late `UPDATE` that **writes a value** into the cold range, both work normally.
-> 2. **TTL is dropped when data is chunked** — data you expected `default_time_to_live` to expire is kept forever once it moves into a chunk. If you relied on TTL, set the same period as `cold_window`.
-
-The re-encoder puts **every regular column** into one chunk: the window's timestamp axis is stored once, and each column goes into its own section as **its serialized bytes verbatim**, so `double`/`boolean`/`int`/`bigint`/`timestamp`/`date`/`text` take a dedicated codec and everything else (`blob`, `uuid`, `timeuuid`, frozen collections, …) takes the opaque-bytes fallback. `null` cells round-trip as `null`, and a column whose values are all identical folds to O(1), zero bytes. Full table: [tiered-storage.md §3.1.1](doc/timeseries/tiered-storage.md).
-
-### 12.2 Turning it on — one line of CQL
-
-Put the policy JSON straight into the table's `extensions`; no hex conversion needed:
-
-```sql
-ALTER TABLE pp.tm_tag_point WITH extensions = {
-  'timeseries_tiering': '{"hot_window":"2d","chunk_window":"1d","cold_window":"3650d","interval":"1h"}'
+ALTER TABLE pp.tm_tag_point WITH compaction = {
+  'class': 'TimeSeriesCompactionStrategy',
+  'window_size': '1d',
+  'freeze_after': '2h',
+  'frozen_format': 'columnar'    -- row (default) or columnar
 };
-
--- Confirm it applied (the policy and run statistics show together)
-SELECT * FROM system_views.timeseries_tiering;
 ```
 
-> `extensions` is a blob map in the schema, but Aster **stores a plain string as its UTF-8 bytes**. Only a value beginning with `0x` is read as a hex blob, so existing hex notation (`0x7b22...`) still works.
+The next freeze writes `-tscol-Data.db` files. A window already frozen in row format is converted once, and then left alone.
 
-After that the 60-second sweeper compresses on the `interval` schedule. **To see it immediately**, run one cycle by hand:
-
-```bash
-nodetool retier pp tm_tag_point   # one re-encode cycle (synchronous; the chunk table is created here)
-nodetool tieringstatus            # per-table policy, last run, cumulative statistics
-```
-
-```sql
--- Check the result: chunks exist, and SELECT returns what it did before (transparent reads)
-SELECT count(*) FROM pp.tm_tag_point__chunks WHERE tag_id='TAG-001';
-SELECT count(*) FROM pp.tm_tag_point
- WHERE tag_id='TAG-001' AND timestamp >= '2026-07-01 00:00:00+0000'
-                        AND timestamp <  '2026-07-02 00:00:00+0000';   -- same value as before
-
--- Statics are not chunked, so they stay on the base table after tiering
-SELECT site_id, tag_name, type FROM pp.tm_tag_point WHERE tag_id='TAG-001' LIMIT 1;
-```
-
-> When counting to confirm tiering, **always include a clustering range.** An unrestricted `count(*)` on a partition with no clustering rows left still returns `1`, for the static-only row. And a full-scan `SELECT count(*)` with no partition key cannot merge chunks at all, so on a tiered table it is refused — count per tag, with the partition key.
-
-### 12.3 Policy fields
-
-| Field | Meaning |
+| What to know | Detail |
 | --- | --- |
-| `hot_window` | **Data within this period is left alone** (kept as rows). Set it comfortably wider than the range that sees frequent live reads and edits (e.g. `7d`) |
-| `chunk_window` | The time width one chunk holds (max `31d`). Match the TSCS `window_size`. For 1-second data, `1h` (3,600 samples) works well |
-| `cold_window` | Optional — chunks past this age are dropped whole (the retention policy). Unset (`-1`) keeps them forever |
-| `interval` | Background re-encode period (e.g. `1h`). The 60-second sweeper processes only tables whose interval has come due |
-| `consistency` | The re-encoder's CL — only `LOCAL_QUORUM` (default), `QUORUM`, `EACH_QUORUM` and `ALL` are accepted (weaker levels risk data loss and are blocked) |
+| Supported schemas | One `timestamp` clustering column, and single-cell, non-counter regular columns. Any other table freezes in row format whatever the option says |
+| Frozen data stays ordinary | Late writes, updates, deletes, TTL, non-key filters and SAI work as usual, nothing is refused, and the window refreezes. Replicas answer, digest and repair like row-format ones |
+| Retention | TSCS `retention` drops a whole window (§11) |
+| Moving from the old chunk store | There is no migration tool. See [tscol-rollout.md](doc/timeseries/tscol-rollout.md) first |
 
-**There is no codec to choose**: ALP/ALP-RD is the only chunk codec for `double` (the old `codec` option was removed, and an `ALTER TABLE` that still sets it is rejected). Near-constant columns are handled by the column-oriented chunk's CONSTANT flag in O(1), before any codec runs — see [the measurements](doc/timeseries/codec-bakeoff.md).
+Design: [columnar frozen SSTable spec](docs/superpowers/specs/2026-11-04-columnar-frozen-sstable-design.md).
 
-### What to watch when setting these
-
-Three of these are checked at `ALTER` time and simply fail. The rest are legal settings that quietly do something you did not want.
-
-| Rule | What happens if you get it wrong |
-| --- | --- |
-| `hot_window` **≥** `chunk_window` | Rejected. A hot window narrower than a chunk would mean encoding a window that is still being written |
-| `cold_window` **>** `hot_window` | Rejected. Data would have to expire before it was allowed to be encoded |
-| `chunk_window` **≤ 31d** | Rejected. The re-encoder reads one window into memory at a time |
-| Leave real slack between `hot_window` and `chunk_window` | **This is the setting most worth thinking about.** Writes that would tombstone cold data are refused below `max(chunk coverage, now - hot_window)`, and a window becomes encodable as soon as it closes. With the two equal — `1h`/`1h` — a row is eligible for encoding almost the moment its window closes, so there is effectively no period in which it can still be deleted. If the table ever needs `DELETE` or `SET col = null`, make `hot_window` several times `chunk_window` (e.g. `chunk_window 1h` with `hot_window 6h`). The 1h/1h in the tests is a maximum-load case, not a recommendation |
-| `cold_window` is the **only** retention for chunked data | Cell TTLs are dropped when a window is chunked, so a table relying on `default_time_to_live` silently switches from bounded retention to unbounded growth the first time the re-encoder runs. Set `cold_window` to the same period you expected the TTL to enforce — and note this cannot be undone once the base rows are gone |
-| `hot_window` must be **shorter** than any `default_time_to_live` | Legal, but if the TTL erases rows before the re-encoder is allowed to touch them, nothing is ever compressed. Tiering appears to be on and does nothing. It logs a WARN naming both values |
-| `consistency` accepts only quorum strength | `QUORUM`, `LOCAL_QUORUM` (default), `EACH_QUORUM`, `ALL`. Anything weaker is rejected: the re-encoder deletes the base rows, so a write it believed succeeded but that did not reach a quorum would lose data outright |
-| Removing the policy does **not** un-tier | Transparent reads decide from actual chunk coverage, not from the current policy. Clearing `extensions` only stops new encoding — existing chunks stay readable and `DELETE` in that range stays refused. The only ways to remove cold data are `cold_window` expiry or dropping the chunk table |
-
-Choosing `chunk_window`: one chunk holds one tag × one window, so at 1-second data `1h` is 3,600 samples — a good size. Much smaller and per-chunk header overhead dominates; much larger and each merged read decodes more than it needs.
-
-
-### 12.4 Changing or turning it off
-
-```sql
--- Change the policy: put new JSON in the same way; it applies from the next cycle
--- Turn it off entirely: remove the key (chunks already written stay)
-ALTER TABLE pp.tm_tag_point WITH extensions = {};
-```
-
-**Removing the policy does not hide data already in chunks.** Transparent reads decide whether to merge from **actual chunk coverage**, not from the current policy, so removing the extension only *stops new encoding*. For the same reason, `DELETE` in that range stays rejected (cold immutability). Widening `hot_window` or narrowing `chunk_window` likewise hides nothing. The only ways to actually remove cold data are `cold_window` expiry or `DROP`ping the chunk table.
-
-Operational note: late data arriving into an already-chunked window is merged automatically on the next cycle (at the same timestamp, the later arrival wins). Detail and limitations (range scans, paging): [tiered-storage.md](doc/timeseries/tiered-storage.md) · measurements: [the benchmark](doc/timeseries/tiering-benchmark.md)
+---
 
 ## 13. Operational notes
 
@@ -720,27 +594,22 @@ Operational note: late data arriving into an already-chunked window is merged au
 - **Use TSCS compaction** — window ordering, freeze and whole-window drops are automated for time series, and the current window is delegated to UCS (`scaling_parameters: 'T4'`). Express retention with `retention` (whole-window drop) or `default_time_to_live`.
 - `time_bucket(interval, ts)` must be the last element of `GROUP BY` (after the partition key columns) for the grouping to be pushed down into the read path.
 
-### 13.1 Recommended combinations — TSCS, tiering and TimeSeriesMemtable
+### 13.1 Recommended combinations — TSCS, `tscol` and TimeSeriesMemtable
 
-The three features interlock on the same **time window**. Each row adds to the one above it and saves more space.
+The three features interlock on the same **time window**.
 
 | Table | Combination | What it buys |
 | --- | --- | --- |
 | Every time-series table (the default) | **TSCS** | SSTables split by window, closed windows frozen to one SSTable each, whole-window drops via `retention`. Worth it on its own |
-| Long retention, space matters | **TSCS + tiering** | Old windows compressed into column-oriented chunks while SELECT stays unchanged. Tiering **refuses to install its policy on a non-TSCS table**: the re-encoder only covers the source rows with a range tombstone, and TSCS's freeze is the only thing that physically removes them from disk |
-| Even less space | **TSCS + tiering + `TimeSeriesMemtable`** | Data belonging to a cold window is flushed straight to chunks (`ColdWindowChunkFlush`), skipping the write-rows-then-delete-them step |
+| Long retention, space matters | **TSCS + `frozen_format = 'columnar'`** | Closed windows frozen into columnar `tscol` SSTables while SELECT stays unchanged (§12) |
+| High ingest | **TSCS + `TimeSeriesMemtable`** | Rows assigned to their window at write time, in primitive-array column storage |
 
-- **Keep TSCS `window_size` equal to the tiering `chunk_window`.** If they differ, one chunk straddles two compaction windows (§11).
 - **`TimeSeriesMemtable` takes two steps**: (1) add a `memtable.configurations` key to `cassandra.yaml` on every node and restart, (2) `ALTER TABLE ... WITH memtable = '<key>'`. A node without the key logs one ERROR and **silently falls back** to the default memtable, so confirm it took effect on each node — [timeseries-memtable.md §2, §5](doc/timeseries/timeseries-memtable.md).
 
-### 13.2 Turning tiering on and running it
+### 13.2 Running it
 
-- **Trial-run before a real table.** Tiering deletes the source rows, so from the moment it is on, `<table>__chunks` is the only copy. Run it on a regenerable table (or a copy) through one full retention cycle and one node restart first, and **confirm your backups include `__chunks` before the first re-encode** — [production-rollout.md §0](doc/timeseries/production-rollout.md).
-- **Make `hot_window` several times `chunk_window`.** If they are equal, a window is encoded the moment it closes and there is effectively no period in which `DELETE` works (§12.3).
-- **Watch the re-encoder.** A stalled cycle is silent. `consecutive_failures` in `SELECT * FROM system_views.timeseries_tiering` should be 0; `nodetool tieringstatus` shows each table's last run.
 - **Two TSCS warning signs**: the table MBean's `ParkedTimeSeriesWindows` (windows compaction could not make progress on) and `FarFutureTimeSeriesSSTables` (SSTables parked for future timestamps) should both be **empty**. There is no nodetool subcommand for them; read them with `nodetool sjk mx` — [prod-tscs-settings.md §2, §3](doc/timeseries/prod-tscs-settings.md).
-- **Dropping a tiered table has a fixed order**: (1) detach the policy with `ALTER TABLE ... WITH extensions = {}`, (2) `DROP` the shadow tables (`<table>__chunks` and the rest), (3) `DROP` the base table. Any other order is refused — on purpose, so cold data cannot be lost silently.
-- **Reading from Spark** needs [aster-tsdb-spark-connector](http://dev.kopens.io/common/aster-tsdb-spark-connector) `4.1.4-r1` or later and this build at `v6.0.0-r4` or later. Every connector scan is a token-range scan, and earlier servers refuse range scans on tiered tables.
+- **Reading from Spark** needs [aster-tsdb-spark-connector](http://dev.kopens.io/common/aster-tsdb-spark-connector) `4.1.4-r1` or later.
 
 ---
 
@@ -767,7 +636,7 @@ The build artifact is always `apache-cassandra-6.0.0.jar` (`base.version` is pin
 
 ### Integration test (the release gate)
 
-Unit tests exercise the functions in-process; [docker/integration-test.sh](docker/integration-test.sh) **boots a real image** and checks time-series CQL results against hand-computed values all the way through schema creation, the read path, aggregation and the native protocol — 107 assertions, including a process restart.
+Unit tests exercise the functions in-process; [docker/integration-test.sh](docker/integration-test.sh) **boots a real image** and checks time-series CQL results against hand-computed values all the way through schema creation, the read path, aggregation and the native protocol, including a process restart.
 
 ```bash
 docker build -t aster-tsdb:6.0.0 -f docker/Dockerfile .
@@ -780,13 +649,13 @@ In CI, pushing a tag runs `docker-image → docker-integration-test → docker-i
 
 ### Cluster test (three nodes)
 
-[docker/cluster-test.sh](docker/cluster-test.sh) runs three real containers on a docker network at RF=3 — 49 assertions covering what a single node cannot reach: aggregation and gap-fill through every coordinator, TSCS freeze converging on each replica independently, a real repair stream between operating-system processes, and QUORUM behaviour with a replica actually stopped.
+[docker/cluster-test.sh](docker/cluster-test.sh) runs three real containers on a docker network at RF=3, covering what a single node cannot reach: aggregation and gap-fill through every coordinator, TSCS freeze and `tscol` converging on each replica independently, a real repair stream between operating-system processes, and QUORUM behaviour with a replica actually stopped.
 
 ```bash
 ./docker/cluster-test.sh aster-tsdb:6.0.0
 ```
 
-It is manual in CI (three 2G JVMs may not fit a shared runner), so run it by hand before any release that touches compaction, streaming, repair or tiering.
+It is manual in CI (three 2G JVMs may not fit a shared runner), so run it by hand before any release that touches compaction, streaming, repair or `tscol`.
 
 ### Performance regression gate
 
@@ -811,7 +680,7 @@ SCALE_ROWS=100000000 SCALE_SERIES=1000 SCALE_LOADERS=16 SCALE_HEAP=16G \
 
 You can compare GCs — `SCALE_GC=g1` (default is `zgc`; generational ZGC is already enabled in `conf/jvm21-server.options`), `SCALE_PASSES=2` (measure after a warm-up), `SCALE_WBENCH_ROWS=10000000` (write benchmark). Feed two runs to `docker/gc-compare.py <prefix-a> <prefix-b>` for a comparison table → **[GC comparison](doc/timeseries/gc-comparison.md)**.
 
-Results land in `build/timeseries-scale-report.html` (and `.md`). Capacity record: **[scale test report](doc/timeseries/scale-test-report.md)**. Current reference figures are in the [tiering benchmark](doc/timeseries/tiering-benchmark.md).
+Results land in `build/timeseries-scale-report.html` (and `.md`). Capacity record: **[scale test report](doc/timeseries/scale-test-report.md)**.
 
 Note: aggregating millions of rows requires raising server timeouts. Besides `read/range_request_timeout`, **`native_transport_timeout` (default 12 s)** cuts the whole request, so it has to be raised too — and that key is absent from the default `cassandra.yaml`, so it must be added. The script does this for you.
 

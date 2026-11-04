@@ -17,7 +17,7 @@
 # limitations under the License.
 #
 #
-# Scale test (UNTIERED BASELINE): load the production-shaped tm_tag_point table into a
+# Scale test: load the production-shaped tm_tag_point table into a
 # container-hosted node and measure how long the time-series CQL functions take on it. Produces
 # an HTML report with the measured client-observed execution time of every query.
 #
@@ -29,9 +29,9 @@
 #     SCALE_HEAP=16G
 #     SCALE_REPORT=build/timeseries-scale-report.html
 #
-# The node configuration lives in docker/bench-node-config.sh and is shared verbatim with
-# docker/tiering-bench.sh -- the two halves of the benchmark are only comparable if their
-# configuration is identical, and it has silently drifted before.
+# The node configuration lives in docker/bench-node-config.sh and is shared verbatim with the other
+# harnesses: runs are only comparable if their configuration is identical, and it has silently
+# drifted before.
 #
 # The data directory is bind-mounted from the host because the dataset does not fit in the
 # container layer on a small /var partition.
@@ -72,7 +72,7 @@ mkdir -p "$(dirname "$REPORT")"
 $RUNTIME network inspect "$NET" > /dev/null 2>&1 \
     || $RUNTIME network create --subnet "$NET_SUBNET" "$NET" > /dev/null
 
-# The node config is shared verbatim with tiering-bench.sh; see docker/bench-node-config.sh.
+# The node config is shared verbatim with the other harnesses; see docker/bench-node-config.sh.
 NODE_CONFIG="$(cat "$HERE/bench-node-config.sh")"
 
 $RUNTIME run -d --name "$CONTAINER" \

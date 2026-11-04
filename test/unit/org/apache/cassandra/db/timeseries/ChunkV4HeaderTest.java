@@ -91,7 +91,7 @@ public class ChunkV4HeaderTest
      *
      * <p>Offsets 0, 1, 5 and 13 additionally have to match version 3's header byte for byte, so
      * that {@code rowCount}/{@code firstTimestamp}/{@code lastTimestamp} stay O(1) peeks -- §3's
-     * stated requirement, and the reason tiering can decide not to open a chunk for less than the
+     * stated requirement, and the reason a reader can decide not to open a chunk for less than the
      * cost of opening it. The peek offsets are re-read here with the same absolute arithmetic
      * {@code ColumnarChunkCodec}'s peeks use ({@code position + 1}, {@code + 5}, {@code + 13}).
      */
@@ -132,7 +132,7 @@ public class ChunkV4HeaderTest
     /**
      * The peeks answer from the first 21 bytes alone. Handed a payload that is nothing but a
      * header -- no directory, no sections, nothing the offsets point at -- they still answer, which
-     * is what "never decodes a section" means and what makes the tiering bounds check O(1).
+     * is what "never decodes a section" means and what makes a bounds check O(1).
      */
     @Test
     public void peeksAnswerFromAHeaderOnlyPrefix()

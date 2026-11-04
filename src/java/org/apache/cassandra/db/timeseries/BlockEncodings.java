@@ -55,9 +55,7 @@ import java.util.Arrays;
  * <p><b>The choice among encodings is an argmin over an exact closed-form size, ties broken by the
  * lowest code point.</b> That is §5 rule 3, a determinism rule and not a preference: nothing here
  * trial-encodes, times, samples or consults a threshold. A replica that broke a tie the other way
- * would emit a byte-different chunk, {@code chunkUnchanged} would report a difference, and every
- * chunk would be rewritten every cycle -- which looks like a capacity problem, not like a codec bug
- * (§12). The candidates are evaluated in ascending code order and the incumbent is only displaced
+ * would emit a byte-different chunk from the same input (§12). The candidates are evaluated in ascending code order and the incumbent is only displaced
  * by a strictly smaller size, so "first to reach the minimum keeps it" is exactly "lowest code
  * wins"; never relax that comparison to {@code <=}.
  *

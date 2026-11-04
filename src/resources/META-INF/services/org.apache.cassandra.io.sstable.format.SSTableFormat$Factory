@@ -17,3 +17,4 @@
 #
 org.apache.cassandra.io.sstable.format.big.BigFormat$BigFormatFactory
 org.apache.cassandra.io.sstable.format.bti.BtiFormat$BtiFormatFactory
+org.apache.cassandra.io.sstable.format.bti.TscolFormat$TscolFormatFactory

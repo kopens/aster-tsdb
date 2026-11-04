@@ -499,12 +499,11 @@ public class TimeSeriesCompactionStrategyE2ETest extends SchemaLoader
     }
 
     /**
-     * The tiering re-encoder deletes the rows it has chunked with a range tombstone timestamped at their own
-     * max writetime, so the tombstone routes into the same window as the rows -- which by then is often
-     * already FROZEN. The tombstone's sstable must turn the window back to FREEZING, and the refreeze (a real
+     * A range tombstone timestamped at the rows' own max writetime routes into the same window as the rows --
+     * which by then is often already FROZEN. The tombstone's sstable must turn the window back to FREEZING, and the refreeze (a real
      * CompactionController merge) must drop the shadowed rows: gc_grace only protects the tombstone, not what
-     * it shadows. Until that rewrite, every read over the range merges the dead rows too -- measured at 7-13x
-     * slower on tiered aggregates -- so this is the property that bounds how long that lasts.
+     * it shadows. Until that rewrite, every read over the range merges the dead rows too, so this is the
+     * property that bounds how long that lasts.
      */
     @Test
     public void rangeTombstoneIntoAFrozenWindowRefreezesAndDropsTheShadowedRows()
@@ -560,7 +559,7 @@ public class TimeSeriesCompactionStrategyE2ETest extends SchemaLoader
      * across them into a spanning sstable, filed under its newest window. Fed by later compactions of that
      * window, such an sstable keeps its max timestamp recent, so it never leaves the active set, is never
      * frozen and never split -- and the rows in it from older windows never meet the deletions routed into
-     * those windows. In production that left ~17M rows the tiering re-encoder had already deleted on disk,
+     * those windows. In production that left ~17M already-deleted rows on disk,
      * and a count over one tag's recent day timed out.
      */
     @Test

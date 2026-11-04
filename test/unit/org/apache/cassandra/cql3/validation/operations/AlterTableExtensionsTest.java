@@ -18,12 +18,10 @@
 package org.apache.cassandra.cql3.validation.operations;
 
 import java.nio.ByteBuffer;
-import java.util.concurrent.TimeUnit;
 
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.db.timeseries.tiering.TieringPolicy;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
@@ -32,50 +30,40 @@ import static org.junit.Assert.assertNotNull;
 
 /**
  * Tests that {@code ALTER TABLE ... WITH extensions = {...}} actually persists the extension bytes
- * (see {@link org.apache.cassandra.cql3.statements.schema.TableAttributes}), and that
- * {@link TieringPolicy#fromTable} can parse what lands there.
+ * (see {@link org.apache.cassandra.cql3.statements.schema.TableAttributes}).
  */
 public class AlterTableExtensionsTest extends CQLTester
 {
+    private static final String EXTENSION_KEY = "test_extension";
+
     @Test
-    public void testExtensionsRoundTripAndTieringPolicyParses() throws Throwable
+    public void testExtensionsRoundTrip() throws Throwable
     {
         createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'};");
 
-        String json = "{\"hot_window\":\"7d\", \"chunk_window\":\"1h\"}";
+        String json = "{\"a\":\"7d\", \"b\":\"1h\"}";
         ByteBuffer expected = ByteBufferUtil.bytes(json);
         String hex = ByteBufferUtil.bytesToHex(expected);
 
-        alterTable("ALTER TABLE %s WITH extensions = {'" + TieringPolicy.EXTENSION_KEY + "': 0x" + hex + "};");
+        alterTable("ALTER TABLE %s WITH extensions = {'" + EXTENSION_KEY + "': 0x" + hex + "};");
 
-        ByteBuffer actual = getCurrentColumnFamilyStore().metadata().params.extensions.get(TieringPolicy.EXTENSION_KEY);
-        assertNotNull("extensions should contain " + TieringPolicy.EXTENSION_KEY, actual);
+        ByteBuffer actual = getCurrentColumnFamilyStore().metadata().params.extensions.get(EXTENSION_KEY);
+        assertNotNull("extensions should contain " + EXTENSION_KEY, actual);
         assertEquals(expected, actual);
-
-        TieringPolicy policy = TieringPolicy.fromTable(getCurrentColumnFamilyStore().metadata());
-        assertNotNull(policy);
-        assertEquals(TimeUnit.DAYS.toMillis(7), policy.hotWindowMillis);
-        assertEquals(TimeUnit.HOURS.toMillis(1), policy.chunkWindowMillis);
     }
 
     @Test
     public void testPlainStringExtensionStoredAsUtf8() throws Throwable
     {
-        // Writing a tiering policy as a hex blob by hand is miserable; a plain string is accepted
+        // Writing a text payload as a hex blob by hand is miserable; a plain string is accepted
         // and stored as its UTF-8 bytes, so one CQL statement is enough.
         createTable("CREATE TABLE %s (tag text, ts timestamp, value double, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'};");
 
-        String json = "{\"hot_window\":\"1d\",\"chunk_window\":\"6h\",\"cold_window\":\"365d\"}";
-        alterTable("ALTER TABLE %s WITH extensions = {'" + TieringPolicy.EXTENSION_KEY + "': '" + json + "'};");
+        String json = "{\"a\":\"1d\",\"b\":\"6h\"}";
+        alterTable("ALTER TABLE %s WITH extensions = {'" + EXTENSION_KEY + "': '" + json + "'};");
 
         assertEquals(ByteBufferUtil.bytes(json),
-                     getCurrentColumnFamilyStore().metadata().params.extensions.get(TieringPolicy.EXTENSION_KEY));
-
-        TieringPolicy policy = TieringPolicy.fromTable(getCurrentColumnFamilyStore().metadata());
-        assertNotNull(policy);
-        assertEquals(TimeUnit.DAYS.toMillis(1), policy.hotWindowMillis);
-        assertEquals(TimeUnit.HOURS.toMillis(6), policy.chunkWindowMillis);
-        assertEquals(TimeUnit.DAYS.toMillis(365), policy.coldWindowMillis);
+                     getCurrentColumnFamilyStore().metadata().params.extensions.get(EXTENSION_KEY));
     }
 
     @Test
@@ -86,6 +74,6 @@ public class AlterTableExtensionsTest extends CQLTester
         // A leading 0x still selects hex decoding, so a broken hex literal must fail loudly rather
         // than being silently stored as the text "0xnothex".
         assertInvalidThrow(InvalidRequestException.class,
-                            "ALTER TABLE %s WITH extensions = {'" + TieringPolicy.EXTENSION_KEY + "': '0xnothex'};");
+                            "ALTER TABLE %s WITH extensions = {'" + EXTENSION_KEY + "': '0xnothex'};");
     }
 }

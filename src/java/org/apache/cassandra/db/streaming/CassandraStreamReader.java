@@ -259,7 +259,7 @@ public class CassandraStreamReader implements IStreamReader
         protected void readPartition() throws IOException
         {
             partitionLevelDeletion = DeletionTime.getSerializer(version).deserialize(in);
-            iterator = SSTableSimpleIterator.create(metadata, in, header, helper, partitionLevelDeletion);
+            iterator = SSTableSimpleIterator.createForStream(version.format, metadata, in, header, helper, partitionLevelDeletion);
             staticRow = iterator.readStaticRow();
         }
 

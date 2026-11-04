@@ -226,13 +226,7 @@ public interface SinglePartitionReadQuery extends ReadQuery
             // Note that the only difference between the queries in a group must be the partition key on which
             // they applied.
             boolean enforceStrictLiveness = queries.get(0).metadata().enforceStrictLiveness();
-            // Tiered storage: merge rows decoded from the __chunks shadow table in while tombstones
-            // are still present, so deletes are reconciled normally instead of being purged before
-            // the merge can see them. No-op unless the table carries a tiering policy and the query
-            // reaches below its hot window.
-            UnfilteredPartitionIterator local = org.apache.cassandra.db.timeseries.tiering.TransparentReads
-                .maybeWrap(metadata(), this, executeLocally(controller, false), null);
-            return limits.filter(UnfilteredPartitionIterators.filter(local, nowInSec),
+            return limits.filter(UnfilteredPartitionIterators.filter(executeLocally(controller, false), nowInSec),
                                  nowInSec,
                                  selectsFullPartitions,
                                  enforceStrictLiveness);

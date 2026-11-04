@@ -452,16 +452,9 @@ public class StorageProxy implements StorageProxyMBean
                 ConsistencyLevel readConsistency = consistencyForPaxos == ConsistencyLevel.LOCAL_SERIAL ? ConsistencyLevel.LOCAL_QUORUM : ConsistencyLevel.QUORUM;
 
                 FilteredPartition current;
-                // Tiered storage: a CAS precondition read must see the RAW base rows, never the
-                // hot+chunk merge -- see ModificationStatement.casInternal for why.
-                org.apache.cassandra.db.timeseries.tiering.TransparentReads.enterInternalBypass();
                 try (RowIterator rowIter = readOne(readCommand, readConsistency, requestTime))
                 {
                     current = FilteredPartition.create(rowIter);
-                }
-                finally
-                {
-                    org.apache.cassandra.db.timeseries.tiering.TransparentReads.exitInternalBypass();
                 }
 
                 if (!request.appliesTo(current))
