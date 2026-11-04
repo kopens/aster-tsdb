@@ -33,6 +33,7 @@ import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredSerializer;
+import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.bti.TscolBody;
 import org.apache.cassandra.io.sstable.format.bti.TscolFormat;
@@ -80,6 +81,14 @@ public abstract class SSTableSimpleIterator extends AbstractIterator<Unfiltered>
                                      ? createTombstoneOnly(metadata, in, sstable.header, helper, partitionDeletion)
                                      : create(metadata, in, sstable.header, helper, partitionDeletion);
         return TscolFormat.is(sstable.descriptor.getFormat()) ? new ColumnarFormatIterator(metadata, in, helper, rows, tombstoneOnly) : rows;
+    }
+
+    // aster-tsdb (tscol): the stream receiver has a tscol sender's Data.db sections and no reader to ask.
+    public static SSTableSimpleIterator createForStream(SSTableFormat<?, ?> format, TableMetadata metadata, DataInputPlus in, SerializationHeader header,
+                                                        DeserializationHelper helper, DeletionTime partitionDeletion)
+    {
+        SSTableSimpleIterator rows = create(metadata, in, header, helper, partitionDeletion);
+        return TscolFormat.is(format) ? new ColumnarFormatIterator(metadata, in, helper, rows, false) : rows;
     }
 
     public abstract Row readStaticRow() throws IOException;

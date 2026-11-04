@@ -74,6 +74,7 @@ TESTS=(
   "test-jvm-dtest-some|org.apache.cassandra.distributed.test.timeseries.TieredStorageDistributedTest"
   "test-jvm-dtest-some|org.apache.cassandra.distributed.test.timeseries.TieredStorageDefectReproTest"
   "test-jvm-dtest-some|org.apache.cassandra.distributed.test.timeseries.TimeSeriesCompactionDistributedTest"
+  "test-jvm-dtest-some|org.apache.cassandra.distributed.test.timeseries.TscolDistributedTest"
   "testsome|org.apache.cassandra.db.memtable.TimeSeriesMemtableSchemaSupportTest"
   "testsome|org.apache.cassandra.db.memtable.TimeSeriesMemtableDifferentialTest"
   "testsome|org.apache.cassandra.db.memtable.TimeSeriesMemtableFlushTest"

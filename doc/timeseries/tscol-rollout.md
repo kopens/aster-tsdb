@@ -78,7 +78,7 @@
 
 - 되살린 행에는 TTL이 없다(청크에도 없었다). 보존은 TSCS `retention`이 창 단위로 한다.
 - 되살린 행의 writetime은 `max_row_writetime + 1`(청크가 갖고 있던 근사값). 원래 정확한 셀별 writetime은 청크화 때 이미 없어졌다.
-- tscol SSTable은 **통째 스트리밍만** 된다(부분 스트리밍은 명확한 오류). 41은 단일 노드라 해당 없음. 다중 노드 지원은 P3.
+- 부분 스트리밍: 보내는 쪽은 Data.db 구간을 그대로 보내고, 받는 쪽이 헤더의 형식을 보고 tscol 본문을 풀어 tscol SSTable로 다시 쓴다.
 - 커서 컴팩션은 tscol을 읽지도 쓰지도 않는다(자동으로 반복자 파이프라인).
 - 포크 기본값 변경: ONE/LOCAL_ONE 로컬 읽기의 메모리 응답 한도를 512행·64KiB에서 20,000행·16MiB로 올렸다
   (`cassandra.data_response_in_memory_max_rows_cl_one`, `..._max_size_cl_one`). 하루치 조회가 옛 한도를 넘으면 페이지를 직렬화했다가

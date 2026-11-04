@@ -39,9 +39,11 @@ import org.apache.cassandra.db.rows.BTreeRow;
 import org.apache.cassandra.db.rows.BufferCell;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.ColumnData;
+import org.apache.cassandra.db.rows.DeserializationHelper;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.timeseries.tiering.ChunkColumnTypes;
 import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.DroppedColumn;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.BulkIterator;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -267,9 +269,14 @@ public final class RowBlockCodec
         int rowLdtSlot = cursor.columnSlot(ROW_LDT), rowBaseSlot = cursor.columnSlot(ROW_BASE);
         int[] valueSlot = new int[c], wtSlot = new int[c], ttlSlot = new int[c], ldtSlot = new int[c], delSlot = new int[c];
         boolean[] queried = new boolean[c], plain = new boolean[c];
+        long[] dropHorizon = new long[c];
         for (int i = 0; i < c; i++)
         {
             ColumnMetadata column = emitted.get(i);
+            // Cells from before a column was dropped stay in the file until the next rewrite. Without this a column
+            // re-added under the same name would read them back, which row format's deserializer never lets happen.
+            DroppedColumn dropped = metadata.droppedColumns.get(column.name.bytes);
+            dropHorizon[i] = dropped == null ? DeserializationHelper.NO_DROP_HORIZON : dropped.droppedTime;
             String name = column.name.toString();
             queried[i] = columns == null || columns.fetchedColumnIsQueried(column);
             plain[i] = probe.columnSlot(PLAIN + name) != ColumnarCursor.ABSENT_COLUMN;
@@ -320,7 +327,7 @@ public final class RowBlockCodec
                 if (plain[i])
                 {
                     ByteBuffer value = cursor.getBytes(valueSlot[i]);
-                    if (value != null)
+                    if (value != null && !DeserializationHelper.isDroppedAtHorizon(base, dropHorizon[i]))
                         cells[count++] = new BufferCell(column, base, rowTtl, rowLdt, queried[i] ? value : ByteBufferUtil.EMPTY_BYTE_BUFFER, null);
                     continue;
                 }
@@ -328,6 +335,8 @@ public final class RowBlockCodec
                 if (delta == null)
                     continue;                                             // no cell for this column on this row
                 long timestamp = base + longAt(delta);
+                if (DeserializationHelper.isDroppedAtHorizon(timestamp, dropHorizon[i]))
+                    continue;
                 if (!queried[i] && timestamp < livenessTimestamp)
                     continue;                                             // the row marker already proves the row live
                 if (cursor.getBytes(delSlot[i]) != null)
@@ -347,6 +356,8 @@ public final class RowBlockCodec
                 neverExpires = false;
                 cells[count++] = new BufferCell(column, timestamp, intAt(cellTtl), longAt(cursor.getBytes(ldtSlot[i])), value, null);
             }
+            if (count == 0 && liveness.isEmpty())
+                continue;                                                 // all it had was dropped or not fetched
             rows.add(neverExpires ? BTreeRow.create(clustering, liveness, Row.Deletion.LIVE, tree(cells, count), Cell.MAX_DELETION_TIME)
                                   : BTreeRow.create(clustering, liveness, Row.Deletion.LIVE, tree(cells, count)));
         }
