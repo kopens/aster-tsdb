@@ -609,6 +609,12 @@ public class TieredStorageService implements TieredStorageServiceMBean
     }
 
     @Override
+    public String untier(String keyspace, String table, int rowsPerSecond)
+    {
+        return Untier.run(keyspace, table, rowsPerSecond).toString();
+    }
+
+    @Override
     public boolean isRangeScanMergeEnabled()
     {
         return TransparentReads.isRangeScanMergeEnabled();
@@ -1205,7 +1211,7 @@ public class TieredStorageService implements TieredStorageServiceMBean
     }
 
     /** @return {@code "a, b, c"} -- the columns' CQL names, for a select/insert column list. */
-    private static String columnList(Iterable<ColumnMetadata> columns)
+    static String columnList(Iterable<ColumnMetadata> columns)
     {
         StringBuilder sb = new StringBuilder();
         for (ColumnMetadata column : columns)
@@ -1218,7 +1224,7 @@ public class TieredStorageService implements TieredStorageServiceMBean
     }
 
     /** @return {@code "a = ? AND b = ?"} -- the single-partition restriction for a whole partition key. */
-    private static String equalityPredicate(List<ColumnMetadata> columns)
+    static String equalityPredicate(List<ColumnMetadata> columns)
     {
         StringBuilder sb = new StringBuilder();
         for (ColumnMetadata column : columns)
@@ -1243,7 +1249,7 @@ public class TieredStorageService implements TieredStorageServiceMBean
         return sb.toString();
     }
 
-    private static List<String> rawNames(List<ColumnMetadata> columns)
+    static List<String> rawNames(List<ColumnMetadata> columns)
     {
         List<String> names = new ArrayList<>(columns.size());
         for (ColumnMetadata column : columns)
@@ -1252,7 +1258,7 @@ public class TieredStorageService implements TieredStorageServiceMBean
     }
 
     /** @return the bind values for a query whose leading markers are the partition key's, followed by {@code rest}. */
-    private static List<ByteBuffer> boundTo(List<ByteBuffer> tag, ByteBuffer... rest)
+    static List<ByteBuffer> boundTo(List<ByteBuffer> tag, ByteBuffer... rest)
     {
         List<ByteBuffer> values = new ArrayList<>(tag.size() + rest.length);
         values.addAll(tag);
@@ -1715,7 +1721,7 @@ public class TieredStorageService implements TieredStorageServiceMBean
         }
     }
 
-    private static String quotedRef(String keyspace, String table)
+    static String quotedRef(String keyspace, String table)
     {
         return format("%s.%s", ColumnIdentifier.maybeQuote(keyspace), ColumnIdentifier.maybeQuote(table));
     }

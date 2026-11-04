@@ -172,6 +172,7 @@ import static org.apache.cassandra.tools.nodetool.Help.printTopCommandUsage;
                          ResetLocalSchema.class,
                          ResumeHandoff.class,
                          Retier.class,
+                         Untier.class,
                          Ring.class,
                          SSTableRepairedSet.class,
                          Scrub.class,

@@ -43,6 +43,13 @@ public interface TieredStorageServiceMBean
     void retier(String keyspace, String table);
 
     /**
+     * Moves every chunk of {@code keyspace.table} back into the base table and drops its shadow tables -- the one-way
+     * exit from shadow-table tiering (see {@code Untier}). Detaches the tiering policy first.
+     * @return a one-line summary
+     */
+    String untier(String keyspace, String table, int rowsPerSecond);
+
+    /**
      * @return one tab-delimited status line per table that has a {@code timeseries_tiering} policy:
      * {@code keyspace, table, interval_ms, last_run_at (epoch millis, or -1 if it has never run),
      * windows_encoded, rows_encoded, late_merges, chunks_expired, tags_skipped}.

@@ -1482,6 +1482,11 @@ public class NodeProbe implements AutoCloseable
         tieredStorageProxy.retier(keyspace, table);
     }
 
+    public String untier(String keyspace, String table, int rowsPerSecond)
+    {
+        return tieredStorageProxy.untier(keyspace, table, rowsPerSecond);
+    }
+
     public List<String> tieringStatusRows()
     {
         return tieredStorageProxy.statusRows();
