@@ -20,6 +20,7 @@ package org.apache.cassandra.db.timeseries;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -42,7 +43,10 @@ import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.timeseries.tiering.ChunkColumnTypes;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.utils.BulkIterator;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.btree.BTree;
+import org.apache.cassandra.utils.btree.UpdateFunction;
 
 /**
  * Encodes the rows of one partition of a time-series table (one timestamp clustering column) into a chunk-format-v4
@@ -77,9 +81,10 @@ public final class RowBlockCodec
     private static final String LDT = "\0ldt.";
     private static final String DEL = "\0del.";
     /**
-     * Present (and all null, so O(1)) when every cell of the column in this block is live, never expires and carries
-     * its row's own timestamp. Such a column has nothing but values to say, which is what lets
-     * {@link #decode(TableMetadata, ByteBuffer, ColumnFilter, boolean)} pass over it entirely when it is not queried.
+     * Present (and all null, so O(1)) when every cell of the column in this block is live and shares its row's
+     * timestamp and expiry -- what an INSERT writes, table default TTL included. Such a column has nothing to say but
+     * its values, so it stores no writetimes (a non-null value is a cell), and
+     * {@link #decode(TableMetadata, ByteBuffer, ColumnFilter, boolean)} can pass over it entirely when it is not queried.
      */
     private static final String PLAIN = "\0plain.";
 
@@ -128,6 +133,8 @@ public final class RowBlockCodec
         ByteBuffer[] rowTs = new ByteBuffer[n], rowTtl = new ByteBuffer[n], rowLdt = new ByteBuffer[n], rowBase = new ByteBuffer[n];
         ByteBuffer[][] values = new ByteBuffer[c][n], wt = new ByteBuffer[c][n], ttl = new ByteBuffer[c][n],
                        ldt = new ByteBuffer[c][n], del = new ByteBuffer[c][n];
+        boolean[] plain = new boolean[c];
+        Arrays.fill(plain, true);
 
         for (int r = 0; r < n; r++)
         {
@@ -165,6 +172,7 @@ public final class RowBlockCodec
                 Cell<?> cell = (Cell<?>) data;
                 int i = columns.indexOf(cell.column());
                 wt[i][r] = LongType.instance.decompose(cell.timestamp() - base);
+                plain[i] &= sharesRowLiveness(cell, liveness, base);
                 if (cell.isTombstone())
                 {
                     del[i][r] = BooleanType.instance.decompose(true);
@@ -182,22 +190,25 @@ public final class RowBlockCodec
 
         SortedMap<String, ChunkV4Codec.ColumnInput> inputs = new TreeMap<>();
         put(inputs, ROW_TS, LongType.instance, rowTs);
-        put(inputs, ROW_TTL, Int32Type.instance, rowTtl);
-        put(inputs, ROW_LDT, LongType.instance, rowLdt);
-        put(inputs, ROW_BASE, LongType.instance, rowBase);
+        putUnlessAllNull(inputs, ROW_TTL, Int32Type.instance, rowTtl);
+        putUnlessAllNull(inputs, ROW_LDT, LongType.instance, rowLdt);
+        putUnlessAllNull(inputs, ROW_BASE, LongType.instance, rowBase);
         for (int i = 0; i < c; i++)
         {
             ColumnMetadata column = columns.get(i);
             String name = column.name.toString();
             inputs.put(name, new ChunkV4Codec.ColumnInput(ChunkColumnTypes.typeCodeFor(column.type),
                                                           ChunkColumnTypes.statOrderFor(column.type), values[i]));
+            if (plain[i])
+            {
+                put(inputs, PLAIN + name, BooleanType.instance, new ByteBuffer[n]);
+                continue;
+            }
             put(inputs, WT + name, LongType.instance, wt[i]);
             // All null is the usual case; a column left out costs no directory entry and no per-cell lookup.
             putUnlessAllNull(inputs, TTL + name, Int32Type.instance, ttl[i]);
             putUnlessAllNull(inputs, LDT + name, LongType.instance, ldt[i]);
             putUnlessAllNull(inputs, DEL + name, BooleanType.instance, del[i]);
-            if (allNull(ttl[i]) && allNull(del[i]) && deltasAllZero(wt[i]))
-                put(inputs, PLAIN + name, BooleanType.instance, new ByteBuffer[n]);
         }
         return ColumnarChunkCodec.encode(timestamps, n, inputs);
     }
@@ -217,114 +228,159 @@ public final class RowBlockCodec
 
     /**
      * @param skipRedundantCells leave out the value-less cells of unqueried columns where they prove nothing: a plain
-     *                           column's cell on a row with a non-expiring marker has the marker's own timestamp, so
-     *                           anything that shadows the one shadows the other and the row's liveness does not depend
-     *                           on it. The answer is the same, and most of a narrow scan's work is gone, but the rows
+     *                           column's cell has its row marker's timestamp and expiry, so anything that shadows or
+     *                           expires the one does the same to the other and the row's liveness does not depend on
+     *                           it. The answer is the same, and most of a narrow scan's work is gone, but the rows
      *                           differ from row format's, and so would their digest: only for a table with one replica.
      */
     public static List<Row> decode(TableMetadata metadata, ByteBuffer payload, ColumnFilter columns, boolean skipRedundantCells)
     {
-        List<ColumnMetadata> emitted = new ArrayList<>();
+        // What the block holds decides what is worth stepping through, so look before opening the real cursor.
+        Set<String> probeNames = new HashSet<>(List.of(ROW_BASE));
         for (ColumnMetadata column : metadata.regularColumns())
-            if (columns == null || columns.fetches(column))
-                emitted.add(column);
-        int c = emitted.size();
+            probeNames.add(PLAIN + column.name);
+        ColumnarCursor probe = ColumnarChunkCodec.cursor(payload, probeNames);
+        boolean everyRowHasMarker = probe.columnSlot(ROW_BASE) == ColumnarCursor.ABSENT_COLUMN;
 
+        List<ColumnMetadata> emitted = new ArrayList<>();
         Set<String> projection = new HashSet<>(List.of(ROW_TS, ROW_TTL, ROW_LDT, ROW_BASE));
-        boolean[] queried = new boolean[c];
-        String[] names = new String[c];
-        for (int i = 0; i < c; i++)
+        for (ColumnMetadata column : metadata.regularColumns())
         {
-            ColumnMetadata column = emitted.get(i);
-            names[i] = column.name.toString();
-            queried[i] = columns == null || columns.fetchedColumnIsQueried(column);
-            Collections.addAll(projection, WT + names[i], TTL + names[i], LDT + names[i], DEL + names[i], PLAIN + names[i]);
-            if (queried[i])
-                projection.add(names[i]);                                 // an unqueried column's values are never read
+            if (columns != null && !columns.fetches(column))
+                continue;
+            String name = column.name.toString();
+            boolean queried = columns == null || columns.fetchedColumnIsQueried(column);
+            boolean plain = probe.columnSlot(PLAIN + name) != ColumnarCursor.ABSENT_COLUMN;
+            if (plain && !queried && skipRedundantCells && everyRowHasMarker)
+                continue;
+            emitted.add(column);
+            if (queried || plain)
+                projection.add(name);                                     // a plain column's values say where its cells are
+            if (!plain)
+                Collections.addAll(projection, WT + name, TTL + name, LDT + name, DEL + name);
         }
+        int c = emitted.size();
 
         ColumnarCursor cursor = ColumnarChunkCodec.cursor(payload, projection);
         // Every name resolved once per block, not once per row and column (ColumnarCursor#columnSlot).
         int rowTsSlot = cursor.columnSlot(ROW_TS), rowTtlSlot = cursor.columnSlot(ROW_TTL);
         int rowLdtSlot = cursor.columnSlot(ROW_LDT), rowBaseSlot = cursor.columnSlot(ROW_BASE);
         int[] valueSlot = new int[c], wtSlot = new int[c], ttlSlot = new int[c], ldtSlot = new int[c], delSlot = new int[c];
-        boolean[] skippable = new boolean[c];
+        boolean[] queried = new boolean[c], plain = new boolean[c];
         for (int i = 0; i < c; i++)
         {
-            valueSlot[i] = queried[i] ? cursor.columnSlot(names[i]) : ColumnarCursor.ABSENT_COLUMN;
-            wtSlot[i] = cursor.columnSlot(WT + names[i]);
-            ttlSlot[i] = cursor.columnSlot(TTL + names[i]);
-            ldtSlot[i] = cursor.columnSlot(LDT + names[i]);
-            delSlot[i] = cursor.columnSlot(DEL + names[i]);
-            skippable[i] = skipRedundantCells && !queried[i] && cursor.columnSlot(PLAIN + names[i]) != ColumnarCursor.ABSENT_COLUMN;
+            ColumnMetadata column = emitted.get(i);
+            String name = column.name.toString();
+            queried[i] = columns == null || columns.fetchedColumnIsQueried(column);
+            plain[i] = probe.columnSlot(PLAIN + name) != ColumnarCursor.ABSENT_COLUMN;
+            valueSlot[i] = cursor.columnSlot(name);
+            wtSlot[i] = cursor.columnSlot(WT + name);
+            ttlSlot[i] = cursor.columnSlot(TTL + name);
+            ldtSlot[i] = cursor.columnSlot(LDT + name);
+            delSlot[i] = cursor.columnSlot(DEL + name);
         }
 
         List<Row> rows = new ArrayList<>(ColumnarChunkCodec.rowCount(payload));
-        Row.Builder builder = BTreeRow.sortedBuilder();
+        Object[] cells = new Object[c];
         while (cursor.advance())
         {
-            builder.newRow(Clustering.make(TimestampType.instance.fromTimeInMillis(cursor.timestamp())));
+            Clustering<?> clustering = Clustering.make(TimestampType.instance.fromTimeInMillis(cursor.timestamp()));
             long base;
             long livenessTimestamp = LivenessInfo.NO_TIMESTAMP;
-            boolean permanentMarker = false;
+            LivenessInfo liveness = LivenessInfo.EMPTY;
+            int rowTtl = Cell.NO_TTL;
+            long rowLdt = Cell.NO_DELETION_TIME;
             ByteBuffer ts = cursor.getBytes(rowTsSlot);
             if (ts != null)
             {
                 base = longAt(ts);
                 livenessTimestamp = base;
-                ByteBuffer rowTtl = cursor.getBytes(rowTtlSlot);
-                permanentMarker = rowTtl == null;
-                builder.addPrimaryKeyLivenessInfo(rowTtl == null
-                                                  ? LivenessInfo.create(base)
-                                                  : LivenessInfo.withExpirationTime(base, intAt(rowTtl), longAt(cursor.getBytes(rowLdtSlot))));
+                ByteBuffer ttl = cursor.getBytes(rowTtlSlot);
+                if (ttl == null)
+                {
+                    liveness = LivenessInfo.create(base);
+                }
+                else
+                {
+                    rowTtl = intAt(ttl);
+                    rowLdt = longAt(cursor.getBytes(rowLdtSlot));
+                    liveness = LivenessInfo.withExpirationTime(base, rowTtl, rowLdt);
+                }
             }
             else
             {
                 base = longAt(cursor.getBytes(rowBaseSlot));
             }
 
+            int count = 0;
+            boolean neverExpires = rowTtl == Cell.NO_TTL;
             for (int i = 0; i < c; i++)
             {
-                if (permanentMarker && skippable[i])
+                ColumnMetadata column = emitted.get(i);
+                if (plain[i])
+                {
+                    ByteBuffer value = cursor.getBytes(valueSlot[i]);
+                    if (value != null)
+                        cells[count++] = new BufferCell(column, base, rowTtl, rowLdt, queried[i] ? value : ByteBufferUtil.EMPTY_BYTE_BUFFER, null);
                     continue;
+                }
                 ByteBuffer delta = cursor.getBytes(wtSlot[i]);
                 if (delta == null)
                     continue;                                             // no cell for this column on this row
                 long timestamp = base + longAt(delta);
                 if (!queried[i] && timestamp < livenessTimestamp)
                     continue;                                             // the row marker already proves the row live
-                ColumnMetadata column = emitted.get(i);
                 if (cursor.getBytes(delSlot[i]) != null)
                 {
-                    builder.addCell(new BufferCell(column, timestamp, Cell.NO_TTL, longAt(cursor.getBytes(ldtSlot[i])),
-                                                   ByteBufferUtil.EMPTY_BYTE_BUFFER, null));
+                    neverExpires = false;
+                    cells[count++] = new BufferCell(column, timestamp, Cell.NO_TTL, longAt(cursor.getBytes(ldtSlot[i])),
+                                                    ByteBufferUtil.EMPTY_BYTE_BUFFER, null);
                     continue;
                 }
                 ByteBuffer value = queried[i] ? cursor.getBytes(valueSlot[i]) : ByteBufferUtil.EMPTY_BYTE_BUFFER;
                 ByteBuffer cellTtl = cursor.getBytes(ttlSlot[i]);
-                builder.addCell(cellTtl == null
-                                ? BufferCell.live(column, timestamp, value)
-                                : new BufferCell(column, timestamp, intAt(cellTtl), longAt(cursor.getBytes(ldtSlot[i])), value, null));
+                if (cellTtl == null)
+                {
+                    cells[count++] = BufferCell.live(column, timestamp, value);
+                    continue;
+                }
+                neverExpires = false;
+                cells[count++] = new BufferCell(column, timestamp, intAt(cellTtl), longAt(cursor.getBytes(ldtSlot[i])), value, null);
             }
-            rows.add(builder.build());
+            rows.add(neverExpires ? BTreeRow.create(clustering, liveness, Row.Deletion.LIVE, tree(cells, count), Cell.MAX_DELETION_TIME)
+                                  : BTreeRow.create(clustering, liveness, Row.Deletion.LIVE, tree(cells, count)));
         }
         if (isDescending(metadata))
             Collections.reverse(rows);
         return rows;
     }
 
+    /** {@code cells} are in BTree order and one per column, the same reasoning as {@code ChunkReadSupport}'s buildDirect. */
+    private static Object[] tree(Object[] cells, int count)
+    {
+        if (count == 0)
+            return BTree.empty();
+        if (count == 1)
+            return BTree.singleton(cells[0]);
+        // The BulkIterator is pooled and must be closed, or its thread-local slot leaks.
+        try (BulkIterator<Object> bulk = BulkIterator.of(cells, 0))
+        {
+            return BTree.build(bulk, count, UpdateFunction.noOp());
+        }
+    }
+
+    private static boolean sharesRowLiveness(Cell<?> cell, LivenessInfo liveness, long base)
+    {
+        return !cell.isTombstone()
+               && cell.timestamp() == base
+               && cell.ttl() == (liveness.isExpiring() ? liveness.ttl() : Cell.NO_TTL)
+               && (!cell.isExpiring() || cell.localDeletionTime() == liveness.localExpirationTime());
+    }
+
     private static boolean allNull(ByteBuffer[] values)
     {
         for (ByteBuffer value : values)
             if (value != null)
-                return false;
-        return true;
-    }
-
-    private static boolean deltasAllZero(ByteBuffer[] deltas)
-    {
-        for (ByteBuffer delta : deltas)
-            if (delta != null && longAt(delta) != 0)
                 return false;
         return true;
     }

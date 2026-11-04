@@ -202,6 +202,13 @@ public class RowBlockCodecTest
         assertEquals("the row has no marker: its cell is its liveness", 1, kept.get(0).columnCount());
         assertEquals("the marker can expire before the cell", 1, kept.get(1).columnCount());
 
+        Row.Builder same = newRow(1_000);                                     // what INSERT under a default TTL writes
+        same.addPrimaryKeyLivenessInfo(LivenessInfo.withExpirationTime(600, 60, NOW_SEC + 60));
+        same.addCell(new BufferCell(col(t, "s"), 600, 60, NOW_SEC + 60, UTF8Type.instance.decompose("w"), null));
+        Row sameRow = RowBlockCodec.decode(t, RowBlockCodec.encode(t, List.of(same.build())), onlyV, true).get(0);
+        assertEquals("a cell expiring with its marker proves nothing either", 0, sameRow.columnCount());
+        assertEquals(60, sameRow.primaryKeyLivenessInfo().ttl());
+
         Row.Builder late = newRow(1_000);
         late.addPrimaryKeyLivenessInfo(LivenessInfo.create(700));
         late.addCell(BufferCell.live(col(t, "s"), 900, UTF8Type.instance.decompose("z")));   // newer than the marker
