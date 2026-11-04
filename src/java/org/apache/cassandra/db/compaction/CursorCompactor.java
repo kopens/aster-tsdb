@@ -204,6 +204,13 @@ public class CursorCompactor extends CompactionInfo.Holder
     {
         for (SSTableReader reader : scanner.getBackingSSTables())
         {
+            // aster-tsdb (tscol): the cursor parses BIG row serialization from the data file; a tscol body is not that.
+            if (!(reader.descriptor.getFormat() instanceof BigFormat))
+            {
+                LOGGER.debug("Cursor compaction is not supported for {}.{}: sstable {} is in format {}, not BIG",
+                             metadata.keyspace, metadata.name, reader, reader.descriptor.getFormat().name());
+                return true;
+            }
             Version version = reader.descriptor.version;
             if (!version.isLatestVersion())
             {

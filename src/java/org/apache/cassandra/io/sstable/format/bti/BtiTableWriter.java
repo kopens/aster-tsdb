@@ -82,6 +82,12 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
         return entry;
     }
 
+    // aster-tsdb (tscol): lets TscolTableWriter open the reader it wrote as a TscolTableReader.
+    protected BtiTableReader.Builder newReaderBuilder()
+    {
+        return new BtiTableReader.Builder(descriptor);
+    }
+
     @SuppressWarnings({ "resource", "RedundantSuppression" }) // dataFile is closed along with the reader
     private BtiTableReader openInternal(OpenReason openReason, boolean isFinal, Supplier<PartitionIndex> partitionIndexSupplier)
     {
@@ -90,7 +96,7 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
         PartitionIndex partitionIndex = null;
         FileHandle rowIndexFile = null;
 
-        BtiTableReader.Builder builder = unbuildTo(new BtiTableReader.Builder(descriptor), true).setMaxDataAge(maxDataAge)
+        BtiTableReader.Builder builder = unbuildTo(newReaderBuilder(), true).setMaxDataAge(maxDataAge)
                                                                                                 .setSerializationHeader(header)
                                                                                                 .setOpenReason(openReason);
 
@@ -360,13 +366,24 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
             checkNotNull(indexWriter);
             checkState(!partitionWriterOpened, "Partition writer has been already opened.");
 
-            BtiFormatPartitionWriter partitionWriter = new BtiFormatPartitionWriter(getSerializationHeader(),
-                                                                                    getTableMetadataRef().getLocal().comparator,
-                                                                                    dataWriter,
-                                                                                    indexWriter.rowIndexWriter,
-                                                                                    descriptor.version);
+            BtiFormatPartitionWriter partitionWriter = newPartitionWriter(dataWriter, indexWriter.rowIndexWriter);
             partitionWriterOpened = true;
             return partitionWriter;
+        }
+
+        // aster-tsdb (tscol): the two things TscolTableWriter.Builder writes differently.
+        protected BtiFormatPartitionWriter newPartitionWriter(SequentialWriter dataWriter, SequentialWriter rowIndexWriter)
+        {
+            return new BtiFormatPartitionWriter(getSerializationHeader(),
+                                                getTableMetadataRef().getLocal().comparator,
+                                                dataWriter,
+                                                rowIndexWriter,
+                                                descriptor.version);
+        }
+
+        protected BtiTableWriter newWriter(ILifecycleTransaction txn, Owner owner)
+        {
+            return new BtiTableWriter(this, txn, owner);
         }
 
         private <T> T ensuringInBuildInternalContext(T value)
@@ -383,7 +400,7 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
                 this.mmappedRegionsCache = new MmappedRegionsCache();
                 this.operationType = txn.opType();
 
-                return new BtiTableWriter(this, txn, owner);
+                return newWriter(txn, owner);
             }
             catch (RuntimeException | Error ex)
             {

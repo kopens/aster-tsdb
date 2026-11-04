@@ -31,6 +31,7 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.bti.TscolFormat;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.streaming.OutgoingStream;
 import org.apache.cassandra.streaming.StreamOperation;
@@ -193,6 +194,11 @@ public class CassandraOutgoingFile implements OutgoingStream
         }
         else
         {
+            // aster-tsdb (tscol): legacy streaming ships Data.db byte ranges that the receiver parses as row-serialized
+            // partitions; a columnar body would be misread. Refuse loudly until a tscol-aware path exists (spec P3).
+            if (TscolFormat.is(sstable.descriptor.getFormat()))
+                throw new IOException("Cannot stream part of " + sstable + ": tscol sstables can only be streamed whole " +
+                                      "(stream_entire_sstables) at present");
             // legacy streaming is not affected by stats metadata mutation and index sumary redistribution
             CassandraStreamHeader.serializer.serialize(header, out, version);
             out.flush();

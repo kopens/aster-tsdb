@@ -19,7 +19,9 @@ package org.apache.cassandra.io.sstable;
 
 import java.io.IOError;
 import java.io.IOException;
+import java.util.Collections;
 import java.util.Iterator;
+import java.util.List;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -31,6 +33,9 @@ import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredSerializer;
+import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.bti.TscolBody;
+import org.apache.cassandra.io.sstable.format.bti.TscolFormat;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.schema.TableMetadata;
@@ -42,6 +47,7 @@ import org.apache.cassandra.utils.AbstractIterator;
  * Note that this is not a full fledged UnfilteredRowIterator. It's also not closeable, it is always
  * the job of the user to close the underlying ressources.
  */
+
 public abstract class SSTableSimpleIterator extends AbstractIterator<Unfiltered> implements Iterator<Unfiltered>
 {
     final TableMetadata metadata;
@@ -65,7 +71,57 @@ public abstract class SSTableSimpleIterator extends AbstractIterator<Unfiltered>
         return new CurrentFormatTombstoneIterator(metadata, in, header, helper);
     }
 
+    // aster-tsdb (tscol): a tscol partition body is a kind byte after the static row, then either these same rows or
+    // columnar blocks; every sequential reader (compaction, validation, scrub, verify, index builds) comes through here.
+    public static SSTableSimpleIterator create(SSTableReader sstable, TableMetadata metadata, DataInputPlus in,
+                                              DeserializationHelper helper, DeletionTime partitionDeletion, boolean tombstoneOnly)
+    {
+        SSTableSimpleIterator rows = tombstoneOnly
+                                     ? createTombstoneOnly(metadata, in, sstable.header, helper, partitionDeletion)
+                                     : create(metadata, in, sstable.header, helper, partitionDeletion);
+        return TscolFormat.is(sstable.descriptor.getFormat()) ? new ColumnarFormatIterator(metadata, in, helper, rows, tombstoneOnly) : rows;
+    }
+
     public abstract Row readStaticRow() throws IOException;
+
+    private static class ColumnarFormatIterator extends SSTableSimpleIterator
+    {
+        private final SSTableSimpleIterator rows;
+        private final boolean tombstoneOnly;
+        private Iterator<Row> columnar;
+
+        private ColumnarFormatIterator(TableMetadata metadata, DataInputPlus in, DeserializationHelper helper,
+                                       SSTableSimpleIterator rows, boolean tombstoneOnly)
+        {
+            super(metadata, in, helper);
+            this.rows = rows;
+            this.tombstoneOnly = tombstoneOnly;
+        }
+
+        public Row readStaticRow() throws IOException
+        {
+            Row staticRow = rows.readStaticRow();
+            int kind = in.readUnsignedByte();
+            if (kind == TscolBody.KIND_COLUMNAR)
+            {
+                // Columnar blocks hold no range tombstones and no row deletions, so a tombstone-only read takes nothing.
+                List<Row> decoded = TscolBody.readColumnar(metadata, in, null, TscolBody.ALL_BLOCKS);
+                columnar = tombstoneOnly ? Collections.emptyIterator() : decoded.iterator();
+            }
+            else if (kind != TscolBody.KIND_ROWS)
+            {
+                throw new IOException("unknown tscol partition body kind " + kind);
+            }
+            return staticRow;
+        }
+
+        protected Unfiltered computeNext()
+        {
+            if (columnar != null)
+                return columnar.hasNext() ? columnar.next() : endOfData();
+            return rows.hasNext() ? rows.next() : endOfData();
+        }
+    }
 
     private static class CurrentFormatIterator extends SSTableSimpleIterator
     {
