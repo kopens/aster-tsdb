@@ -45,6 +45,12 @@ public final class TimeSeriesCompactionStrategyOptions
      * See {@link TimeSeriesCompactionStrategy#isActive}.
      */
     public static final String TIERING_AWARE_FREEZE = "tiering_aware_freeze";
+    /**
+     * {@code row} (default) freezes a closed window into the selected sstable format; {@code columnar} into
+     * {@code tscol}, the columnar format (docs/superpowers/specs/2026-11-04-columnar-frozen-sstable-design.md).
+     * A table whose shape the columnar codec does not support freezes into row format either way.
+     */
+    public static final String FROZEN_FORMAT = "frozen_format";
 
     static final String DEFAULT_WINDOW_SIZE = "1h";
     static final String DEFAULT_FREEZE_AFTER = "2h";
@@ -60,6 +66,7 @@ public final class TimeSeriesCompactionStrategyOptions
     public final TimeUnit timestampResolution;
     public final long maxFutureWindowMillis;
     public final boolean tieringAwareFreeze;
+    public final boolean columnarFreeze;
 
     public TimeSeriesCompactionStrategyOptions(Map<String, String> options)
     {
@@ -83,6 +90,7 @@ public final class TimeSeriesCompactionStrategyOptions
         Pair<TimeUnit, Integer> future = parseDuration(MAX_FUTURE_WINDOW, options.getOrDefault(MAX_FUTURE_WINDOW, DEFAULT_MAX_FUTURE_WINDOW));
         this.maxFutureWindowMillis = TimeUnit.MILLISECONDS.convert(future.right, future.left);
         this.tieringAwareFreeze = Boolean.parseBoolean(options.getOrDefault(TIERING_AWARE_FREEZE, "true"));
+        this.columnarFreeze = "columnar".equalsIgnoreCase(options.getOrDefault(FROZEN_FORMAT, "row"));
     }
 
     public long windowStartFor(long timestampMillis)
@@ -161,6 +169,7 @@ public final class TimeSeriesCompactionStrategyOptions
         copy.remove(TIMESTAMP_RESOLUTION);
         copy.remove(MAX_FUTURE_WINDOW);
         copy.remove(TIERING_AWARE_FREEZE);
+        copy.remove(FROZEN_FORMAT);
         return copy;
     }
 
@@ -196,6 +205,9 @@ public final class TimeSeriesCompactionStrategyOptions
         String tieringAware = options.get(TIERING_AWARE_FREEZE);
         if (tieringAware != null && !tieringAware.equalsIgnoreCase("true") && !tieringAware.equalsIgnoreCase("false"))
             throw new ConfigurationException(TIERING_AWARE_FREEZE + " must be true or false, got " + tieringAware);
+        String frozenFormat = options.get(FROZEN_FORMAT);
+        if (frozenFormat != null && !frozenFormat.equalsIgnoreCase("row") && !frozenFormat.equalsIgnoreCase("columnar"))
+            throw new ConfigurationException(FROZEN_FORMAT + " must be row or columnar, got " + frozenFormat);
 
         uncheckedOptions.remove(WINDOW_SIZE);
         uncheckedOptions.remove(FREEZE_AFTER);
@@ -203,6 +215,7 @@ public final class TimeSeriesCompactionStrategyOptions
         uncheckedOptions.remove(TIMESTAMP_RESOLUTION);
         uncheckedOptions.remove(MAX_FUTURE_WINDOW);
         uncheckedOptions.remove(TIERING_AWARE_FREEZE);
+        uncheckedOptions.remove(FROZEN_FORMAT);
         return uncheckedOptions;
     }
 

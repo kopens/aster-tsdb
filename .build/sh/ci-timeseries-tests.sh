@@ -47,6 +47,7 @@ TESTS=(
   "testsome|org.apache.cassandra.db.timeseries.ColumnarChunkCodecTest"
   "testsome|org.apache.cassandra.db.timeseries.RowBlockCodecTest"
   "testsome|org.apache.cassandra.io.sstable.format.bti.TscolSSTableTest"
+  "testsome|org.apache.cassandra.db.compaction.TscolFreezeTest"
   "testsome|org.apache.cassandra.db.timeseries.tiering.TieringPolicyTest"
   "testsome|org.apache.cassandra.db.timeseries.tiering.TieredStorageServiceTest"
   "testsome|org.apache.cassandra.db.timeseries.tiering.TieringSchemaSupportTest"

@@ -297,7 +297,8 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
                     long before = windowSignature(freeze.window);
                     refreshDelegateBacklog(gcBefore);
                     return List.of(new FreezeCompactionTask(cfs, txn, gcBefore, window,
-                                                            () -> recordCompletedRewrite(window, before, "freeze")));
+                                                            () -> recordCompletedRewrite(window, before, "freeze"))
+                                   .withColumnarOutput(tsOptions.columnarFreeze));
                 }
                 // Refused: a race the eligibility filter cannot pre-empt (the tracker marked these
                 // compacting between the snapshot and here). Fall through - to the split branch and then
@@ -331,7 +332,8 @@ public class TimeSeriesCompactionStrategy extends AbstractCompactionStrategy
                     refreshDelegateBacklog(gcBefore);
                     return List.of(new SplitRefreezeCompactionTask(cfs, txn, gcBefore,
                                                                    tsOptions::windowStartFor, tsOptions.timestampResolution,
-                                                                   () -> recordCompletedRewrite(window, before, "split-refreeze")));
+                                                                   () -> recordCompletedRewrite(window, before, "split-refreeze"))
+                                   .withColumnarOutput(tsOptions.columnarFreeze));
                 }
                 warnRepeatedRefusal("split-refreezing", split.windowStart, toSplit, previousSplitCandidate);
                 splitRefused = toSplit;
