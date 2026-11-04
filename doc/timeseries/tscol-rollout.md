@@ -52,12 +52,16 @@
 
 ## 41 절차 (데이터 초기화 경로 — 2026-11-04 사용자 결정)
 
-41은 tscol 후보가 오른 뒤 플랫폼 데이터를 초기화한다(새 ID 체계로 처음부터 다시 쌓음):
+41은 tscol 후보가 오른 뒤 플랫폼 데이터를 초기화한다(새 ID 체계로 처음부터 다시 쌓음). 절차의 주인은 플랫폼이고, 초기화 범위는 `pp` 키스페이스 말고도
+PG `pp`·`pf`, Valkey `PP:*`, Iceberg `tw_*`까지다.
 
-1. core 마이그레이션 변경(V9·V32의 `timeseries_tiering` 정책 → `frozen_format = 'columnar'`)이 먼저 들어간 플랫폼 이미지와 tscol 후보 배포.
-2. `DROP KEYSPACE pp` — 그림자 표까지 같이 지워진다.
-3. 표마다 `allow_auto_snapshot = true`라 DROP이 스냅샷을 남긴다. 버릴 데이터면 `nodetool clearsnapshot --all -- pp`.
-4. 부팅 마이그레이션이 pp를 새로 만든다(TSCS `frozen_format = 'columnar'`). 커버리지 원장·그림자 표는 없다.
+1. 41 동결, 전체 백업.
+2. r9 데이터레이크 이미지 배포. 노드 UN과 jar sha256 확인. **core는 아직 올리지 않는다.** V9·V32를 고친 core를 옛 `pp` 이력 위에 올리면 체크섬이 맞지 않아 `server-web`이 기동에 실패한다.
+3. 보존할 표(`ta_console_*`, AI anomaly 표 2개)의 `DESCRIBE`를 저장하고 스냅샷을 뜬다.
+4. `DROP KEYSPACE pp` — 그림자 표까지 같이 지워진다.
+5. storage 재시작 등으로 재생성하고, core가 든 `server-web`을 기동한다. 부팅 마이그레이션이 pp를 새로 만든다(TSCS `frozen_format = 'columnar'`). 커버리지 원장·그림자 표는 없다.
+6. 재생성된 표에 보존 표를 되돌린다(아래 "보존 표 복원"). `ta_console_*` 표는 admin-api가 시작할 때 만드므로 admin-api 재시작 뒤에 가져온다.
+7. 표마다 `allow_auto_snapshot = true`라 DROP이 스냅샷을 남긴다. **며칠 확인한 뒤에** `nodetool clearsnapshot --all -- pp`로 지운다(사용자 결정). 그때까지 디스크는 돌아오지 않는다.
 
 ## 2026.11 설치(옛 계층화 데이터가 있는 노드) 절차
 
@@ -93,6 +97,48 @@ p99는 55 → 56 ms. 수명주기 시험과 같이 돌린 값이다.
 41에서 올리는 경로도 재봤다. 41의 현재 메타데이터 복사본으로 `docker/upgrade-boot-test.sh`를 통과했다(기동, `cms snapshot`, 재기동). r8에서 정책을 걸고 청크를 만든 데이터로
 후보를 기동하면 최근 행은 보이고 청크로 들어간 행은 안 보이며, 재시작과 `DROP KEYSPACE pp`, `frozen_format = 'columnar'` 재생성, tscol 동결까지 ERROR가 없었다.
 
+## 읽기 응답 한도와 메모리 (2026-11-05, r9 `bfa56acb7a`, 호스트 234)
+
+16MiB는 절대 상한이 아니다. 한도를 넘으면 페이지 전체를 직렬화 버퍼에 담고, 응답은 읽기 단계가 끝나도 조정자가 소비할 때까지 남는다.
+그래서 실제 변수는 `concurrent_reads`가 아니라 **페이지 크기 × 동시 요청 수**다. 단일 파티션 읽기의 동시 요청은 `native_transport_max_threads`로 묶인다.
+
+플랫폼 템플릿 값(`concurrent_reads` 256, `native_transport_max_threads` 256), ZGC, 동시 읽기 256개로 120초씩 쟀다. 읽기만 걸었고 시간제한은 600초, 시나리오별 1회, 호스트는 바쁜 상태였다.
+
+| 힙 | 페이지(행) | 응답 한도 | 읽기/초 | p50 | p99 | OOM |
+| --- | --- | --- | --- | --- | --- | --- |
+| 16G | 5,000 | 기본 | 854 | 254 ms | 897 ms | 0 |
+| 16G | 19,000 | 기본 | 92 | 2.7 s | 6.5 s | 0 |
+| 16G | 19,000 | 512행·64KiB | 123 | 2.0 s | 4.9 s | 0 |
+| 16G | 30,000 | 기본 | 53 | 4.9 s | 10.0 s | 0 |
+| 8G | 19,000 | 기본 | 19.5 | 13.8 s | 26.9 s | 0 |
+| 4G | 5,000 | 기본 | 186 | 1.1 s | 4.2 s | 0 |
+| 4G | 19,000 | 기본 | 10.7 | 22 s | 70 s | **발생, 읽기 실패 1건** |
+| 4G | 19,000 | 4MiB | 22.6 | 11.9 s | 21.2 s | 0 |
+| 4G | 19,000 | 512행·64KiB | 28.6 | 9.5 s | 15.7 s | 0 |
+
+살아 있는 힙은 작은 힙에서 최고 3.6 GiB까지 관측됐다. 큰 힙에서는 GC 시점 표본이 훨씬 작게 나오므로 낮은 값을 근거로 쓰지 않는다.
+
+- 힙 16G는 기본값 그대로 둔다.
+- 힙 4G급 설치는 `-Dcassandra.data_response_in_memory_max_size_cl_one=4MiB`를 넣는다. 힙 8G는 기본값에서 OOM이 없었지만 8MiB는 재지 않았다.
+- 앱 페이지는 5,000행 이하로 둔다. 큰 페이지는 메모리보다 지연이 문제다. 템플릿의 `read_request_timeout`은 10초라 페이지 30,000행 수준의 동시 부하면 시간 초과가 난다.
+- 재지 않은 것: 쓰기·컴팩션 동시 부하, 느린 클라이언트, 다중 파티션 `IN`.
+
+## 보존 표 복원 (nodetool import)
+
+r8에서 쓴 데이터를 r9에서 스냅샷으로 뜨고, `DROP KEYSPACE`, 재생성, 가져오기까지 재현했다. 41의 `DESCRIBE` 그대로 만든 표 10개, 표마다 1,995행에서 값, writetime, SAI 답이 가져오기·재시작·컴팩션 뒤에도
+일치했고 ERROR는 0이었다. 앱을 실제로 띄운 순서는 재현하지 않았고 표는 CQL로 만들었다.
+
+```
+nodetool snapshot -t keep-tables -kt pp.<table>,pp.<table>,...
+nodetool import -cd pp <table> <data>/pp/<table>-<옛 ID>/snapshots/keep-tables
+```
+
+- **`-cd`(`--copy-data`) 필수.** 없으면 파일이 스냅샷에서 빠져나간다(26개 → 2개).
+- 스냅샷은 `DROP KEYSPACE` 뒤에도 옛 ID 디렉터리에 남고, 다시 만든 표는 ID가 다르다.
+- 표가 아직 없으면 `ColumnFamilyStore for pp/<table> not found`로 실패하고 아무것도 바뀌지 않는다. 표를 만든 뒤 다시 실행한다.
+- SAI는 인덱스가 있는 표에 가져와도, 가져온 뒤 `CREATE INDEX`해도 된다.
+- 지금 판이 만들지 않는 옛 표는 가져올 곳이 없으니 스냅샷 전에 `DESCRIBE`를 저장해 둔다.
+
 ## 플랫폼 쪽 변경
 
 - 새 설치 마이그레이션(V9·V32 등)이 `timeseries_tiering` 정책을 거는 부분 → `frozen_format = 'columnar'`로 바꾼다. 정책만 남기면 오류는 없지만
@@ -110,5 +156,5 @@ p99는 55 → 56 ms. 수명주기 시험과 같이 돌린 값이다.
 - 커서 컴팩션은 tscol을 읽지도 쓰지도 않는다(자동으로 반복자 파이프라인).
 - 포크 기본값 변경: ONE/LOCAL_ONE 로컬 읽기의 메모리 응답 한도를 512행·64KiB에서 20,000행·16MiB로 올렸다
   (`cassandra.data_response_in_memory_max_rows_cl_one`, `..._max_size_cl_one`). 하루치 조회가 옛 한도를 넘으면 페이지를 직렬화했다가
-  바로 다시 풀었고, JFR에서 컬럼형 읽기 시간의 절반 이상이 거기 쓰였다. 최악 메모리는 16MiB × `concurrent_reads`(32면 약 512MiB)다.
-  힙이 작은 설치는 JVM 옵션으로 낮춘다. QUORUM 등 다른 일관성 수준은 128행·16KiB 그대로다.
+  바로 다시 풀었고, JFR에서 컬럼형 읽기 시간의 절반 이상이 거기 쓰였다. 메모리는 아래 "읽기 응답 한도와 메모리"를 본다.
+  QUORUM 등 다른 일관성 수준은 128행·16KiB 그대로다.
