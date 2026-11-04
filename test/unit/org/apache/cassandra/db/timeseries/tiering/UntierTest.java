@@ -64,10 +64,11 @@ public class UntierTest extends CQLTester
     public void chunksBecomeRowsAgainAndTheShadowTablesGo() throws Throwable
     {
         createTable("CREATE TABLE %s (tag text, ts timestamp, v double, n int, PRIMARY KEY (tag, ts)) WITH compaction = {'class': 'TimeSeriesCompactionStrategy'}");
-        setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
+        // Explicit old writetimes, written before the policy exists (its write guard would refuse them after).
         for (int i = 0; i < 120; i++)
             execute("INSERT INTO %s (tag, ts, v, n) VALUES (?, ?, ?, ?) USING TIMESTAMP ?",
                     "t" + (i % 2), new Date(i * 60_000L), (double) i, i % 3 == 0 ? null : i, 100L + i);
+        setPolicy("{\"hot_window\":\"2h\",\"chunk_window\":\"1h\"}");
         UntypedResultSet before = execute("SELECT tag, ts, v, n FROM %s");
         assertEquals(120, before.size());
 
