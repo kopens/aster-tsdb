@@ -155,8 +155,8 @@ public final class BitPacking
      *
      * <p>Every byte of that range is written, including the zero-filled remainder of the final
      * word: the destination may be a reused scratch buffer, and §5 rule 5 exists because an encoder
-     * that leaks stale bytes into padding produces byte-different output for identical input,
-     * livelocks the re-encoder, and leaves every round-trip test green.
+     * that leaks stale bytes into padding produces byte-different output for identical input
+     * and leaves every round-trip test green.
      */
     public static int pack(long[] values, int count, int width, ByteBuffer dst)
     {
@@ -321,9 +321,7 @@ public final class BitPacking
      *
      * <p>The tie-break is a determinism rule, not a preference (§5 rule 3). Two widths can cost
      * exactly the same number of bytes; whichever one the encoder picks must be a function of the
-     * input alone, because a replica that picks the other produces a byte-different chunk,
-     * {@code chunkUnchanged} reports a difference, and every chunk is rewritten every cycle -- a
-     * failure that presents as a capacity problem, not as a codec bug.
+     * input alone, because a replica that picks the other produces a byte-different chunk.
      *
      * <p>All 65 widths are scored from one pass: a 65-bucket histogram of
      * {@code 64 - numberOfLeadingZeros(v)} (the unsigned bit length; 0 for zero, 64 for a value

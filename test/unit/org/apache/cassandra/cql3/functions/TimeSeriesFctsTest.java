@@ -577,8 +577,8 @@ public class TimeSeriesFctsTest extends CQLTester
     }
 
     /**
-     * Gap-fill on a {@code CLUSTERING ORDER BY (ts DESC)} table -- the industrial idiom, and the shape the
-     * tiered-storage work is built around. {@link org.apache.cassandra.db.aggregation.TimeBucketGapFiller}
+     * Gap-fill on a {@code CLUSTERING ORDER BY (ts DESC)} table -- the industrial idiom.
+     * {@link org.apache.cassandra.db.aggregation.TimeBucketGapFiller}
      * requires rows grouped by partition and <em>ascending</em> bucket within a partition, and nothing
      * enforces it, so this combination has to be pinned rather than assumed.
      */

@@ -250,8 +250,8 @@ public final class ChunkV4BlockTable
             dst.put((byte) blockEncoding);
             dst.put((byte) blockFlags);
             // §5 rule 5: written, not skipped. An encoder that left these two bytes to whatever the
-            // scratch buffer held would emit different bytes for identical input, livelock the
-            // re-encoder, and pass every round-trip test in the suite.
+            // scratch buffer held would emit different bytes for identical input and pass every
+            // round-trip test in the suite.
             dst.putShort((short) 0);
         }
     }

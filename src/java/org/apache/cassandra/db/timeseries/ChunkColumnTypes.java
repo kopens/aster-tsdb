@@ -15,7 +15,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.cassandra.db.timeseries.tiering;
+package org.apache.cassandra.db.timeseries;
 
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.AsciiType;
@@ -27,13 +27,10 @@ import org.apache.cassandra.db.marshal.SimpleDateType;
 import org.apache.cassandra.db.marshal.TimeType;
 import org.apache.cassandra.db.marshal.TimestampType;
 import org.apache.cassandra.db.marshal.UTF8Type;
-import org.apache.cassandra.db.timeseries.ChunkV4Codec;
-import org.apache.cassandra.db.timeseries.ChunkV4Directory;
-import org.apache.cassandra.db.timeseries.StatOrder;
 
 /**
- * Maps a base-table column's {@link AbstractType} onto the chunk-format-v4 type code the re-encoder
- * should encode its values with, and onto the {@link StatOrder} its pruning statistics may declare.
+ * Maps a table column's {@link AbstractType} onto the chunk-format-v4 type code its values are
+ * encoded with, and onto the {@link StatOrder} its pruning statistics may declare.
  * <p>
  * The <b>only</b> thing a type code selects is which compression the column's <em>serialized</em>
  * bytes go through -- it never changes what those bytes are (v4 §4). Every code round-trips the
@@ -77,8 +74,8 @@ import org.apache.cassandra.db.timeseries.StatOrder;
  * {@code INT64}, but {@link TimeType} compares unsigned while {@code INT64} extrema are signed, so
  * it declares {@code NONE} and carries no chunk statistics (v4 §4, and the risk §12 ranks fourth).
  * <p>
- * Counter columns and non-frozen (multi-cell) columns never reach here --
- * {@link TieringPolicy#unsupportedSchemaError} rejects those tables outright.
+ * Counter columns and non-frozen (multi-cell) columns never reach here: {@link RowBlockCodec} keeps them out of its
+ * blocks.
  * <p>
  * The mapping is per column <em>type</em>, but a chunk records a type code per column per chunk,
  * and {@link ChunkV4Codec#encode} downgrades a column to {@code TYPE_OPAQUE} (forcing

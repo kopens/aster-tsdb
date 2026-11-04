@@ -23,7 +23,7 @@ import java.util.Set;
 import java.util.SortedMap;
 
 /**
- * The columnar chunk codec entry point the tiering tree consumes: many named columns per chunk
+ * The columnar chunk codec entry point: many named columns per chunk
  * against one shared timestamp axis, instead of the one-column-per-chunk layout of the retired
  * single-column format (version 2).
  * <p>
@@ -34,8 +34,7 @@ import java.util.SortedMap;
  * are unchanged and v4 was built to slot in behind them:
  * <ul>
  *   <li>{@link ChunkV4Codec.Cursor} implements both {@link ColumnarCursor} and
- *       {@link ArrayValueCursor}, so {@code ChunkReadSupport}, {@code TieredStorageService} and
- *       {@code ColdWindowChunkFlush} consume it without a shape change;</li>
+ *       {@link ArrayValueCursor}, so readers consume it without a shape change;</li>
  *   <li>the header peeks below read offsets 0/1/5/13, which v4 deliberately kept at v3's
  *       positions (v4 §3) precisely so these stay O(1) header lookups;</li>
  *   <li>corruption is {@link IllegalArgumentException} and the read path skips the one chunk; a
@@ -43,8 +42,7 @@ import java.util.SortedMap;
  *       {@link UnsupportedChunkFormatException} that must never be swallowed. The classification
  *       lives in {@link ChunkCodecs#unsupportedVersion}, in one place;</li>
  *   <li>encoding is byte-deterministic: identical input encodes to identical bytes on every node,
- *       JVM and JIT tier, which is what lets the re-encoder's {@code chunkUnchanged} compare
- *       payload bytes (v4 §5).</li>
+ *       JVM and JIT tier, so payload bytes can be compared (v4 §5).</li>
  * </ul>
  * <p>
  * <b>Buffer contract for decoded values</b> (carried over unchanged from v3, restated because every
@@ -62,8 +60,7 @@ import java.util.SortedMap;
  * bitmaps, the 25-byte-header encode/decode -- deleted together with the MSB-first
  * {@code BitWriter}/{@code BitReader} pair, {@code TimestampCodec}, {@code Chimp128Codec} and
  * {@code AlpCodec}'s v3 container framing, once v4 became the only format written and read. No v3
- * chunk was ever written by a production deployment (tiering was never enabled), so no v3 read
- * path was kept: all that remains of v3 is its version byte, which
+ * chunk was ever written by a production deployment, so no v3 read path was kept: all that remains of v3 is its version byte, which
  * {@link ChunkCodecs#unsupportedVersion} rejects as a removed <em>format</em>
  * ({@link UnsupportedChunkFormatException}), never as one corrupt chunk.
  */
@@ -76,8 +73,8 @@ public final class ColumnarChunkCodec
      * Hard per-chunk row limit. The format itself would take any positive {@code int}, but a chunk
      * is decoded whole (every projected column materialises one row-indexed primitive array), so an
      * unbounded row count is an unbounded allocation on the read path. Callers that assemble chunks
-     * from live data (the tiering re-encoder) pre-check against this while still paging, so an
-     * over-dense window is reported as a configuration problem instead of failing here.
+     * from live data pre-check against this while still paging, so an over-dense window is reported
+     * as a configuration problem instead of failing here.
      */
     public static final int MAX_ROWS = 16_777_216;
 
@@ -89,8 +86,7 @@ public final class ColumnarChunkCodec
      * Encodes one chunk in the v4 layout: routes to {@link ChunkV4Codec#encode} at v4.0's block
      * size. The returned payload spans exactly one chunk from position 0 to its limit, is
      * heap-backed and big-endian, and is a total function of the input -- identical rows encode to
-     * identical bytes on every node and JIT tier, which the re-encoder's {@code chunkUnchanged}
-     * byte comparison depends on (v4 §5).
+     * identical bytes on every node and JIT tier (v4 §5).
      *
      * @param columns one {@link ChunkV4Codec.ColumnInput} per column. Any {@link SortedMap} is
      *                accepted and its comparator is ignored: the encoder re-sorts into natural
@@ -112,8 +108,7 @@ public final class ColumnarChunkCodec
      * format (1, 2, 3) throws {@link UnsupportedChunkFormatException}, which callers must never
      * swallow. Note that v4 opens sections lazily, so corruption <em>inside a column's blocks</em>
      * can also surface from a later {@code advance()} -- a caller that needs the whole window
-     * validated up front (the transparent-read path's all-or-nothing skip contract) must walk the
-     * cursor before emitting anything, as {@code ChunkReadSupport} does.
+     * validated up front must walk the cursor before emitting anything.
      */
     public static ColumnarCursor cursor(ByteBuffer payload, Set<String> projection)
     {
@@ -201,13 +196,10 @@ public final class ColumnarChunkCodec
      * {@link ColumnarCursor#getBytes} would wrap, handed over bare.
      * <p>
      * Deliberately <b>not</b> folded into {@link ColumnarCursor}. That interface's contract is the
-     * {@link ByteBuffer} one documented on this class, and its other callers -- the re-encoders in
-     * {@code TieredStorageService} and {@code ColdWindowChunkFlush} -- feed what they read straight
-     * back into {@link ColumnarChunkCodec#encode}, which takes {@code ByteBuffer}s; wrapping is not
-     * waste for them.
-     * A reader that would only unwrap the buffer again (the transparent-read path in
-     * {@code ChunkReadSupport}, which assembles {@code ArrayCell}s) tests for this interface instead,
-     * so the fast path stays optional and any cursor that does not offer it still works.
+     * {@link ByteBuffer} one documented on this class, which suits a caller feeding what it reads straight
+     * back into {@link ColumnarChunkCodec#encode}.
+     * A reader that would only unwrap the buffer again (one assembling {@code ArrayCell}s) tests for
+     * this interface instead, so the fast path stays optional and any cursor that does not offer it still works.
      * <p>
      * The array carries the same immutability contract as the buffers, and for a constant or a
      * dictionary-encoded column it <em>is</em> the shared backing array rather than a copy.

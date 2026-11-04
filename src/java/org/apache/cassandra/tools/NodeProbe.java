@@ -95,8 +95,6 @@ import org.apache.cassandra.db.compression.CompressionDictionaryManagerMBean;
 import org.apache.cassandra.db.compression.TrainingState;
 import org.apache.cassandra.db.guardrails.Guardrails;
 import org.apache.cassandra.db.guardrails.GuardrailsMBean;
-import org.apache.cassandra.db.timeseries.tiering.TieredStorageService;
-import org.apache.cassandra.db.timeseries.tiering.TieredStorageServiceMBean;
 import org.apache.cassandra.db.virtual.CIDRFilteringMetricsTable;
 import org.apache.cassandra.db.virtual.CIDRFilteringMetricsTableMBean;
 import org.apache.cassandra.fql.FullQueryLoggerOptions;
@@ -194,7 +192,6 @@ public class NodeProbe implements AutoCloseable
     protected AutoRepairServiceMBean autoRepairProxy;
     protected AsyncProfilerMBean asyncProfilerProxy;
     protected GuardrailsMBean grProxy;
-    protected TieredStorageServiceMBean tieredStorageProxy;
     protected volatile Output output;
 
     protected CIDRFilteringMetricsTableMBean cfmProxy;
@@ -347,9 +344,6 @@ public class NodeProbe implements AutoCloseable
 
             name = new ObjectName(Guardrails.MBEAN_NAME);
             grProxy = JMX.newMBeanProxy(mbeanServerConn, name, GuardrailsMBean.class);
-
-            name = new ObjectName(TieredStorageService.MBEAN_NAME);
-            tieredStorageProxy = JMX.newMBeanProxy(mbeanServerConn, name, TieredStorageServiceMBean.class);
         }
         catch (MalformedObjectNameException e)
         {
@@ -1475,21 +1469,6 @@ public class NodeProbe implements AutoCloseable
     public List<Map<String, String>> listPendingHints()
     {
         return hsProxy.getPendingHints();
-    }
-
-    public void retier(String keyspace, String table)
-    {
-        tieredStorageProxy.retier(keyspace, table);
-    }
-
-    public String untier(String keyspace, String table, int rowsPerSecond)
-    {
-        return tieredStorageProxy.untier(keyspace, table, rowsPerSecond);
-    }
-
-    public List<String> tieringStatusRows()
-    {
-        return tieredStorageProxy.statusRows();
     }
 
     public void refreshSizeEstimates()

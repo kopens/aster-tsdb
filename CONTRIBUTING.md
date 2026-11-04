@@ -38,7 +38,7 @@ operator* of this build would notice — a new function, a behaviour change, a f
 that affects deployment. Refactors, test-only changes and documentation do not get one.
 
 ```
-Tiering: DROP TABLE refuses to orphan or destroy the chunk table
+TSCS: a parked window no longer hides in the freeze backlog
 
 <the body explaining why>
 

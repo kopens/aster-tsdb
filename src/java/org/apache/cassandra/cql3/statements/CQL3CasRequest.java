@@ -263,9 +263,6 @@ public class CQL3CasRequest implements CASRequest
                                                      new ClusteringIndexSliceFilter(Slices.ALL, false),
                                                      PotentialTxnConflicts.ALLOW);
 
-        // Tiered storage: this read decides the conditions and does not see chunked rows, so refuse a
-        // condition on a clustering that may live only in a chunk rather than answer it wrongly.
-        org.apache.cassandra.db.timeseries.tiering.TieredWrites.refuseConditionsOnColdData(metadata, conditions.navigableKeySet());
         ClusteringIndexNamesFilter filter = new ClusteringIndexNamesFilter(conditions.navigableKeySet(), false);
         return SinglePartitionReadCommand.create(metadata, nowInSec, key, columnFilter, filter);
     }
@@ -311,11 +308,6 @@ public class CQL3CasRequest implements CASRequest
 
         PartitionUpdate partitionUpdate = updateBuilder.build();
         IndexRegistry.obtain(metadata).validate(partitionUpdate, clientState);
-        // Tiered storage: cold data is immutable once chunked. Conditional writes never build their
-        // update through ModificationStatement.getMutations, so this is where the rule has to be
-        // enforced for `DELETE ... IF EXISTS` and friends -- and for conditional BATCH, which shares
-        // this request object.
-        org.apache.cassandra.db.timeseries.tiering.TieredWrites.guardColdUpdate(partitionUpdate);
 
         return partitionUpdate;
     }

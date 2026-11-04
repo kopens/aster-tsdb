@@ -21,6 +21,10 @@
 설계: [docs/superpowers/specs/2026-11-04-columnar-frozen-sstable-design.md](../../docs/superpowers/specs/2026-11-04-columnar-frozen-sstable-design.md).
 이 문서는 운영 노드(41)와 2026.11 설치를 옮기는 순서다.
 
+**이전 도구는 없다.** 그림자 테이블 계층화(재인코더, 투명 읽기, 쓰기 가드, `timeseries_tiering` 정책, 그림자 테이블 관리, `retier`·`tieringstatus`,
+가상 테이블)와 `nodetool untier`는 이 릴리즈에서 전부 지워졌다. tscol이 이것을 대체하며, 옛 청크를 되돌려 넣는 경로는 두지 않는다
+(2026-11-04 사용자 결정).
+
 ## 한눈에
 
 | | 그림자 테이블 계층화 (r8까지) | tscol (이 릴리즈부터) |
@@ -32,52 +36,50 @@
 | 동결된 데이터에 쓰기·삭제·TTL·필터·SAI | 일부 거부 | 전부 보통 Cassandra 동작 |
 | 보존 | `cold_window` | TSCS `retention`(창 통째로) |
 
-## 릴리즈 구성
+## 청크가 있는 설치에서 벌어지는 일
 
-- **릴리즈 N (이번):** tscol 형식 + TSCS `frozen_format` + `nodetool untier`. 옛 계층화 코드는 **남아 있다** — `untier`가 옮기는
-  동안 아직 옮기지 않은 청크가 투명 읽기로 계속 보이게 하려는 것이다.
-- **릴리즈 N+1:** 옛 계층화 코드(재인코더, 투명 읽기, 쓰기 가드, `timeseries_tiering` 정책, 그림자 테이블 관리, `retier`·`tieringstatus`,
-  가상 테이블)를 지운다. 그 전에 모든 노드에서 `untier`가 끝나 있어야 한다.
+이 빌드로 올리면:
+
+- **청크로 들어간 창이 조회에서 보이지 않는다.** 재인코더가 원본 행을 범위 톰스톤으로 지운 뒤라 베이스 표에는 그 창의 행이 없고, 청크를 합쳐 주던 투명 읽기는
+  없어졌다. 아직 재인코딩되지 않은 창은 그대로 보인다. 오류는 나지 않고 그저 행이 없다.
+- **`<table>__chunks` 파일은 디스크에 그대로 남는다.** 지워지지 않고, 새로 쓰이지도 않고, 공간은 계속 차지한다. r8은 이 파일을 읽을 수 있으니 필요하면 r8로 되돌려
+  청크를 읽는다. 단 r8은 tscol 파일을 읽지 못하므로, 되돌릴 표에 `frozen_format = 'columnar'`을 켜기 전에 판단한다.
+- **`__chunks`, `__chunk_coverage`, `__tags`는 이제 보통 표다.** `SELECT`도 `DROP TABLE`도 평범하게 된다. 베이스 표를 지워도 같이 지워지지 않고, 베이스 표 `TRUNCATE`가
+  따라오지도 않고, `DROP` 순서 제한도 없다. 필요 없다고 판단되면 손으로 지운다. 지운 뒤에는 r8로도 그 데이터를 읽을 수 없다.
+- **스키마의 `timeseries_tiering` 확장은 남아 있어도 무시된다.** 표는 정상으로 올라오고 값은 아무 일도 하지 않는다. TSCS 옵션 `tiering_aware_freeze`도 받아들이고 무시한다.
+  떼고 싶으면 `ALTER TABLE ... WITH extensions = {}`.
+- 쿼럼 하한, 콜드 쓰기 거부, 조건부 쓰기 거부, 파티션 키 없는 범위 스캔 거부 같은 옛 가드도 없어졌다. 모든 표가 보통 표처럼 답한다.
 
 ## 41 절차 (데이터 초기화 경로 — 2026-11-04 사용자 결정)
 
-41은 tscol 후보가 오른 뒤 플랫폼 데이터를 초기화한다(새 ID 체계로 처음부터 다시 쌓음). 그래서 41에는 `untier`가 필요 없다:
+41은 tscol 후보가 오른 뒤 플랫폼 데이터를 초기화한다(새 ID 체계로 처음부터 다시 쌓음):
 
 1. core 마이그레이션 변경(V9·V32의 `timeseries_tiering` 정책 → `frozen_format = 'columnar'`)이 먼저 들어간 플랫폼 이미지와 tscol 후보 배포.
-   정책을 거는 마이그레이션이 남아 있으면 이 판에서는 옛 계층화가 다시 켜진다.
-2. `DROP KEYSPACE pp` — 키스페이스 DROP에는 계층화 가드가 없어 그림자 표까지 같이 지워진다. 표 단위 `DROP TABLE`은 그림자 표가 있으면
-   거부되고, `TRUNCATE`는 정책을 남긴다.
+2. `DROP KEYSPACE pp` — 그림자 표까지 같이 지워진다.
 3. 표마다 `allow_auto_snapshot = true`라 DROP이 스냅샷을 남긴다. 버릴 데이터면 `nodetool clearsnapshot --all -- pp`.
 4. 부팅 마이그레이션이 pp를 새로 만든다(TSCS `frozen_format = 'columnar'`). 커버리지 원장·그림자 표는 없다.
 
-`untier` 리허설은 41 데이터 **사본**으로만 한다(고객판 절차 검증용).
-
 ## 2026.11 설치(옛 계층화 데이터가 있는 노드) 절차
 
-1. **릴리즈 N 이미지 배포**(플랫폼 이미지로만). 기동 확인: 노드 UN, ERROR 0, 두 계층화 테이블의 `system_views.timeseries_tiering`이 여전히 보임.
-2. **스냅샷:** `nodetool snapshot -t pre-untier pp` — 하드링크라 디스크를 거의 쓰지 않는다. `untier`가 끝나고 숙성이 끝나면
-   `nodetool clearsnapshot -t pre-untier pp`.
-3. **작은 테이블부터:** `nodetool untier pp tm_asset_data_based_second -r 50000`
-   - 출력: `restored N rows from M chunks; shadow tables dropped`. `dropped`가 아니면(청크가 남음) 원인을 로그에서 보고 다시 실행 — 멱등이다.
-   - 확인: `SELECT count(*)`로 몇 태그의 하루치가 이전과 같은지, `pp.tm_asset_data_based_second__chunks`가 없어졌는지.
-4. **`nodetool untier pp tm_tag_point -r 50000`** — 41 기준 수 시간. 같은 확인.
-5. **컬럼형 동결 켜기**(플랫폼 core 마이그레이션으로 — 스키마는 플랫폼 소관): 기존 compaction 옵션에 `'frozen_format': 'columnar'` 추가.
-   `freeze_after`를 12h~1d로 낮추는 것도 같이 검토(gc_grace 86400 < freeze_after 유지).
-6. **관찰:** 다음 동결부터 `-tscol-Data.db` 파일이 생긴다(`ls <data>/pp/tm_tag_point-*/*tscol*`). 디스크 사용량, 조회 지연, ERROR, 동결 소요.
-7. **3일 숙성 → 승격.**
+1. **먼저 판단한다.** 위 "청크가 있는 설치에서 벌어지는 일"대로 청크로 들어간 창은 이 빌드에서 안 보인다. 그 기간의 데이터가 필요한 설치는 올리기 전에
+   고객과 합의한다. 지금 이 설치의 청크를 옮겨 주는 도구는 없다.
+2. **스냅샷:** `nodetool snapshot -t pre-tscol pp` — 하드링크라 디스크를 거의 쓰지 않는다. `__chunks`도 함께 잡힌다. 숙성이 끝나면 `nodetool clearsnapshot -t pre-tscol pp`.
+3. **이미지 배포**(플랫폼 이미지로만). 기동 확인: 노드 UN, ERROR 0, 계층화 표가 올라와 있고 최근 창이 조회됨.
+4. **컬럼형 동결 켜기**(플랫폼 core 마이그레이션으로 — 스키마는 플랫폼 소관): 기존 compaction 옵션에 `'frozen_format': 'columnar'` 추가.
+   `freeze_after`를 12h~1d로 낮추는 것도 같이 검토(gc_grace 86400 < freeze_after 유지). 이 단계부터는 r8로 그 표를 되돌릴 수 없다.
+5. **관찰:** 다음 동결부터 `-tscol-Data.db` 파일이 생긴다(`ls <data>/pp/tm_tag_point-*/*tscol*`). 디스크 사용량, 조회 지연, ERROR, 동결 소요.
+6. **3일 숙성 → 승격.**
+7. 청크가 더는 필요 없다고 판단되면 `DROP TABLE pp.<table>__chunks`(`__chunk_coverage`, `__tags`도)로 공간을 돌려받는다.
 
 ## 플랫폼 쪽 변경
 
-- 새 설치 마이그레이션(V9·V32 등)이 `timeseries_tiering` 정책을 거는 부분 → `frozen_format = 'columnar'`로 바꾼다(릴리즈 N+1부터는
-  정책이 무시된다).
-- 2026.11 고객 설치 업그레이드: 이미지 교체 직후 3·4단계(`untier`)를 업그레이드 절차에 넣는다.
-- `tm_asset_data_based_second`의 계층화 해제 마이그레이션(V33, hot_window 31d)은 `untier`가 정책을 떼고 그림자 테이블까지
-  지우므로 2단계(33일 뒤 DROP)가 필요 없어진다. V33은 정책이 없으면 no-op이라 그대로 둬도 안전하다.
+- 새 설치 마이그레이션(V9·V32 등)이 `timeseries_tiering` 정책을 거는 부분 → `frozen_format = 'columnar'`로 바꾼다. 정책만 남기면 오류는 없지만
+  표에 압축이 전혀 걸리지 않는다.
+- 2026.11 고객 설치 업그레이드: 위 1·2단계를 업그레이드 절차에 넣는다.
+- `tm_asset_data_based_second`의 계층화 해제 마이그레이션(V33, hot_window 31d)은 이제 아무 효과가 없다. 그대로 둬도 안전하다.
 
 ## 알아둘 것
 
-- 되살린 행에는 TTL이 없다(청크에도 없었다). 보존은 TSCS `retention`이 창 단위로 한다.
-- 되살린 행의 writetime은 `max_row_writetime + 1`(청크가 갖고 있던 근사값). 원래 정확한 셀별 writetime은 청크화 때 이미 없어졌다.
 - 부분 스트리밍: 보내는 쪽은 Data.db 구간을 그대로 보내고, 받는 쪽이 헤더의 형식을 보고 tscol 본문을 풀어 tscol SSTable로 다시 쓴다.
 - 커서 컴팩션은 tscol을 읽지도 쓰지도 않는다(자동으로 반복자 파이프라인).
 - 포크 기본값 변경: ONE/LOCAL_ONE 로컬 읽기의 메모리 응답 한도를 512행·64KiB에서 20,000행·16MiB로 올렸다

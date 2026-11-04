@@ -29,7 +29,6 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStoreMBean;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.compaction.CompactionManager;
-import org.apache.cassandra.db.timeseries.tiering.TieredStorageService;
 import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.gms.FailureDetectorMBean;
 import org.apache.cassandra.gms.Gossiper;
@@ -93,13 +92,6 @@ public class InternalNodeProbe extends NodeProbe
         memProxy = ManagementFactory.getMemoryMXBean();
         runtimeProxy = ManagementFactory.getRuntimeMXBean();
         asyncProfilerProxy = AsyncProfilerService.instance();
-        // `nodetool retier` / `tieringstatus`. In a real node NodeProbe.connect() builds this proxy
-        // from the MBean CassandraDaemon.setup() registered; in-JVM instances never run setup(), so
-        // without this assignment every tiering nodetool command NPEs on a null proxy. Assigning the
-        // singleton directly (rather than calling TieredStorageService.setup()) is what every other
-        // proxy here does, and it deliberately leaves the 60s background sweeper unscheduled so a
-        // dtest's re-encode cycles happen only when it asks for them.
-        tieredStorageProxy = TieredStorageService.instance;
     }
 
     @Override

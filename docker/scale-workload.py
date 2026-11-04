@@ -16,13 +16,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Loader + timed query workload for the aster-tsdb scale / tiering benchmark.
+"""Loader + timed query workload for the aster-tsdb scale benchmark.
 
 Models the *production* table shape (`tm_tag_point`): one wide row per sample with static
 per-tag metadata, several columns that are constant in practice, one column that is entirely
 null, one high-entropy int, one slowly-varying numeric-looking text reading and a state bit.
-That mix -- not a single high-entropy double -- is what the columnar (v3) chunk format is
-designed for, so it is the shape the tiering trade-off has to be measured on.
+That mix -- not a single high-entropy double -- is what the columnar chunk format is designed
+for, so it is the shape a frozen columnar window has to be measured on.
 
 Runs *inside* the container (see docker/scale-test.sh) using the python driver that ships with
 cqlsh, so the measured query times are the real client-observed CQL execution times without any
@@ -62,7 +62,7 @@ IN_FLIGHT = 96             # async batches in flight per loader process
 
 # Constant-in-production values. These are what make the CONSTANT / ALL_NULL encodings pay:
 # each costs a full cell (value + per-cell metadata) per row in the base table and O(1) bytes
-# per chunk once tiered.
+# per block once frozen as tscol.
 QUALITY_GOOD = 192
 ERROR_CODE_NONE = 0
 ATTRIBUTE_EMPTY = {}       # frozen<map<text,text>>, empty in every production row
@@ -410,8 +410,8 @@ def build_plan(a, rows_per_series):
              "SELECT time_bucket(1h, timestamp), avg(latency), min(latency), max(latency) FROM %s "
              "WHERE tag_id='%s' GROUP BY tag_id, time_bucket(1h, timestamp);" % (tbl, agg)),
         ]),
-        # Row reads are where the wide shape actually costs something: a tiered read has to rebuild
-        # all 8 regular columns out of one chunk payload, and a projection should be able to skip
+        # Row reads are where the wide shape actually costs something: a columnar read has to rebuild
+        # all 8 regular columns out of one block, and a projection should be able to skip
         # the columns it did not ask for.
         ('row reads (all 16 columns vs. projections) -- type-independent', [
             ("newest 1000 rows, SELECT * -- type='%s' tag (%s)" % (bool_kind, bool_tag),
@@ -481,11 +481,7 @@ def build_plan(a, rows_per_series):
              "percentile(value_numeric, 0.95) AS p95 FROM %s WHERE tag_id='%s' "
              "GROUP BY tag_id, time_bucket(1h, timestamp);" % (tbl, agg)),
         ]),
-        # KNOWN LIMITATION, not a benchmark result: a range scan does not merge chunk data back in,
-        # so on a fully tiered table this returns only the surviving static rows. A near-instant
-        # answer below is a WRONG ANSWER, never a speedup.
-        ('full table scan (%s rows) -- WRONG ANSWER on a tiered table (known limitation)'
-         % f'{a.rows:,}', [
+        ('full table scan (%s rows)' % f'{a.rows:,}', [
             ("count(*) over the whole table",
              "SELECT count(*) FROM %s;" % tbl),
         ]),

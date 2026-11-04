@@ -511,45 +511,109 @@ check_at 3 "node 3 serves the repaired rows" \
 check "the whole table reads back at ALL after the repair" \
     "CONSISTENCY ALL; SELECT count(*) FROM ct.tscs;" "^ *$((WINDOWS * FLUSHES + 4))"
 
-section "tiered storage across three replicas"
-# TSCS, not the default compaction: since e3bec50b1d tiering refuses any other strategy (only TSCS's
-# freeze reclaims the rows the re-encoder hides), and a default-compaction table here is skipped by
-# every cycle -- no chunk table, and the "encoded exactly once" check fails. The integration test got
-# the same fix in d343bda4a6; this script is a manual CI job, so it was missed until 2026-11-01.
+section "tscol: a columnar frozen window on three replicas"
+# frozen_format = 'columnar' is node-local work on replicated data, like the freeze above: each replica rewrites its
+# own copy, so all three have to get there independently, and a read through any coordinator has to find the same
+# answer. Rows go into one closed window 30 minutes back, by explicit USING TIMESTAMP, in two flushes.
+TSCOL_W=$(( (NOW_MS / 60000 - 30) * 60000 ))
 cql_at 1 "
-CREATE TABLE IF NOT EXISTS ct.sensor (
-    tag_id text, timestamp timestamp, value double,
-    PRIMARY KEY (tag_id, timestamp)
-) WITH compaction = {'class':'TimeSeriesCompactionStrategy'};
+CREATE TABLE IF NOT EXISTS ct.tscolfz (
+    tag text, ts timestamp, value double,
+    PRIMARY KEY (tag, ts)
+) WITH read_repair = 'NONE'
+   AND compaction = {'class':'TimeSeriesCompactionStrategy',
+                     'timestamp_resolution':'MICROSECONDS',
+                     'window_size':'1m','freeze_after':'1m','frozen_format':'columnar'};
 " > /dev/null
 sleep 3
 
-TIERING_JSON='{"hot_window":"1h","chunk_window":"1h","interval":"5m","consistency":"QUORUM"}'
-WIN_MS=$(( (NOW_MS / 3600000 - 4) * 3600000 ))
-WIN_END_MS=$(( WIN_MS + 3600000 ))
+for f in 0 1; do
+    STMTS="CONSISTENCY ALL;"
+    for i in $(seq 0 29); do
+        V=$(( f * 30 + i ))
+        TS_MS=$(( TSCOL_W + V * 100 ))
+        STMTS="$STMTS INSERT INTO ct.tscolfz (tag, ts, value) VALUES ('t$(( V % 2 ))', $TS_MS, $V) USING TIMESTAMP $(( TS_MS * 1000 ));"
+    done
+    cql_at 1 "$STMTS" > /dev/null
+    for n in 1 2 3; do ntool_at "$n" flush ct tscolfz > /dev/null; done
+done
 
-check "ALTER TABLE installs the tiering policy cluster-wide" \
-    "ALTER TABLE ct.sensor WITH extensions = {'timeseries_tiering': '$TIERING_JSON'};
-     SELECT extensions FROM system_schema.tables WHERE keyspace_name='ct' AND table_name='sensor';" \
-    'timeseries_tiering'
-sleep 3
+# The live sstables only: repair and truncate can leave hard links under snapshots/ and backups/.
+tscol_files() {
+    $RUNTIME exec "$(node_of "$1")" sh -c "find / -path '*/data/ct/tscolfz-*' -name '*-tscol-Data.db' \
+        -not -path '*/snapshots/*' -not -path '*/backups/*' 2>/dev/null | wc -l" | tr -dc '0-9'
+}
+# wait_for_tscol: bounded, and leaves the last counts in T1/T2/T3 for the assertion that follows.
+wait_for_tscol() {
+    local _
+    for _ in $(seq 1 $((CONVERGE_TIMEOUT / 5))); do
+        T1="$(sstable_count 1 tscolfz)/$(tscol_files 1)"
+        T2="$(sstable_count 2 tscolfz)/$(tscol_files 2)"
+        T3="$(sstable_count 3 tscolfz)/$(tscol_files 3)"
+        [ "$T1" = 1/1 ] && [ "$T2" = 1/1 ] && [ "$T3" = 1/1 ] && break
+        printf '.'; sleep 5
+    done
+    echo
+}
 
-cql_at 1 "
-CONSISTENCY QUORUM;
-INSERT INTO ct.sensor (tag_id, timestamp, value) VALUES ('pump-01', $(( WIN_MS +  300000 )), 10);
-INSERT INTO ct.sensor (tag_id, timestamp, value) VALUES ('pump-01', $(( WIN_MS +  900000 )), 20);
-INSERT INTO ct.sensor (tag_id, timestamp, value) VALUES ('pump-02', $(( WIN_MS + 1500000 )), 30);
-" > /dev/null
+printf '   waiting for the columnar freeze on all three nodes'
+wait_for_tscol
+assert "every node holds exactly one tscol sstable for the window (sstables/tscol)" \
+    "$T1 $T2 $T3" "1/1 1/1 1/1"
 
-# Every node re-encodes only the tags in its own primary ranges, so all three have to run for the
-# whole dataset to be covered -- and no tag may be encoded twice.
-for n in 1 2 3; do check_nodetool_at "$n" "node $n: nodetool retier runs one re-encode cycle" '' retier ct sensor; done
-check "every tag is encoded exactly once across the cluster (2 chunk rows)" \
-    "CONSISTENCY QUORUM; SELECT count(*) FROM ct.sensor__chunks;" '^ *2'
 for node in 1 2 3; do
-    check_at "$node" "node $node: transparent read returns the merged window" \
-        "CONSISTENCY QUORUM; SELECT count(*) FROM ct.sensor WHERE tag_id='pump-01' AND timestamp >= $WIN_MS AND timestamp < $WIN_END_MS;" \
-        '^ *2'
+    check_at "$node" "node $node: every row reads back (60)" \
+        "CONSISTENCY QUORUM; SELECT count(*) FROM ct.tscolfz;" '^ *60'
+    check_at "$node" "node $node: aggregates over the columnar window = 30 / 59" \
+        "CONSISTENCY QUORUM; SELECT count(*), max(value) FROM ct.tscolfz WHERE tag='t1';" '^ *30 \| *59'
+    check_at "$node" "node $node: a point read finds its row" \
+        "CONSISTENCY QUORUM; SELECT value FROM ct.tscolfz WHERE tag='t0' AND ts=$(( TSCOL_W + 4200 ));" '^ *42'
+    check_at "$node" "node $node: a filter on a non-key column answers" \
+        "CONSISTENCY QUORUM; SELECT count(*) FROM ct.tscolfz WHERE value >= 50 ALLOW FILTERING;" '^ *10'
+done
+
+# Three replicas that froze the same rows separately have to validate as equal: this is the one path that reads a
+# tscol sstable into a Merkle tree.
+check_nodetool_at 1 "nodetool repair succeeds over the tscol table" '' repair -full ct tscolfz
+for n in 1 2 3; do ntool_at "$n" flush ct tscolfz > /dev/null; done
+check "every row still reads back at ALL after the repair (60)" \
+    "CONSISTENCY ALL; SELECT count(*) FROM ct.tscolfz;" '^ *60'
+
+# The same shape as the repair section above: node 3 misses a late write into the frozen window, gets it by streaming,
+# and all three refreeze back to one tscol sstable.
+$RUNTIME stop "$N3" > /dev/null 2>&1
+printf '   waiting for node 3 to be seen as down'
+for _ in $(seq 1 24); do
+    $RUNTIME exec "$N1" nodetool status 2>/dev/null | grep -qE '^DN[[:space:]]' && break
+    printf '.'; sleep 5
+done
+echo
+for node in 1 2; do
+    check_at "$node" "node $node: the columnar window reads at QUORUM with node 3 stopped" \
+        "CONSISTENCY QUORUM; SELECT count(*) FROM ct.tscolfz;" '^ *60'
+done
+LATE_MS=$(( TSCOL_W + 7000 ))
+check "a late write into the frozen window succeeds at QUORUM" \
+    "CONSISTENCY QUORUM;
+     INSERT INTO ct.tscolfz (tag, ts, value) VALUES ('late', $LATE_MS, 7) USING TIMESTAMP $(( LATE_MS * 1000 ));
+     SELECT count(*) FROM ct.tscolfz;" '^ *61'
+
+$RUNTIME start "$N3" > /dev/null 2>&1
+wait_for_cql "$N3"
+wait_for_up_normal 3
+
+for n in 1 2 3; do ntool_at "$n" flush ct tscolfz > /dev/null; done
+check_nodetool_at 3 "nodetool repair pulls the late row onto node 3" '' repair -full ct tscolfz
+check_at 3 "node 3 serves the repaired row" \
+    "CONSISTENCY ONE; SELECT value FROM ct.tscolfz WHERE tag='late' AND ts=$LATE_MS;" '^ *7'
+
+printf '   waiting for the refreeze on all three nodes'
+wait_for_tscol
+assert "late data refroze into one tscol sstable on every node (sstables/tscol)" \
+    "$T1 $T2 $T3" "1/1 1/1 1/1"
+for node in 1 2 3; do
+    check_at "$node" "node $node: every row reads back after the refreeze (61)" \
+        "CONSISTENCY ALL; SELECT count(*) FROM ct.tscolfz;" '^ *61'
 done
 
 echo

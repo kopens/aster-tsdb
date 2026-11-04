@@ -52,9 +52,8 @@ import java.util.Arrays;
  * carrying it: the value pipeline is {@code long} raw bits end to end, and the {@code double} view
  * exists only inside the decimal arithmetic, whose result is checked against the original bits.
  *
- * <p><b>Determinism.</b> Two replicas encoding the same window must produce byte-identical payloads
- * -- {@code TieredStorageService.chunkUnchanged} compares payload bytes -- so every choice made
- * here is a pure function of the input array:
+ * <p><b>Determinism.</b> Two replicas encoding the same window must produce byte-identical payloads,
+ * so every choice made here is a pure function of the input array:
  * <ul>
  *   <li>The {@code (e, f)} search samples with a <b>fixed integer stride</b> (never an RNG), scores
  *       all {@code 0 <= f <= e <= 18} pairs, and keeps the best {@link #CANDIDATE_LIMIT} under the

@@ -1,5 +1,8 @@
 # 계층화 전/후 실측 — 운영 테이블 형태
 
+> **역사 기록.** 그림자 테이블 계층화는 제거되었습니다(`timeseries_tiering`, 재인코더, 투명 읽기, `retier`·`tieringstatus`·`untier`). 이 문서는 그 설계의 기록이며
+> 현재 빌드에는 해당하지 않습니다. 현재 방식과 전환 절차는 [tscol-rollout.md](tscol-rollout.md)를 보십시오.
+
 계층화를 켜기 전과 후를 **같은 이미지·같은 노드 설정·같은 데이터·같은 CQL**로 측정한 결과입니다.
 스크립트: [`docker/scale-test.sh`](../../docker/scale-test.sh)(베이스라인) ·
 [`docker/tiering-bench.sh`](../../docker/tiering-bench.sh)(계층화). 원자료(하네스 출력 전문):

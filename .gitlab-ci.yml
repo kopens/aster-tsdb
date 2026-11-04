@@ -286,7 +286,7 @@ docker-integration-test:
 # MANUAL on every ref, including tags — deliberately NOT a release gate. Three JVMs at 2G plus this
 # job is more than a shared runner is guaranteed to have, and a release gate that fails on runner
 # capacity rather than on the product is worse than no gate. Play it by hand when the cluster path
-# has changed (compaction, streaming, tiering) or before a release worth the extra confidence.
+# has changed (compaction, streaming, tscol) or before a release worth the extra confidence.
 docker-cluster-test:
   # Throw-away work: a newer commit makes this run pointless, and the project has
   # ONE dedicated runner. auto_cancel_pending_pipelines is already enabled, but it

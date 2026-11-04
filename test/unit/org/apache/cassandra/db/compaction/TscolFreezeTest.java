@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.db.compaction;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Date;
@@ -35,6 +36,7 @@ import org.apache.cassandra.io.sstable.IScrubber;
 import org.apache.cassandra.io.sstable.IVerifier;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.bti.TscolFormat;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.OutputHandler;
 
@@ -99,7 +101,7 @@ public class TscolFreezeTest extends CQLTester
     }
 
     /**
-     * Windows frozen before frozen_format = 'columnar' was set -- or restored by nodetool untier -- are single
+     * Windows frozen before frozen_format = 'columnar' was set are single
      * row-format sstables that nothing would ever rewrite. Turning the option on makes each of them one freeze
      * candidate, converted once to tscol and then left alone.
      */
@@ -343,6 +345,52 @@ public class TscolFreezeTest extends CQLTester
         runOnlyFreezeTask(cfs);
         assertTrue(TscolFormat.is(Iterables.getOnlyElement(cfs.getLiveSSTables()).descriptor.getFormat()));
         return cfs;
+    }
+
+    /**
+     * The shadow-table tiering is gone, but a table it managed still carries its {@code timeseries_tiering}
+     * extension (and TSCS's {@code tiering_aware_freeze} option), and its {@code __chunks} table still exists. The
+     * value is ignored and the leftover table is an ordinary table: nothing refuses either, and the base table
+     * drops without first dropping what used to be its shadow.
+     */
+    @Test
+    public void leftoverTieringExtensionIsIgnored() throws Throwable
+    {
+        ByteBuffer policy = ByteBufferUtil.bytes("{\"hot_window\":\"7d\",\"chunk_window\":\"1h\"}");
+        createTable("CREATE TABLE %s (tag text, ts timestamp, v double, PRIMARY KEY (tag, ts)) WITH compaction = " +
+                    "{'class': 'TimeSeriesCompactionStrategy', 'window_size': '1m', 'freeze_after': '1m', " +
+                    "'frozen_format': 'columnar', 'tiering_aware_freeze': 'true'} " +
+                    "AND extensions = {'timeseries_tiering': 0x" + ByteBufferUtil.bytesToHex(policy) + "}");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        assertEquals(policy, cfs.metadata().params.extensions.get("timeseries_tiering"));
+
+        // Below the old hot_window, where a tiered read would have gone looking for chunks.
+        long windowMicros = ((System.currentTimeMillis() - 30 * 86_400_000L) / 60_000L * 60_000L) * 1000L;
+        for (int i = 0; i < 50; i++)
+            execute("INSERT INTO %s (tag, ts, v) VALUES ('a', ?, ?) USING TIMESTAMP ?", new Date(i * 1000L), (double) i, windowMicros + i);
+        flush();
+        assertEquals(50, execute("SELECT * FROM %s WHERE tag = 'a'").size());
+        assertEquals(50, execute("SELECT * FROM %s").size());
+
+        runOnlyFreezeTask(cfs);
+        assertTrue(TscolFormat.is(Iterables.getOnlyElement(cfs.getLiveSSTables()).descriptor.getFormat()));
+        assertEquals(50, execute("SELECT * FROM %s WHERE tag = 'a'").size());
+        assertEquals(7.0, execute("SELECT v FROM %s WHERE tag = 'a' AND ts = ?", new Date(7000L)).one().getDouble("v"), 0.0);
+
+        // What the tiered-write guards used to refuse: a delete into cold data.
+        execute("DELETE FROM %s WHERE tag = 'a' AND ts = ?", new Date(7000L));
+        assertEquals(49, execute("SELECT * FROM %s WHERE tag = 'a'").size());
+
+        String base = KEYSPACE + '.' + currentTable();
+        String chunks = base + "__chunks";
+        schemaChange("CREATE TABLE " + chunks + " (tag text, ts timestamp, chunk blob, PRIMARY KEY (tag, ts))");
+        execute("INSERT INTO " + chunks + " (tag, ts, chunk) VALUES ('a', 0, 0x00)");
+        execute("TRUNCATE " + base);
+        assertEquals("the old base table's TRUNCATE must not reach it", 1, execute("SELECT * FROM " + chunks).size());
+        schemaChange("DROP TABLE " + base);
+        assertEquals("nor its DROP", 1, execute("SELECT * FROM " + chunks).size());
+        schemaChange("DROP TABLE " + chunks);
     }
 
     private List<UntypedResultSet> run(List<String> queries) throws Throwable

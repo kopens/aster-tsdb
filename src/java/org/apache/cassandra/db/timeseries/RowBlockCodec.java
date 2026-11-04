@@ -41,7 +41,6 @@ import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.ColumnData;
 import org.apache.cassandra.db.rows.DeserializationHelper;
 import org.apache.cassandra.db.rows.Row;
-import org.apache.cassandra.db.timeseries.tiering.ChunkColumnTypes;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.DroppedColumn;
 import org.apache.cassandra.schema.TableMetadata;
@@ -366,7 +365,7 @@ public final class RowBlockCodec
         return rows;
     }
 
-    /** {@code cells} are in BTree order and one per column, the same reasoning as {@code ChunkReadSupport}'s buildDirect. */
+    /** {@code cells} are in BTree order and one per column, so the row's BTree can be built directly. */
     private static Object[] tree(Object[] cells, int count)
     {
         if (count == 0)

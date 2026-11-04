@@ -323,10 +323,8 @@ public class ChunkV4CodecTest
     }
 
     /**
-     * {@code encode(decode(encode(x))) == encode(x)} -- literally the tiering re-encoder's late-merge
-     * path. A violation does not corrupt anything; it makes {@code chunkUnchanged} report a
-     * difference forever, so every chunk is rewritten every cycle and the codec bug presents as a
-     * capacity problem (§12).
+     * {@code encode(decode(encode(x))) == encode(x)}: the encoder must be deterministic, so that a
+     * re-encode of unchanged data yields unchanged bytes (§12).
      */
     @Test
     public void reencodeIsIdempotent()

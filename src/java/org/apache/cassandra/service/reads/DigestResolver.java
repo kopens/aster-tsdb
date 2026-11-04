@@ -28,9 +28,7 @@ import org.apache.cassandra.db.ReadCommand;
 import org.apache.cassandra.db.ReadResponse;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.db.partitions.PartitionIterator;
-import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterators;
-import org.apache.cassandra.db.transform.Transformation;
 import org.apache.cassandra.locator.Endpoints;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Replica;
@@ -82,29 +80,7 @@ public class DigestResolver<E extends Endpoints<E>, P extends ReplicaPlan.ForRea
 
         if (!hasTransientResponse(responses))
         {
-            // Tiered storage: see TransparentReads.maybeWrap -- merged before the filter so
-            // tombstones still shadow chunk-decoded rows. No-op without a tiering policy.
-            UnfilteredPartitionIterator hot = dataResponse.payload.makeIterator(command);
-            UnfilteredPartitionIterator merged =
-                org.apache.cassandra.db.timeseries.tiering.TransparentReads.maybeWrap(command.metadata(), command, hot,
-                             replicaPlan().consistencyLevel());
-            PartitionIterator filtered = UnfilteredPartitionIterators.filter(merged, command.nowInSec());
-
-            // Upstream needs no counter here: it relies on every response having honoured the limit
-            // on the replica. A tiered read breaks that invariant -- maybeWrap joins chunk rows to the
-            // stream AFTER the replica applied its limit -- so without one, nothing ever tells the
-            // chunk source to stop and SelectStatement drains the whole partition before trimming
-            // (correct rows, but every window of the tag listed and decoded to answer a LIMIT 1).
-            // DataResolver.resolveInternal already counts in exactly this position; this is the same
-            // counter, with the same arguments, for the digests-agreed path.
-            // Gated on identity, not on a policy lookup: maybeWrap returns its input unchanged on
-            // every early-out, so an untiered read keeps upstream's behaviour byte for byte.
-            return merged == hot
-                   ? filtered
-                   : Transformation.apply(filtered,
-                                          command.limits().newCounter(command.nowInSec(), true,
-                                                                      command.selectsFullPartition(),
-                                                                      command.metadata().enforceStrictLiveness()));
+            return UnfilteredPartitionIterators.filter(dataResponse.payload.makeIterator(command), command.nowInSec());
         }
         else
         {

@@ -414,14 +414,7 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
         }
         // local is either executeWithoutConditions modifying a virtual table (doesn't support txns) or executeLocal
         // which is called by test or internal things that are bypassing distributed system modification/checks
-        List<IMutation> mutations = collector.toMutations(state, local ? PotentialTxnConflicts.ALLOW : PotentialTxnConflicts.DISALLOW);
-        // Tiered storage: cold data is immutable once chunked (see TieredWrites); a batch must not
-        // be a way around the single-statement check.
-        // Insert-only for the whole batch, or not at all: one DELETE anywhere in it means a merged
-        // row can carry that delete's tombstone under another statement's liveness marker.
-        boolean insertOnly = statements.stream().allMatch(s -> s.type.isInsert());
-        org.apache.cassandra.db.timeseries.tiering.TieredWrites.guardColdMutations(mutations, insertOnly);
-        return mutations;
+        return collector.toMutations(state, local ? PotentialTxnConflicts.ALLOW : PotentialTxnConflicts.DISALLOW);
     }
 
     /**
@@ -525,10 +518,6 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
         if (diskUsageCheck != DiskUsageCheck.NONE)
             for (int i = 0; i < statements.size(); i++)
                 statements.get(i).validateDiskUsage(options.forStatement(i), clientState, diskUsageCheck);
-
-        // Tiered storage: a sub-quorum write can be missed by the re-encoder's quorum read and range-deleted.
-        for (ModificationStatement statement : statements)
-            org.apache.cassandra.db.timeseries.tiering.TieredWrites.guardWriteConsistency(statement.metadata(), options.getConsistency());
 
         if (hasConditions)
             return executeWithConditions(options, queryState, requestTime);

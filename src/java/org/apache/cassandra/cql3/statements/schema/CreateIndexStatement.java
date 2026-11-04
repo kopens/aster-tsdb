@@ -38,7 +38,6 @@ import org.apache.cassandra.cql3.statements.schema.IndexTarget.Type;
 import org.apache.cassandra.db.guardrails.Guardrails;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.MapType;
-import org.apache.cassandra.db.timeseries.tiering.TieringPolicy;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.index.internal.CassandraIndex;
 import org.apache.cassandra.index.sasi.SASIIndex;
@@ -228,13 +227,7 @@ public final class CreateIndexStatement extends AlterSchemaStatement
         TableMetadata newTable = table.withSwapped(table.indexes.with(index));
         newTable.validate();
 
-        KeyspaceMetadata newKeyspace = keyspace.withSwapped(keyspace.tables.withSwapped(newTable));
-        // Refused here rather than only by the tiering sweeper: an index on a non-static column of a
-        // tiered table loses every entry older than hot_window and makes the sweeper skip the table.
-        String tieringError = TieringPolicy.ddlRejection(table, keyspace, newTable, newKeyspace);
-        if (tieringError != null)
-            throw ire("Cannot create index '%s': %s", index.name, tieringError);
-        return schema.withAddedOrUpdated(newKeyspace);
+        return schema.withAddedOrUpdated(keyspace.withSwapped(keyspace.tables.withSwapped(newTable)));
     }
 
     @Override

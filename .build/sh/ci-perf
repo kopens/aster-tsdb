@@ -23,8 +23,8 @@
 #   PERF_THRESHOLD=15 .build/sh/ci-perf   # tighten the allowed regression (default 25%)
 #   PERF_PASSES=5 .build/sh/ci-perf       # more sweeps, minimum kept (default 3)
 #
-# This is a gate, not a benchmark. docker/scale-test.sh and docker/tiering-bench.sh answer
-# "how fast on production-shaped data"; they take hours and need a 16G heap. This answers the much
+# This is a gate, not a benchmark. docker/scale-test.sh answers
+# "how fast on production-shaped data"; it takes hours and needs a 16G heap. This answers the much
 # narrower "did a change make the decode path slower", in minutes, so it can run before a release.
 #
 # Two things it will not do, on purpose:

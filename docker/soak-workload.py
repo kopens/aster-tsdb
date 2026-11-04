@@ -221,7 +221,7 @@ def cmd_verify(args):
 
     # Correctness, not just liveness: a bounded read over a sampled tag must return
     # rows whose count matches a re-read, and whose values are stable across the merge.
-    # A tiered read that starts dropping or duplicating rows shows up here first.
+    # A read that starts dropping or duplicating rows shows up here first.
     sampled = []
     for i in args.sample_tags:
         tag = f"TAG-{i:06d}"
@@ -240,18 +240,6 @@ def cmd_verify(args):
         except Exception as e:                                # noqa: BLE001
             problem(f"{tag}: bounded read failed: {type(e).__name__}")
     out["sampled_rows"] = sampled
-
-    # Tiering's own view of itself: errors and skipped tags are the signal that the
-    # re-encoder is quietly not keeping up or is refusing the schema.
-    try:
-        for r in session.execute("SELECT * FROM system_views.timeseries_tiering"):
-            d = r._asdict()
-            out.setdefault("tiering", []).append(d)
-            for key in ("errors", "skipped", "failed"):
-                if d.get(key):
-                    problem(f"tiering {key}={d[key]} on {d.get('table_name')}")
-    except Exception:                                         # noqa: BLE001
-        out["tiering"] = "unavailable"                        # not enabled yet is fine
 
     line = json.dumps(out, default=str)
     print(line, flush=True)

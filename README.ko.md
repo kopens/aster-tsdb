@@ -4,25 +4,17 @@
 
 # Aster Timeseries Database
 
-**산업 현장의 시계열 워크로드에 최적화된 데이터베이스.** CQL 함수 21종, gap-fill, 스스로 압축하는
-계층형 저장 — **디스크 7.1× 절감, 질의 3~6× 가속**.
+**산업 현장의 시계열 워크로드에 최적화된 데이터베이스.** CQL 함수 21종, gap-fill, 닫힌 창을
+컬럼형 SSTable로 동결하는 시간 창 컴팩션.
 
 **Apache Cassandra 호환.** 같은 CQL, 같은 드라이버, 같은 운영 도구, 같은 온디스크 포맷입니다 —
 기존 6.0 데이터를 그대로 읽습니다. 돌고 있는 클러스터에 설치하는 것은 jar 하나이고, 새 기능은
 전부 옵트인입니다.
 
-| 일반 Cassandra 6.0.0 대비 실측 | 일반 Cassandra | Aster TSDB |
+| 일반 Cassandra 6.0.0 대비 | 일반 Cassandra | Aster TSDB |
 | --- | --- | --- |
-| 2천만 행 저장 용량 | 237.8 MB | **33.3 MB** — 7.1× 작다 |
-| `count(*)` (4만 행 파티션) | 303 ms | **50 ms** — 6.1× 빠르다 |
-| 태그 90개 p95 (360만 행) | 14.2 s | **2.6 s** — 5.4× 빠르다 |
-| 태그 90개 시간별 평균 | 14.9 s | **4.2 s** — 3.5× 빠르다 |
 | 시계열 연산 | 애플리케이션이 원시 행을 끌어와 계산 | **서버에서 끝난다** |
 | 압축·보존 | 애플리케이션 몫 | **테이블 정책** |
-
-> **재 본 모든 질의가 티어링 후 «같거나 빠릅니다»** — 무제한 스캔, 단행 조회, 정적 컬럼 읽기까지
-> 포함해서입니다. 보통은 저장을 줄이면 지연을 내주는데 여기서는 둘 다 가져갑니다.
-> 전체 수치와 주의사항: [티어링 벤치마크](doc/timeseries/).
 
 ## TimescaleDB · InfluxDB 와 비교하면
 
@@ -33,7 +25,7 @@
 | 버킷팅 | `time_bucket` | `date_bin_gapfill` | `time_bucket` / `time_bucket_gapfill` |
 | Gap-fill (`locf`/`interpolate`) | 있음 | 있음 | 있음 |
 | 시계열 함수 | Toolkit | SQL 내장 | **21종, Timescale 어휘** |
-| 압축 | 있음 | 있음 | 있음 — **실측 7.1×** |
+| 압축 | 있음 | 있음 | 있음 — **컬럼형 `tscol`** |
 | 보존 | 정책 | 정책 | **윈도우 통째 드롭(TSCS)** |
 | 전문 검색 | PostgreSQL FTS | 제한적 | SAI `LIKE` + 분석기 |
 | **수평 확장 (오픈소스판)** | 2.13 이후 multi-node 폐기 — 직접 만드는 샤딩 | 단일 노드 | **노드를 더해 늘린다** |
@@ -74,11 +66,10 @@ Spark 연동은 짝이 되는 프로젝트
 | **시계열 CQL 함수 21종** | `time_bucket`, `first`/`last`, `delta`/`rate`/`derivative`, 리셋 보정 `counter_delta`/`counter_rate`, `percentile`, `time_weighted_average`, `integral`, `variance`/`stddev`, `histogram`, `approx_count_distinct`, 이변량 `corr`/`covar_*`/`regr_*` | [사용법 §2~9](#시계열-cql-사용법) |
 | **Gap-fill** | `GROUP BY time_bucket_gapfill(width, ts, start, finish)` — 빈 버킷 실체화 + `locf()`/`interpolate()` 채움 정책 | [사용법 §3](#3-빈-구간-채우기-time_bucket_gapfill) |
 | **풀텍스트 검색** | SAI `LIKE` + `index_analyzer`(ngram/standard/cjk/keyword + JSON) — 단어 중간 조각·공백 걸침·한글까지 진짜 부분문자열 매치, ALLOW FILTERING 불필요 | [fulltext-search.md](doc/timeseries/fulltext-search.md) |
-| **시계열 컴팩션 (TSCS)** | `TimeSeriesCompactionStrategy` — 창 정렬 + 창 내부 UCS 위임 + retention 창 통삭제 + 닫힌 창 동결(창당 1 SSTable, `WindowFrozenListener` 이벤트 훅, far-future 가드 `max_future_window`, **동결 시점에** 이미 만료된 TTL 데이터는 retention 없이 회수 — 동결 이후 만료되는 데이터는 `retention` 필요) + 지각 격리(flush/스트리밍 창 경계 스플릿 — 백필이 과거 창에 국소 편입, 레거시 걸침 SSTable 자동 분할) + **전용 memtable**(테이블별 옵트인 — 행을 쓰기 시점에 TSCS 창으로 배정해 flush 라우팅·64 MiB 파티션 상한 제거, 원시 배열 컬럼 저장으로 행당 힙 **5.5×↓** 실측, 계층화 테이블의 콜드 창은 flush 시점에 바로 청크로) | [timeseries-compaction.md](doc/timeseries/timeseries-compaction.md) · [timeseries-memtable.md](doc/timeseries/timeseries-memtable.md) · [설계 스펙](docs/superpowers/specs/2026-07-31-timeseries-compaction-design.md) |
-| **컬럼 지향 청크 코덱 (chunk format v4)** *(계층형 저장 1단계)* | 창 1개 = 공유 타임스탬프 축 + 일반 컬럼별 독립 섹션의 무손실 압축, 모든 블록이 독립 디코드·랜덤 접근. `double`은 ALP/ALP-RD(유일한 double 코덱), 정수·시각 계열은 FOR/델타 비트팩, `boolean`은 1비트팩, `text`·불투명 바이트는 사전(DICT)/RAW. 값이 일정한 컬럼은 CONSTANT, 전부 null인 컬럼은 ALL_NULL로 O(1) 처리. 운영 형태 2,000만 건 실측 **~1.7 B/행** (행 저장 11.9 B/행 대비 **7.1×**, 호스트 234) | [포맷 규격](doc/timeseries/chunk-format-v4.md) · [코덱 실측 비교](doc/timeseries/codec-bakeoff.md) · [설계 스펙](docs/superpowers/specs/2026-07-31-industrial-tiered-storage-design.md) |
-| **계층형 저장 (청크 스토어)** *(계층형 저장 2단계)* | 테이블 확장 `timeseries_tiering` 정책 — 백그라운드 재인코더가 hot_window를 지난 창을 청크로 압축해 `<테이블>__chunks`로 이동(지각 데이터 병합, cold_window 만료, CL 쿼럼 하한). `nodetool retier`/`tieringstatus`, `system_views.timeseries_tiering`. **투명 읽기(SP3)**: 베이스 테이블 SELECT가 핫 로우+청크를 자동 병합 — 시간범위·포인트·집계·gap-fill·LIMIT/DESC가 핫·콜드에 걸쳐 동작 | [tiered-storage.md](doc/timeseries/tiered-storage.md) |
-| **컬럼형 동결 SSTable (`tscol`)** *(청크 스토어를 대체)* | BTI에서 파생한 세 번째 SSTable 형식. TSCS 옵션 `frozen_format = 'columnar'`이면 닫힌 창을 `tscol` SSTable 하나로 동결하고, 파티션 본문은 값과 셀별 writetime·TTL·삭제 시각·셀 톰스톤까지 **정확히 왕복**하는 청크 코덱 블록이라 컬럼형 복제본도 행 형식과 같은 답·다이제스트·리페어를 낸다. 동결된 데이터의 늦은 쓰기·수정·삭제·TTL·일반 컬럼 필터·SAI는 보통 Cassandra 동작 — 거부도 옆 톰스톤도 없고 창이 재동결될 뿐. 옛 청크 스토어는 `nodetool untier`로 한 번 되돌린다 | [설계](docs/superpowers/specs/2026-11-04-columnar-frozen-sstable-design.md) · [전환 절차](doc/timeseries/tscol-rollout.md) |
-| **테스트 인프라** | 도커 통합 테스트 93건(릴리스 게이트), 3노드 클러스터 테스트 49건, 1억 건 스케일 하네스, jvm-dtest, JMH 성능 회귀 게이트, GC 비교(ZGC vs G1) | [보고서들](doc/timeseries/) |
+| **시계열 컴팩션 (TSCS)** | `TimeSeriesCompactionStrategy` — 창 정렬 + 창 내부 UCS 위임 + retention 창 통삭제 + 닫힌 창 동결(창당 1 SSTable, `WindowFrozenListener` 이벤트 훅, far-future 가드 `max_future_window`, **동결 시점에** 이미 만료된 TTL 데이터는 retention 없이 회수 — 동결 이후 만료되는 데이터는 `retention` 필요) + 지각 격리(flush/스트리밍 창 경계 스플릿 — 백필이 과거 창에 국소 편입, 레거시 걸침 SSTable 자동 분할) + **전용 memtable**(테이블별 옵트인 — 행을 쓰기 시점에 TSCS 창으로 배정해 flush 라우팅·64 MiB 파티션 상한 제거, 원시 배열 컬럼 저장으로 행당 힙 **5.5×↓** 실측) | [timeseries-compaction.md](doc/timeseries/timeseries-compaction.md) · [timeseries-memtable.md](doc/timeseries/timeseries-memtable.md) · [설계 스펙](docs/superpowers/specs/2026-07-31-timeseries-compaction-design.md) |
+| **컬럼 지향 청크 코덱 (chunk format v4)** | 창 1개 = 공유 타임스탬프 축 + 일반 컬럼별 독립 섹션의 무손실 압축, 모든 블록이 독립 디코드·랜덤 접근. `double`은 ALP/ALP-RD(유일한 double 코덱), 정수·시각 계열은 FOR/델타 비트팩, `boolean`은 1비트팩, `text`·불투명 바이트는 사전(DICT)/RAW. 값이 일정한 컬럼은 CONSTANT, 전부 null인 컬럼은 ALL_NULL로 O(1) 처리. `tscol` SSTable 안의 블록 형식이다 | [포맷 규격](doc/timeseries/chunk-format-v4.md) · [코덱 실측 비교](doc/timeseries/codec-bakeoff.md) |
+| **컬럼형 동결 SSTable (`tscol`)** | BTI에서 파생한 세 번째 SSTable 형식. TSCS 옵션 `frozen_format = 'columnar'`이면 닫힌 창을 `tscol` SSTable 하나로 동결하고, 파티션 본문은 값과 셀별 writetime·TTL·삭제 시각·셀 톰스톤까지 **정확히 왕복**하는 청크 코덱 블록이라 컬럼형 복제본도 행 형식과 같은 답·다이제스트·리페어를 낸다. 동결된 데이터의 늦은 쓰기·수정·삭제·TTL·일반 컬럼 필터·SAI는 보통 Cassandra 동작 — 거부도 옆 톰스톤도 없고 창이 재동결될 뿐 | [설계](docs/superpowers/specs/2026-11-04-columnar-frozen-sstable-design.md) · [전환 절차](doc/timeseries/tscol-rollout.md) |
+| **테스트 인프라** | 도커 통합 테스트(릴리스 게이트), 3노드 클러스터 테스트, 1억 건 스케일 하네스, jvm-dtest, JMH 성능 회귀 게이트, GC 비교(ZGC vs G1) | [보고서들](doc/timeseries/) |
 | **배포/CI** | Testcontainers 호환 도커 이미지, GitLab CI(빌드→테스트→이미지→통합 게이트→릴리스), 태그 릴리스 자동화 | [.gitlab-ci.yml](.gitlab-ci.yml) |
 
 ## 🎯 핵심 — 무엇이 좋아지나 (일반 Cassandra 6.0.0 대비)
@@ -94,36 +85,9 @@ GROUP BY tag_id, time_bucket_gapfill(1h, timestamp, '2026-07-01', '2026-07-02')
 ORDER BY timestamp ASC;
 ```
 
-**2. 오래된 데이터는 자동 압축, 조회는 그대로.** 계층형 저장이 지난 데이터를 컬럼 지향 청크로 압축해 옮기고, `SELECT`는 압축 여부를 몰라도 됩니다(투명 읽기가 자동 병합).
+**2. 오래된 데이터는 자동 압축, 조회는 그대로.** `frozen_format = 'columnar'`이면 TSCS가 닫힌 창을 컬럼형 `tscol` SSTable 하나로 동결합니다. 테이블은 그대로입니다 — `SELECT`, 늦은 쓰기, 삭제, TTL, 필터, SAI 모두 보통 Cassandra로 동작합니다.
 
-**3. 압축이 조회까지 빠르게 만듭니다 — 저장과 질의 양쪽에서 이깁니다.** 운영 테이블
-형태(`tm_tag_point`, 일반 컬럼 8개) 2,000만 건 실측 — 호스트 234(Xeon Silver 4114T, 40스레드),
-chunk format v4 — [벤치마크 전문](doc/timeseries/tiering-benchmark.md):
-
-| 항목 | 계층화 전 | 계층화 후 (v4) | 효과 |
-| --- | --- | --- | --- |
-| 저장 용량 | 237.8 MB | **33.3 MB** | **7.1× 절감** (11.9 → ~1.7 B/행) |
-| `count(*)` (4만 행 파티션) | 303 ms | **50 ms** | **6.1× 빠름** |
-| `time_bucket` + 집계 | 150~270 ms | **31~64 ms** | **3~6× 빠름** |
-| gap-fill (locf / interpolate) | 162~284 ms | **30~53 ms** | **5.4× 빠름** |
-| 90개 태그 태그별 p95 (360만 행) | 14.2 s | **2.6 s** | **5.4× 빠름** |
-| 90개 태그 시간별 평균 (360만 행) | 14.9 s | **4.2 s** | **3.5× 빠름** |
-| 1시간 범위 + 컬럼 투영 | 55~56 ms | **30~33 ms** | **1.8× 빠름** |
-| 최신 1,000행 `SELECT *` (시간 범위 없음) | 52~56 ms | **38~45 ms** | 동률 이상 |
-| 재인코딩 처리량 | — | **108k rows/s** | 게이트(50k)의 2.2배 |
-
-> **측정한 모든 질의에서 계층화 후가 같거나 빠릅니다** — 시간 범위 없는 조회·행 단위 조회·static
-> 조회 포함. 시간 범위 없는 `LIMIT` 조회는 질의 방향 순서로(DESC면 최신 창부터) 창을 하나씩
-> 디코드하다 `LIMIT`이 차면 멈추므로 느려지지 않습니다.
->
-> **`hot_window` 안쪽 질의는 비용이 없습니다** — 콜드 경계 위에서 시작하는 질의는 병합을 건너뛰고
-> 핫 이터레이터를 그대로 돌려줍니다. 위 수치는 전 구간을 콜드로 만든 최대 부하 조건입니다.
->
-> **주의 두 가지.** 계층화된 테이블에서 파티션 키 없는 풀스캔(집계·`DISTINCT`·Spark 전체 테이블
-> 읽기 포함)은 청크를 병합하지 못하므로, 오답을 내는 대신 **거부됩니다** — 파티션 키를 지정해
-> 조회하십시오([프로덕션 체크리스트 §3.1](doc/timeseries/production-rollout.md)). 그리고
-> 저장 절감 폭은 형태에 좌우됩니다 — 접을 상수·null 컬럼이 없는 최소 형태(고엔트로피 `double`
-> 1컬럼)는 v4 기준 재측정 전이니, 도입 전 자기 테이블 형태로 재보십시오.
+**3. 압축 수치는 다시 재야 합니다.** 이 프로젝트의 이전 수치(디스크 7.1×, 집계 3~6×, `tm_tag_point` 2,000만 건, 호스트 234)는 제거된 그림자 테이블 청크 스토어의 측정값입니다. `tscol`은 같은 청크 코덱을 쓰지만 셀별 writetime·TTL·삭제 시각까지 보존하므로 그 수치가 그대로 이어지지 않습니다. [옛 벤치마크](doc/timeseries/tiering-benchmark.md)는 역사 기록으로 남겨 둡니다. 도입 전 자기 테이블 형태로 재보십시오.
 
 **4. 시계열에 맞는 컴팩션·보존.** 시간 창 단위로 SSTable을 정렬·동결(창당 1개)하고, 보존 만료 창은 컴팩션 없이 통째 삭제합니다. 엣지 장비의 지각 백필도 자기 시간대로 자동 격리됩니다.
 
@@ -148,20 +112,21 @@ cp apache-cassandra-6.0.0.jar $CASSANDRA_HOME/lib/
 | [Gap-Fill 설계 (gapfill-design.md)](doc/timeseries/gapfill-design.md) | `time_bucket_gapfill`의 CQL 문법, 보간 규칙, 가드레일 |
 | [Continuous Aggregates 설계 (continuous-aggregates-design.md)](doc/timeseries/continuous-aggregates-design.md) | 시간 버킷 롤업(연속 집계) 설계안 — 진행 중 |
 | **[풀텍스트 검색 (fulltext-search.md)](doc/timeseries/fulltext-search.md)** | SAI `LIKE` + `index_analyzer` — 로그/메시지 본문 부분문자열 검색 (한글 포함) |
-| **[프로덕션 투입 체크리스트 (production-rollout.md)](doc/timeseries/production-rollout.md)**  | 계층화를 실 운영 테이블에 처음 켜기 전 확인 목록 — 되돌릴 수 없는 지점, 스키마 요건, TTL→`cold_window` 이관, 애플리케이션 영향, 검증 절차 |
-| **[계층화 벤치마크 (tiering-benchmark.md)](doc/timeseries/tiering-benchmark.md)** | 운영 형태 2,000만 건 전/후 실측 (호스트 234, chunk v4) — 저장 **7.1×↓**, 집계 **3~6×↑**, gap-fill **5.4×↑**, 범위 없는 조회 포함 전 질의 동률 이상, 재인코딩 108k rows/s |
-| **[운영 튜닝 가이드 (operations-tuning.md)](doc/timeseries/operations-tuning.md)** | 장기 보존(10년) 전환 실전 가이드 — 용량 산수, 적용 순서, 원본·**청크 테이블** 튜닝값과 근거, TTL과 계층화의 관계, 점검 목록 |
+| [프로덕션 투입 체크리스트 (production-rollout.md)](doc/timeseries/production-rollout.md) | 역사 기록 — 제거된 그림자 테이블 계층화의 확인 목록. `tscol` 전환은 [tscol-rollout.md](doc/timeseries/tscol-rollout.md) 참고 |
+| [계층화 벤치마크 (tiering-benchmark.md)](doc/timeseries/tiering-benchmark.md) | 역사 기록 — 제거된 그림자 테이블 청크 스토어의 운영 형태 2,000만 건 전/후 실측 (호스트 234, chunk v4) |
+| **[운영 튜닝 가이드 (operations-tuning.md)](doc/timeseries/operations-tuning.md)** | 장기 보존(10년) 전환 실전 가이드 — 용량 산수, 적용 순서, 튜닝값과 근거, 점검 목록. 제거된 그림자 테이블 계층화 기준으로 쓰여 청크 테이블 부분은 역사 기록이다 |
 | **[시계열 컴팩션 (timeseries-compaction.md)](doc/timeseries/timeseries-compaction.md)** | `TimeSeriesCompactionStrategy` — 창 크기·동결·`retention` 설정, 창의 일생, 지각 데이터 격리, 파킹된 창의 두 원인과 진단법, TTL이 아니라 `retention`이 만료를 담당하는 이유, **운영 노드 실측** |
-| **[시계열 전용 Memtable (timeseries-memtable.md)](doc/timeseries/timeseries-memtable.md)** | `TimeSeriesMemtable` — 켜는 법(yaml 설정 키 + `ALTER TABLE`, 두 단계를 틀리기 쉬운 이유), 지원/미지원 스키마와 폴백 동작, 파킹 원인 제거·행당 힙 5.5× 실측·**스트리밍 읽기**(슬라이스 이진 탐색, 필요한 행만 조립, 보유 0)·콜드 창 청크 직접 flush(내구성 순서), 확인 절차 |
+| **[시계열 전용 Memtable (timeseries-memtable.md)](doc/timeseries/timeseries-memtable.md)** | `TimeSeriesMemtable` — 켜는 법(yaml 설정 키 + `ALTER TABLE`, 두 단계를 틀리기 쉬운 이유), 지원/미지원 스키마와 폴백 동작, 파킹 원인 제거·행당 힙 5.5× 실측·**스트리밍 읽기**(슬라이스 이진 탐색, 필요한 행만 조립, 보유 0), 확인 절차 |
 | **[운영 투입 보고서 2026-08-02 (prod-ops-report-2026-08-02.md)](doc/timeseries/prod-ops-report-2026-08-02.md)** | 실 노드 12시간 기록 — 배포 5회, 사고 2건의 전말과 재발 방지, 판단이 뒤집힌 것들, 실측 절차 |
 | **[운영 TSCS 설정과 파킹 진단 (prod-tscs-settings.md)](doc/timeseries/prod-tscs-settings.md)** | 75개 테이블의 현재 설정과 근거, 파킹된 창의 두 원인을 가르는 진단 절차, 24k rows/s 유입 중 실측값 |
-| **[계층형 저장 (tiered-storage.md)](doc/timeseries/tiered-storage.md)** | `timeseries_tiering` 정책·청크 재인코더 — 설정, 청크 조회 패턴, 운영(nodetool/가상 테이블), 불변식과 제한사항 |
+| [계층형 저장 (tiered-storage.md)](doc/timeseries/tiered-storage.md) | 역사 기록 — 제거된 `timeseries_tiering` 정책과 청크 재인코더 |
+| **[tscol 전환 절차 (tscol-rollout.md)](doc/timeseries/tscol-rollout.md)** | 컬럼형 동결 SSTable로 옮기기 — 옛 청크 스토어가 있는 설치가 잃는 것과 남는 것, 전환 순서 |
 | **[압축 설명 (compression.md)](doc/timeseries/compression.md)** | 컬럼별로 무엇이 왜 얼마나 줄어드는가 — 두 압축 층의 관계, 타입별 인코딩과 행당 비용, 절감폭의 컬럼별 분해(8컬럼 중 4개가 0바이트), 내 테이블 추정 규칙과 실측 방법 |
 | **[청크 포맷 v4 (chunk-format-v4.md)](doc/timeseries/chunk-format-v4.md)** | 유일한 청크 포맷의 **와이어 포맷 규격** — 헤더·디렉토리·블록 테이블·presence 4모드·타입별 블록 인코딩(ALP 포함), 결정성 규칙, 크기 한계 (v1~v3는 제거된 포맷 — 읽으면 `UnsupportedChunkFormatException`) |
 | [코덱 bake-off (codec-bakeoff.md)](doc/timeseries/codec-bakeoff.md) | double 코덱 실측 비교 — **ALP/ALP-RD 단일화** 결론과 분포별 B/값 (Gorilla·Chimp128 대비) |
 | [통합 테스트 보고서](doc/timeseries/integration-test-report.md) | 실제 컨테이너에서 실행한 각 검증의 CQL·결과·소요 시간 |
-| [스케일 테스트 보고서 (1억 건)](doc/timeseries/scale-test-report.md) | 1억 행 용량 검증 — 적재·집계의 스캔 행 수 선형성 (구형 호스트 기록; 현재 수치는 계층화 벤치마크) |
-| **[읽기/쓰기 처리량 벤치마크 (rw-throughput-benchmark.md)](doc/timeseries/rw-throughput-benchmark.md)** | 초당 처리량 실측 — 적재 **233k rows/s**(호스트 234) · 쓰기 경로 424k rows/s·청크 인코딩 684k rows/s·청크 풀스캔 740µs/3,600행(호스트 237, JMH) · 재인코딩 108k rows/s · 패턴별 읽기 ops/s는 v4 재측정 대기 |
+| [스케일 테스트 보고서 (1억 건)](doc/timeseries/scale-test-report.md) | 1억 행 용량 검증 — 적재·집계의 스캔 행 수 선형성 (구형 호스트 기록) |
+| **[읽기/쓰기 처리량 벤치마크 (rw-throughput-benchmark.md)](doc/timeseries/rw-throughput-benchmark.md)** | 초당 처리량 실측 — 적재 **233k rows/s**(호스트 234) · 쓰기 경로 424k rows/s·청크 인코딩 684k rows/s·청크 풀스캔 740µs/3,600행(호스트 237, JMH) · 패턴별 읽기 ops/s는 v4 재측정 대기 |
 | **[Memtable 쓰기 튜닝 기록 (memtable-write-tuning.md)](doc/timeseries/memtable-write-tuning.md)** | 쓰기 경로 최적화 기록 — DESC가 끄는 두 고속 경로, 설정 튜닝의 한계, 코드 수정 3라운드(min 가드·역순 long 스토어·꼬리 인덱스), ALTER 순서 함정 |
 | [SP4 계획 (sp4-plan.md)](doc/timeseries/sp4-plan.md) | SP4 로드맵 — Compressed Query·vectorized 집계 커널·SIMD 등의 삽입 지점·마일스톤·검증 게이트 (진행 상태는 문서 참고) |
 | [GC 비교: ZGC generational vs G1](doc/timeseries/gc-comparison.md) | 같은 1억 건 데이터로 두 GC의 쿼리 시간·쓰기 처리량 비교 (원자료) |
@@ -225,7 +190,7 @@ CREATE TABLE tm_tag_point (
     PRIMARY KEY (tag_id, timestamp)
 ) WITH CLUSTERING ORDER BY (timestamp DESC)
    AND compaction = {'class': 'TimeSeriesCompactionStrategy',
-                     'window_size': '1d',          -- 시간 창 폭 (계층화 chunk_window와 일치)
+                     'window_size': '1d',          -- 시간 창 폭
                      'freeze_after': '2h',         -- 창이 닫히고 이 시간 후 창당 1 SSTable로 동결
                      'scaling_parameters': 'T4',   -- 현재 창 내부는 UCS 위임 (쓰기 최적 4-way)
                      'retention': '62d'}           -- 창 상한이 62일을 지나면 통째 삭제
@@ -255,11 +220,12 @@ INSERT INTO tm_tag_point (tag_id, timestamp, attribute, error_code, latency, qua
 
 | 옵션 | 설명 |
 | --- | --- |
-| `window_size` | 시간 창 폭 (`<정수><m\|h\|d>`). 계층형 저장의 `chunk_window`와 맞추길 권장 |
+| `window_size` | 시간 창 폭 (`<정수><m\|h\|d>`) |
 | `freeze_after` | 창이 닫힌 뒤 이 시간이 지나면 동결 대상 — 지각 데이터 유예 기간 |
 | `scaling_parameters`, `target_sstable_size` | 현재 창 내부 UCS 위임 파라미터 (UCS 문법 그대로: `T4` = 쓰기 최적 4-way tiered 등) |
 | `retention` | 선택 — 창 상한이 `now - retention`을 지나면 SSTable 통째 삭제 (`window_size + freeze_after` 이상) |
 | `max_future_window` | 미래 타임스탬프 가드(기본 `1d`) — 오입력이 창을 오염시키지 않게 격리 |
+| `frozen_format` | `row`(기본) 또는 `columnar` — 닫힌 창을 `tscol` SSTable로 동결 (§12) |
 
 동결(창당 1 SSTable) 시점에 이미 만료된 TTL 데이터는 `retention` 없이도 회수되고, 파티션+시간범위 조회의 읽기 증폭이 최소화됩니다. 다만 창이 SSTable 1개로 줄면 다시는 동결 후보가 되지 않으므로, **동결 이후에 만료되는 데이터는 `retention`을 설정해야 회수됩니다.** 지각(백필) 데이터는 flush 시 창 경계에서 분리되어 자기 창에 국소 편입됩니다. 상세: [§11 시계열 컴팩션 설정](#11-시계열-컴팩션tscs-설정)
 
@@ -446,7 +412,7 @@ WHERE  tag_id = 'TAG-001'
 GROUP  BY tag_id, time_bucket(1m, timestamp);
 ```
 
-`tm_tag_point`에는 단조 증가 컬럼이 없어 별도 테이블을 씁니다. CQL `counter` **타입**을 쓴 테이블은 **계층화가 아예 불가능**하다는 점도 함께 고려하세요 — 재인코더가 행을 삭제 후 재삽입하는데 삭제된 카운터는 다시 쓸 수 없기 때문입니다. `bigint` 게이지가 계층화 호환 선택지입니다.
+`tm_tag_point`에는 단조 증가 컬럼이 없어 별도 테이블을 씁니다. CQL `counter` **타입**을 쓴 테이블은 늘 행 형식으로 동결된다는 점도 함께 고려하세요 — `tscol`에 담을 수 있는 쪽은 `bigint` 게이지입니다.
 
 ## 6. 백분위 · SLO — `percentile`
 
@@ -569,7 +535,7 @@ TWCS의 시간 정렬·통삭제와 UCS의 창 내부 컴팩션을 결합한 전
 ```sql
 ALTER TABLE pp.tm_tag_point WITH compaction = {
   'class': 'TimeSeriesCompactionStrategy',
-  'window_size': '1d',           -- 시간 창 폭 (계층화 chunk_window와 반드시 일치)
+  'window_size': '1d',           -- 시간 창 폭
   'freeze_after': '2h',          -- 창이 닫히고 이 시간이 지나면 동결(창당 1 SSTable로 수렴)
   'scaling_parameters': 'T4',    -- 현재 창 내부는 UCS에 위임 (UCS 문법 그대로)
   'target_sstable_size': '256MiB',
@@ -589,138 +555,36 @@ ALTER TABLE pp.tm_tag_point WITH compaction = {
 | `retention`은 **`window_size + freeze_after` 이상**이어야 합니다 | `ALTER` 시점에 명시적 에러로 거부됩니다. 아직 쓰이고 동결되는 중인 창이 삭제되지 않도록 하는 하한입니다 |
 | **동결된 창은 다시 동결되지 않습니다** | 창이 SSTable 1개로 줄면 동결 후보에서 빠지므로, 그 **이후에** 만료되는 데이터는 동결로 회수되지 않습니다. TTL이 `freeze_after`보다 길면 `retention`이 필요합니다 — `default_time_to_live`만으로는 디스크에 남습니다 |
 | 실제 보존 기간은 **`retention` + `window_size`** | 삭제 조건이 `windowStart <= now - retention - window_size`라, 창 안의 가장 최근 행은 적어둔 값보다 대략 창 하나만큼 더 살아남습니다. 놀라지 말고 미리 감안하십시오 |
-| `window_size`는 계층화 **`chunk_window`와 같게** | 강제되지 않지만, 어긋나면 청크 하나가 컴팩션 창 두 개에 걸쳐 일부만 청크화된 상태로 창이 동결될 수 있습니다. 같은 값을 쓰십시오 |
 | `timestamp_resolution`은 쓰기 측과 일치해야 합니다 | `USING TIMESTAMP` 값을 벽시계 시각으로 읽는 기준입니다. 쓰기가 정말 밀리초를 쓰는 게 아니라면 기본값 `MICROSECONDS`를 두십시오 — 틀리면 모든 행이 1000배 떨어진 창으로 분류돼, 데이터가 먼 미래로 사라지는 것처럼 보입니다 |
-| `max_future_window`(기본 `1d`)는 필터가 아니라 가드입니다 | 이를 넘는 타임스탬프의 행은 **파킹**됩니다 — 컴팩션·동결·retention·계층화에서 전부 제외되고, 잘못된 시계가 지속되는 동안 flush마다 SSTable이 하나씩 쌓입니다. 테이블 MBean의 `FarFutureTimeSeriesSSTables`가 비어 있어야 정상이며, 아니라면 쓰기 측 시계를 고친 뒤 user-defined 또는 maximal 컴팩션으로 다시 씁니다 |
+| `max_future_window`(기본 `1d`)는 필터가 아니라 가드입니다 | 이를 넘는 타임스탬프의 행은 **파킹**됩니다 — 컴팩션·동결·retention에서 전부 제외되고, 잘못된 시계가 지속되는 동안 flush마다 SSTable이 하나씩 쌓입니다. 테이블 MBean의 `FarFutureTimeSeriesSSTables`가 비어 있어야 정상이며, 아니라면 쓰기 측 시계를 고친 뒤 user-defined 또는 maximal 컴팩션으로 다시 씁니다 |
 
 `window_size` 고르기: 너무 작으면 긴 보존 기간에서 SSTable이 수천 개가 되고, 너무 크면 동결과 retention의 단위가 거칠어집니다(창 하나보다 작게는 못 지웁니다). 창 1일 + 보존 62일이면 테이블당 62개로 무난합니다.
 
-## 12. 계층형 저장(tiered storage) 설정
+## 12. 컬럼형 동결 SSTable (`tscol`)
 
-오래된 창을 컬럼 지향 청크(일반 컬럼 전부를 창의 타임스탬프 축 하나에 담습니다)로 압축해 `<테이블>__chunks`로 옮기고, **SELECT는 그대로**(투명 읽기가 핫+콜드 자동 병합) 쓰는 기능입니다. 테이블 `extensions`에 JSON 정책을 문자열로 넣습니다:
-
-### 12.1 대상 스키마
-
-**시간축(`timestamp` 클러스터링 컬럼)이 하나인 시계열 테이블이면 형태를 가리지 않습니다.** 파티션 키는 복합이어도 되고, 일반 컬럼은 개수·타입 무관, static 컬럼은 몇 개든 그대로 보존됩니다 (static 셀은 청크화 대상이 아니고, 재인코더의 클러스터링 레인지 딜리트가 건드리지 않습니다).
-
-아래는 릴리스 게이트가 실제로 계층화를 검증하는 산업 현장 테이블입니다 — static 7개 + 일반 컬럼 8개, `DESC` 클러스터링:
+TSCS 테이블에 `frozen_format`을 넣으면 닫힌 창이 `tscol` SSTable 하나로 동결됩니다. 파티션 본문은 청크 코덱 블록입니다([chunk-format-v4.md](doc/timeseries/chunk-format-v4.md)):
 
 ```sql
-CREATE TABLE pp.tm_tag_point (
-    tag_id     text,                              -- 파티션 키: 개수 무관 (복합 키 가능)
-    timestamp  timestamp,                         -- 클러스터링 1개, timestamp (ASC/DESC 모두 가능)
-    area_id    text static, asset_id text static, line_id text static,
-    opc_id     text static, site_id  text static, tag_name text static,
-    type       text static,                       -- static: 개수·타입 무관, 계층화 후에도 그대로 보존
-    attribute  frozen<map<text,text>>,            -- 항상 {} → CONSTANT (0바이트)
-    error_code int,                               -- 항상 0 → CONSTANT
-    latency    int,                               -- 고엔트로피 → zigzag varint 델타
-    quality    int,                               -- 항상 192 → CONSTANT
-    value      text,                              -- 판독값의 문자열 사본
-    value_boolean boolean,                        -- type=boolean 태그에서만 채워짐
-    value_numeric double,                         -- type이 숫자형일 때만 채워짐
-    PRIMARY KEY (tag_id, timestamp)
-) WITH CLUSTERING ORDER BY (timestamp DESC);
-```
-
-**`DESC` 클러스터링이 산업 현장의 기본 관용구**입니다(최신부터 읽는 조회가 압도적). 투명 읽기의 경계 산술이 오름차순을 가정하면 콜드 행 0개를 **에러 없이** 돌려주므로, 양쪽 바운드와 양쪽 정렬이 통합 테스트에 고정돼 있습니다.
-
-판독값이 `value_boolean`에 들어가는지 `value_numeric`에 들어가는지는 **static `type`이 정합니다.** static이라 태그 단위로 고정되고, 청크 1개 = 태그 1개 × 창 1개이므로 한 청크 안에서 각 값 컬럼은 전부 채워져 있거나 전부 비어 있거나 둘 중 하나입니다 — 쓰이는 쪽은 전용 코덱, 쓰이지 않는 쪽은 ALL_NULL로 0바이트. `value`(text)는 그 판독값의 문자열 사본입니다(`value_numeric = 20.76` ↔ `value = '20.76'`).
-
-지원되지 않는 형태에 정책을 걸면 60초마다 **사유를 밝힌** ERROR 로그를 남기고 건너뜁니다. 거부 대상은 다섯 가지뿐입니다:
-
-| 형태 | 사유 |
-| --- | --- |
-| `counter` 컬럼 | 재인코더는 행을 삭제 후 재삽입하는데, 삭제된 카운터는 영구히 다시 쓸 수 없습니다 |
-| 비frozen 컬렉션 **일반** 컬럼 | 멀티셀 값은 청크로 인코딩할 수 없습니다 — `frozen<...>`으로 감싸면 지원됩니다 |
-| 클러스터링이 0개·2개 이상이거나 `timestamp`가 아님 | 인코딩할 시간축이 없습니다 |
-| **static이 아닌 컬럼**에 걸린 보조 인덱스(SAI 포함) | 인덱스 엔트리는 행 단위라, 재인코딩된 행이 사라지면 인덱스 질의가 콜드 데이터를 조용히 누락합니다 — 일반 컬럼·클러스터링 컬럼·복합 파티션 키 구성 컬럼 모두 해당. **static 컬럼 인덱스만** 무방 |
-| 이 테이블 위의 머티리얼라이즈드 뷰 | 투명 읽기는 베이스 테이블만 복원하므로 뷰가 오래된 이력을 영구히 잃습니다 |
-
-> `default_time_to_live`가 있고 `hot_window >= TTL`이면 재인코더가 데이터를 보기 전에 TTL이 먼저 지워 **아무것도 압축되지 않습니다**. 거부하지는 않지만 두 값을 밝힌 WARN을 남깁니다.
-
-> **⚠️ 계층화 켜기 전에 반드시 알아야 할 두 가지 (상세: [tiered-storage.md §1.1, §5.1.2](doc/timeseries/tiered-storage.md))**
-> 1. **콜드 데이터는 불변입니다** — 핫 윈도를 넘어서는 `DELETE`(셀·행·레인지·파티션)와 `SET col = null`은 **거부**됩니다. 청크가 유일한 사본이라 톰스톤은 `gc_grace` 때까지만 가려주고 그 뒤 데이터가 되살아나기 때문입니다. 콜드 데이터 삭제는 `cold_window` 만료를 쓰십시오. 핫 윈도 안의 삭제, 그리고 콜드 구간에 **값을 쓰는** 지각 `UPDATE`는 그대로 동작합니다.
-> 2. **TTL은 청크화되면서 사라집니다** — `default_time_to_live`로 만료시키던 데이터가 청크로 옮겨지면 영구 보존됩니다. TTL에 의존했다면 같은 기간을 `cold_window`에 설정하십시오.
-
-재인코더는 **일반 컬럼 전부**를 청크 1개에 담습니다: 창의 타임스탬프 축을 한 번만 저장하고 컬럼마다 독립 섹션에 **직렬화 바이트 그대로** 넣으므로, `double`/`boolean`/`int`/`bigint`/`timestamp`/`date`/`text`는 전용 코덱을, 나머지(`blob`·`uuid`·`timeuuid`·frozen 컬렉션 등)는 불투명 바이트 폴백을 탑니다. `null` 셀은 `null`로 그대로 왕복하고, 값이 전부 같은 컬럼은 O(1)(0바이트)로 접힙니다. 자세한 표는 [tiered-storage.md §3.1.1](doc/timeseries/tiered-storage.md) 참고.
-
-### 12.2 압축 켜기 — CQL 한 줄
-
-정책 JSON을 테이블 `extensions`에 그대로 넣으면 끝입니다 (hex 변환 불필요):
-
-```sql
-ALTER TABLE pp.tm_tag_point WITH extensions = {
-  'timeseries_tiering': '{"hot_window":"2d","chunk_window":"1d","cold_window":"3650d","interval":"1h"}'
+ALTER TABLE pp.tm_tag_point WITH compaction = {
+  'class': 'TimeSeriesCompactionStrategy',
+  'window_size': '1d',
+  'freeze_after': '2h',
+  'frozen_format': 'columnar'    -- row(기본) 또는 columnar
 };
-
--- 적용 확인 (정책과 실행 통계가 함께 보입니다)
-SELECT * FROM system_views.timeseries_tiering;
 ```
 
-> `extensions`는 스키마상 blob 맵이지만, Aster 는 **평문 문자열을 UTF-8 바이트로 저장**합니다.
-> `0x`로 시작하는 값만 hex 블롭으로 해석하므로 기존 hex 표기(`0x7b22...`)도 그대로 동작합니다.
+다음 동결부터 `-tscol-Data.db` 파일이 생깁니다. 이미 행 형식으로 동결된 창은 한 번 변환되고 그 뒤로는 그대로 둡니다.
 
-적용 후에는 60초 스위퍼가 `interval` 주기로 알아서 압축합니다. **바로 확인하고 싶으면** 수동으로 한 사이클 실행:
-
-```bash
-nodetool retier pp tm_tag_point   # 1회 재인코딩 (동기 실행, 청크 테이블이 이때 자동 생성됨)
-nodetool tieringstatus            # 테이블별 정책·마지막 실행·누적 통계
-```
-
-```sql
--- 압축 결과 확인: 청크가 생기고, SELECT 결과는 그대로 (투명 읽기)
-SELECT count(*) FROM pp.tm_tag_point__chunks WHERE tag_id='TAG-001';
-SELECT count(*) FROM pp.tm_tag_point
- WHERE tag_id='TAG-001' AND timestamp >= '2026-07-01 00:00:00+0000'
-                        AND timestamp <  '2026-07-02 00:00:00+0000';   -- 압축 전과 동일한 값
-
--- static은 청크화 대상이 아니라 계층화 후에도 베이스 테이블에 그대로 남습니다
-SELECT site_id, tag_name, type FROM pp.tm_tag_point WHERE tag_id='TAG-001' LIMIT 1;
-```
-
-> 계층화 여부를 세어서 확인할 때는 **반드시 클러스터링 범위를 거세요.** 클러스터링 행이 하나도 남지 않은 파티션에 범위 없이 `count(*)`를 하면 static만 있는 행 때문에 `1`이 나옵니다. 그리고 파티션 키 없는 풀스캔 `SELECT count(*)`는 청크를 병합할 수 없어 계층화된 테이블에서는 거부됩니다 — 태그별로, 파티션 키를 지정해 세십시오.
-
-### 12.3 정책 필드
-
-| 필드 | 의미 |
+| 알아둘 것 | 내용 |
 | --- | --- |
-| `hot_window` | **이 기간 안의 데이터는 건드리지 않습니다**(행 그대로). 실시간 조회·수정이 잦은 구간보다 넉넉히 잡으세요 (예: `7d`) |
-| `chunk_window` | 청크 1개가 담는 시간 폭 (최대 `31d`). TSCS `window_size`와 맞추길 권장. 1초 주기 데이터면 `1h`(=3,600샘플)가 무난 |
-| `cold_window` | 선택 — 이 기간을 지난 청크는 통째 삭제(보존 정책). 미지정(`-1`)이면 영구 보관 |
-| `interval` | 백그라운드 재인코딩 주기 (예: `1h`). 60초 스위퍼가 주기 도래 테이블만 처리 |
-| `consistency` | 재인코더 CL — `LOCAL_QUORUM`(기본) / `QUORUM` / `EACH_QUORUM` / `ALL`만 허용 (약한 CL은 데이터 유실 위험이라 차단) |
+| 지원 스키마 | `timestamp` 클러스터링 컬럼 하나, 단일 셀이고 카운터가 아닌 일반 컬럼. 그 밖의 테이블은 옵션과 상관없이 행 형식으로 동결됩니다 |
+| 동결된 데이터도 보통 데이터 | 늦은 쓰기·수정·삭제·TTL·일반 컬럼 필터·SAI가 평소대로 동작합니다. 거부되는 것이 없고 창이 재동결될 뿐이며, 복제본은 행 형식과 같은 답·다이제스트·리페어를 냅니다 |
+| 보존 | TSCS `retention`이 창을 통째로 지웁니다(§11) |
+| 옛 청크 스토어에서 옮길 때 | 이전 도구는 없습니다. [tscol-rollout.md](doc/timeseries/tscol-rollout.md)를 먼저 읽으십시오 |
 
-**코덱 선택은 없습니다**: `double`은 ALP/ALP-RD가 유일한 청크 코덱이라 고를 것이 없습니다 (예전 `codec` 옵션은 제거됐고, 남아 있으면 `ALTER TABLE`이 거부합니다). 값이 거의 변하지 않는 상수 계열은 코덱을 타기 전에 컬럼 지향 청크의 CONSTANT 플래그가 O(1)로 처리합니다 — [실측](doc/timeseries/codec-bakeoff.md) 참고.
+설계: [컬럼형 동결 SSTable 스펙](docs/superpowers/specs/2026-11-04-columnar-frozen-sstable-design.md).
 
-### 설정 유의사항
-
-앞의 세 가지는 `ALTER` 시점에 검사돼 그냥 실패합니다. 나머지는 **합법적인 설정인데 원하지 않는 일이 조용히 벌어지는** 경우입니다.
-
-| 규칙 | 어기면 생기는 일 |
-| --- | --- |
-| `hot_window` **≥** `chunk_window` | 거부. 청크보다 좁은 핫 윈도는 아직 쓰이는 중인 창을 인코딩하겠다는 뜻입니다 |
-| `cold_window` **>** `hot_window` | 거부. 인코딩이 허용되기도 전에 만료돼야 한다는 뜻이 됩니다 |
-| `chunk_window` **≤ 31d** | 거부. 재인코더가 창 하나를 통째로 메모리에 올립니다 |
-| `hot_window`와 `chunk_window` 사이에 **여유를 두십시오** | **가장 생각할 값이 이것입니다.** 콜드 데이터를 지우는 쓰기는 `max(청크 커버리지, now - hot_window)` 아래에서 거부되고, 창은 닫히는 즉시 인코딩 대상이 됩니다. 두 값이 같으면(`1h`/`1h`) 창이 닫히는 순간 바로 인코딩 대상이라 **삭제할 수 있는 기간이 사실상 없습니다.** `DELETE`나 `SET col = null`이 필요한 테이블이면 `hot_window`를 `chunk_window`의 몇 배로 잡으십시오(예: `chunk_window 1h` + `hot_window 6h`). 테스트의 1h/1h는 최대 부하 조건이지 권장값이 아닙니다 |
-| `cold_window`가 청크화된 데이터의 **유일한** 보존 장치 | 창이 청크화되면 셀 TTL이 사라지므로, `default_time_to_live`에 의존하던 테이블은 재인코더가 처음 도는 순간 조용히 "유한 보존"에서 "무한 증가"로 바뀝니다. TTL이 해주던 기간을 그대로 `cold_window`에 설정하십시오 — 베이스 행이 사라진 뒤에는 되돌릴 수 없습니다 |
-| `hot_window`는 `default_time_to_live`보다 **짧아야** 합니다 | 합법이지만, 재인코더가 손대기도 전에 TTL이 행을 지우면 **아무것도 압축되지 않습니다.** 계층화가 켜져 있는데 아무 일도 하지 않는 상태가 됩니다. 두 값을 밝힌 WARN을 남깁니다 |
-| `consistency`는 쿼럼 강도만 허용 | `QUORUM`, `LOCAL_QUORUM`(기본), `EACH_QUORUM`, `ALL`. 더 약한 것은 거부됩니다 — 재인코더가 베이스 행을 삭제하므로, 성공했다고 믿었지만 쿼럼에 닿지 않은 쓰기는 그대로 데이터 유실입니다 |
-| 정책을 지워도 **계층화가 풀리지 않습니다** | 투명 읽기는 현재 정책이 아니라 실제 청크 커버리지로 판단합니다. `extensions`를 비우면 *새 인코딩만* 멈추고, 기존 청크는 계속 읽히며 그 구간의 `DELETE`도 계속 거부됩니다. 콜드 데이터를 실제로 없애는 방법은 `cold_window` 만료 또는 청크 테이블 `DROP`뿐입니다 |
-
-`chunk_window` 고르기: 청크 1개 = 태그 1개 × 창 1개이므로 1초 주기 데이터면 `1h`가 3,600샘플로 적당합니다. 훨씬 작으면 청크마다의 헤더 비용이 지배하고, 훨씬 크면 병합 읽기마다 필요 이상으로 디코드합니다.
-
-### 12.4 끄기·바꾸기
-
-```sql
--- 정책 변경: 같은 방식으로 새 JSON을 넣으면 다음 사이클부터 적용
--- 완전히 끄기: 확장에서 키 제거 (이미 만들어진 청크는 그대로 남습니다)
-ALTER TABLE pp.tm_tag_point WITH extensions = {};
-```
-
-**정책을 제거해도 이미 청크에 들어간 데이터는 계속 보입니다.** 투명 읽기의 병합 판단은 현재 정책이 아니라 **실제 청크 커버리지**를 기준으로 하므로, 확장 제거는 *새 인코딩을 멈출 뿐*입니다. 같은 이유로 그 구간의 `DELETE`도 계속 거부됩니다(콜드 불변성). `hot_window`를 늘리거나 `chunk_window`를 줄여도 마찬가지로 과거 데이터가 숨겨지지 않습니다. 콜드 데이터를 실제로 없애는 방법은 `cold_window` 만료 또는 청크 테이블 `DROP`뿐입니다.
-
-운영 참고: 지각 데이터는 이미 청크화된 창에 들어와도 다음 사이클에 자동 병합됩니다(같은 타임스탬프면 나중에 들어온 행이 이김). 상세·제한사항(범위 스캔·페이징 등): [tiered-storage.md](doc/timeseries/tiered-storage.md) · 실측: [벤치마크](doc/timeseries/tiering-benchmark.md)
+---
 
 ## 13. 운영 팁
 
@@ -729,27 +593,22 @@ ALTER TABLE pp.tm_tag_point WITH extensions = {};
 - **TSCS 컴팩션**(`TimeSeriesCompactionStrategy`)을 쓰세요 — 창 정렬·동결·통삭제가 시계열에 맞게 자동화되고, 현재 창 내부는 UCS(`scaling_parameters: 'T4'`)에 위임됩니다. 보존은 `retention`(창 통삭제) 또는 `default_time_to_live`로 지정하면 됩니다.
 - `time_bucket(interval, ts)`는 `GROUP BY`의 마지막 요소(파티션 키 컬럼들 뒤)여야 그룹핑이 읽기 경로로 푸시다운됩니다.
 
-### 13.1 권장 조합 — TSCS · 계층화 · TimeSeriesMemtable
+### 13.1 권장 조합 — TSCS · `tscol` · TimeSeriesMemtable
 
-세 기능은 같은 **시간 창**을 기준으로 맞물립니다. 위로 갈수록 기본, 아래로 갈수록 저장 공간을 더 줄입니다.
+세 기능은 같은 **시간 창**을 기준으로 맞물립니다.
 
 | 테이블 성격 | 조합 | 얻는 것 |
 | --- | --- | --- |
 | 모든 시계열 테이블 (기본) | **TSCS** | 창 단위 SSTable 분리, 닫힌 창의 동결(창당 1 SSTable), `retention`에 의한 창 통삭제. 혼자 써도 충분히 이득입니다 |
-| 오래 보관하면서 공간을 줄일 테이블 | **TSCS + 계층화** | 오래된 창을 컬럼 지향 청크로 압축하고 SELECT는 그대로. 계층화는 **TSCS가 아닌 테이블에는 정책 설치 자체가 거부**됩니다 — 재인코더는 원본 행을 범위 툼스톤으로 지울 뿐이고, 그 아래 행을 디스크에서 실제로 비우는 것은 TSCS의 동결뿐이기 때문입니다 |
-| 더 줄이려면 | **TSCS + 계층화 + `TimeSeriesMemtable`** | 콜드 창에 해당하는 데이터는 flush 시 곧바로 청크로 써서(`ColdWindowChunkFlush`), 원본 행을 썼다가 다시 지우는 단계를 건너뜁니다 |
+| 오래 보관하면서 공간을 줄일 테이블 | **TSCS + `frozen_format = 'columnar'`** | 닫힌 창을 컬럼형 `tscol` SSTable로 동결하고 SELECT는 그대로(§12) |
+| 유입이 많은 테이블 | **TSCS + `TimeSeriesMemtable`** | 쓰기 시점에 행을 창으로 배정하고 원시 배열 컬럼에 저장 |
 
-- **TSCS `window_size`와 계층화 `chunk_window`는 같은 값으로** 두십시오. 어긋나면 청크 하나가 컴팩션 창 두 개에 걸칩니다(§11 유의사항).
 - **`TimeSeriesMemtable`은 두 단계로 켭니다**: ① 모든 노드의 `cassandra.yaml`에 `memtable.configurations` 키 추가 후 재시작, ② `ALTER TABLE ... WITH memtable = '<키>'`. 키가 없는 노드는 ERROR 로그 한 줄만 남기고 **조용히 기본 memtable로 폴백**하므로, 노드마다 실제로 켜졌는지 확인하십시오 — [timeseries-memtable.md §2, §5](doc/timeseries/timeseries-memtable.md).
 
-### 13.2 계층화를 켜고 운영할 때
+### 13.2 운영할 때
 
-- **실제 테이블에 켜기 전에 시험 운영부터.** 계층화는 원본 행을 지우므로 켜는 순간부터 `<테이블>__chunks`가 유일한 사본입니다. 재생성 가능한 테이블(또는 사본)로 보존 주기 한 바퀴와 노드 재시작 1회를 거친 뒤 진행하고, **백업에 `__chunks`가 포함되는지 첫 재인코딩 전에** 확인하십시오 — [production-rollout.md §0](doc/timeseries/production-rollout.md).
-- **`hot_window`는 `chunk_window`의 몇 배로.** 같으면 창이 닫히자마자 인코딩되어 `DELETE`할 수 있는 기간이 사실상 없습니다(§12.3 유의사항).
-- **재인코더를 감시하십시오.** 멈춘 사이클은 아무 에러 없이 조용합니다. `SELECT * FROM system_views.timeseries_tiering`의 `consecutive_failures`가 0이어야 정상이고, `nodetool tieringstatus`로 테이블별 마지막 실행을 봅니다.
 - **TSCS 이상 신호 두 가지**: 테이블 MBean의 `ParkedTimeSeriesWindows`(진척 못 낸 창)와 `FarFutureTimeSeriesSSTables`(미래 타임스탬프로 파킹된 SSTable)는 **비어 있어야 정상**입니다. 전용 nodetool 명령이 없어 `nodetool sjk mx`로 읽습니다 — [prod-tscs-settings.md §2, §3](doc/timeseries/prod-tscs-settings.md).
-- **계층화된 테이블을 지우는 순서는 정해져 있습니다**: ① `ALTER TABLE ... WITH extensions = {}`로 정책 분리 → ② 그림자 테이블(`<테이블>__chunks` 등) `DROP` → ③ 베이스 테이블 `DROP`. 순서를 어기면 `DROP`이 거부됩니다 — 콜드 데이터를 조용히 잃지 않도록 일부러 막아 둔 것입니다.
-- **Spark로 읽을 때**는 [aster-tsdb-spark-connector](http://dev.kopens.io/common/aster-tsdb-spark-connector) `4.1.4-r1` 이상과 이 빌드 `v6.0.0-r4` 이상을 쓰십시오. 커넥터의 스캔은 모두 토큰 범위 스캔이라, 그 이전 서버는 계층화된 테이블의 범위 스캔을 거부합니다.
+- **Spark로 읽을 때**는 [aster-tsdb-spark-connector](http://dev.kopens.io/common/aster-tsdb-spark-connector) `4.1.4-r1` 이상을 쓰십시오.
 
 ---
 
@@ -776,7 +635,7 @@ ALTER TABLE pp.tm_tag_point WITH extensions = {};
 
 ## 통합 테스트 (릴리스 게이트)
 
-유닛 테스트는 함수를 프로세스 안에서 검증하지만, [docker/integration-test.sh](docker/integration-test.sh)는 **실제 이미지를 띄워** 스키마 생성부터 읽기 경로·집계·네이티브 프로토콜까지 통과하는 시계열 CQL 결과를 손으로 계산한 값과 대조합니다(107개 검증, 프로세스 재시작 포함).
+유닛 테스트는 함수를 프로세스 안에서 검증하지만, [docker/integration-test.sh](docker/integration-test.sh)는 **실제 이미지를 띄워** 스키마 생성부터 읽기 경로·집계·네이티브 프로토콜까지 통과하는 시계열 CQL 결과를 손으로 계산한 값과 대조합니다(프로세스 재시작 포함).
 
 ```bash
 docker build -t aster-tsdb:6.0.0 -f docker/Dockerfile .
@@ -789,13 +648,13 @@ CI에서는 태그를 밀면 `docker-image → docker-integration-test → docke
 
 ### 클러스터 테스트 (3노드)
 
-[docker/cluster-test.sh](docker/cluster-test.sh)는 도커 네트워크 위에 실제 컨테이너 3개를 RF=3으로 띄워 49개를 검증합니다 — 단일 노드가 닿지 못하는 것들입니다: 코디네이터 3개 각각을 통한 집계·gap-fill, 레플리카마다 독립적으로 일어나는 TSCS 동결 수렴, OS 프로세스 간 실제 repair 스트리밍, 레플리카를 정말 정지시킨 상태의 QUORUM.
+[docker/cluster-test.sh](docker/cluster-test.sh)는 도커 네트워크 위에 실제 컨테이너 3개를 RF=3으로 띄워 단일 노드가 닿지 못하는 것들을 검증합니다: 코디네이터 3개 각각을 통한 집계·gap-fill, 레플리카마다 독립적으로 일어나는 TSCS 동결과 `tscol` 수렴, OS 프로세스 간 실제 repair 스트리밍, 레플리카를 정말 정지시킨 상태의 QUORUM.
 
 ```bash
 ./docker/cluster-test.sh aster-tsdb:6.0.0
 ```
 
-CI에서는 수동입니다(2G JVM 3개가 공용 러너에 안 들어갈 수 있음). 컴팩션·스트리밍·repair·계층화를 건드린 릴리스라면 손으로 한 번 돌리십시오.
+CI에서는 수동입니다(2G JVM 3개가 공용 러너에 안 들어갈 수 있음). 컴팩션·스트리밍·repair·`tscol`을 건드린 릴리스라면 손으로 한 번 돌리십시오.
 
 ### 성능 회귀 게이트
 
@@ -820,7 +679,7 @@ SCALE_ROWS=100000000 SCALE_SERIES=1000 SCALE_LOADERS=16 SCALE_HEAP=16G \
 
 GC를 바꿔 비교할 수도 있습니다 — `SCALE_GC=g1`(기본은 `zgc`, `conf/jvm21-server.options`에 이미 generational ZGC가 켜져 있음), `SCALE_PASSES=2`(웜업 후 측정), `SCALE_WBENCH_ROWS=10000000`(쓰기 벤치). 두 실행 결과를 `docker/gc-compare.py <prefix-a> <prefix-b>`에 넣으면 비교표가 나옵니다 → **[GC 비교 결과](doc/timeseries/gc-comparison.md)**.
 
-결과는 `build/timeseries-scale-report.html`(+ 같은 내용의 `.md`)에 생성됩니다. 용량 검증 기록: **[스케일 테스트 보고서 (1억 건)](doc/timeseries/scale-test-report.md)** — 1억 행 완주와 스캔 행 수 선형성. 현재 기준 성능 수치는 [계층화 벤치마크](doc/timeseries/tiering-benchmark.md)에 있습니다.
+결과는 `build/timeseries-scale-report.html`(+ 같은 내용의 `.md`)에 생성됩니다. 용량 검증 기록: **[스케일 테스트 보고서 (1억 건)](doc/timeseries/scale-test-report.md)** — 1억 행 완주와 스캔 행 수 선형성.
 
 주의: 수백만 행 이상을 집계하려면 서버 타임아웃을 올려야 합니다. `read/range_request_timeout`뿐 아니라 **`native_transport_timeout`(기본 12초)** 이 요청 전체를 자르므로 이 값도 함께 올려야 하며, 이 키는 기본 `cassandra.yaml`에 없어서 추가해야 합니다. 스크립트가 이 설정을 대신 해 줍니다.
 

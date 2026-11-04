@@ -71,8 +71,6 @@ import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.db.rows.UnfilteredRowIterators;
-import org.apache.cassandra.db.timeseries.tiering.ColdWindowChunkFlush;
-import org.apache.cassandra.db.transform.Transformation;
 import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.dht.IncludingExcludingBounds;
@@ -795,46 +793,14 @@ public class TimeSeriesMemtable extends AbstractAllocatorMemtable
     // ----------------------------------------------------------------------------------- flushing
 
     /**
-     * The rows already encoded into durable chunks by {@link ColdWindowChunkFlush}, to be left out of
-     * the base sstable. Decided exactly once per flush, before the first flush set is iterated;
-     * {@link ColdWindowChunkFlush#NONE} whenever cold-window chunking does not apply (no tiering
-     * policy, unsupported schema, or any failure -- rows are always the fallback).
-     */
-    private ColdWindowChunkFlush.RowOmissions flushOmissions;
-    private boolean flushOmissionsDecided;
-
-    /**
-     * Encodes this memtable's cold windows into chunks (see {@link ColdWindowChunkFlush} for the
-     * durability ordering) and remembers which rows that made omittable. Synchronized and sticky:
-     * {@link #getFlushSet} is called once per disk range, and every range must see the one decision --
-     * chunk writes are not to be repeated, and two ranges disagreeing on omissions would tear a
-     * partition between chunk and sstable.
-     */
-    private synchronized ColdWindowChunkFlush.RowOmissions flushOmissions()
-    {
-        if (!flushOmissionsDecided)
-        {
-            flushOmissionsDecided = true;
-            flushOmissions = ColdWindowChunkFlush.encode(this, () -> mergedPartitions(null, true, null, false));
-        }
-        return flushOmissions;
-    }
-
-    /**
      * The merged view over the range, exactly as an unsharded memtable would present it: one entry per
      * distinct partition key, with the shards' versions of that partition merged. Splitting the flush
      * into one sstable per window is a separate step and deliberately not done here, so that any
      * difference this memtable makes to a flushed sstable is a sharding defect and nothing else.
-     *
-     * <p>The one exception is stage 4's cold-window chunk flush: rows {@link #flushOmissions()} has
-     * already made durable in the chunk table are filtered out of the returned partitions. Rows are
-     * only ever omitted <em>after</em> their chunk is durable and the coverage ledger is widened --
-     * the ordering rule {@link ColdWindowChunkFlush} enforces.
      */
     @Override
     public FlushablePartitionSet<Partition> getFlushSet(PartitionPosition from, PartitionPosition to)
     {
-        ColdWindowChunkFlush.RowOmissions omissions = flushOmissions();
         long keysSize = 0;
         long keyCount = 0;
         for (DecoratedKey key : keysSubMap(from, true, to, false).values())
@@ -877,10 +843,7 @@ public class TimeSeriesMemtable extends AbstractAllocatorMemtable
             @Override
             public Iterator<Partition> iterator()
             {
-                Iterator<Partition> merged = mergedPartitions(from, true, to, false);
-                if (omissions.isEmpty())
-                    return merged;
-                return Iterators.transform(merged, partition -> omitChunkedRows(partition, omissions));
+                return mergedPartitions(from, true, to, false);
             }
 
             @Override
@@ -1252,120 +1215,6 @@ public class TimeSeriesMemtable extends AbstractAllocatorMemtable
                                                       boolean includeRight)
         {
             return TimeSeriesMemtable.subMap(partitions, left, includeLeft, right, includeRight);
-        }
-    }
-
-    /**
-     * @return {@code partition} with the rows {@link ColdWindowChunkFlush} already chunked filtered
-     * out, or the partition itself when it has nothing to omit.
-     */
-    private static Partition omitChunkedRows(Partition partition, ColdWindowChunkFlush.RowOmissions omissions)
-    {
-        return omissions.containsKey(partition.partitionKey())
-               ? new ChunkOmittedPartition(partition, omissions)
-               : partition;
-    }
-
-    /**
-     * A flushing partition minus the rows a durable chunk already carries. Only rows are ever
-     * filtered: partitions holding any tombstone are never chunked at all (see
-     * {@link ColdWindowChunkFlush}), and static rows always flush normally, so deletions and static
-     * content pass through untouched.
-     */
-    private static final class ChunkOmittedPartition implements Partition
-    {
-        private final Partition delegate;
-        private final ColdWindowChunkFlush.RowOmissions omissions;
-
-        ChunkOmittedPartition(Partition delegate, ColdWindowChunkFlush.RowOmissions omissions)
-        {
-            this.delegate = delegate;
-            this.omissions = omissions;
-        }
-
-        @Override
-        public TableMetadata metadata()
-        {
-            return delegate.metadata();
-        }
-
-        @Override
-        public DecoratedKey partitionKey()
-        {
-            return delegate.partitionKey();
-        }
-
-        @Override
-        public DeletionTime partitionLevelDeletion()
-        {
-            return delegate.partitionLevelDeletion();
-        }
-
-        @Override
-        public RegularAndStaticColumns columns()
-        {
-            // The delegate's set may name columns only omitted rows carried; a superset is legal for
-            // the serialization header, an undercount would not be.
-            return delegate.columns();
-        }
-
-        @Override
-        public EncodingStats stats()
-        {
-            return delegate.stats();
-        }
-
-        @Override
-        public boolean isEmpty()
-        {
-            // fullyOmitted is only ever true for a partition with no deletion and no static row, so
-            // nothing but the omitted rows could make it non-empty.
-            return omissions.fullyOmitted(partitionKey()) || delegate.isEmpty();
-        }
-
-        @Override
-        public boolean hasRows()
-        {
-            return !omissions.fullyOmitted(partitionKey()) && delegate.hasRows();
-        }
-
-        @Override
-        public Row getRow(Clustering<?> clustering)
-        {
-            return omissions.shouldOmit(partitionKey(), clustering) ? null : delegate.getRow(clustering);
-        }
-
-        @Override
-        public UnfilteredRowIterator unfilteredIterator()
-        {
-            return filter(delegate.unfilteredIterator());
-        }
-
-        @Override
-        public UnfilteredRowIterator unfilteredIterator(ColumnFilter columns, Slices slices, boolean reversed)
-        {
-            return filter(delegate.unfilteredIterator(columns, slices, reversed));
-        }
-
-        @Override
-        public UnfilteredRowIterator unfilteredIterator(ColumnFilter columns,
-                                                        NavigableSet<Clustering<?>> clusteringsInQueryOrder,
-                                                        boolean reversed)
-        {
-            return filter(delegate.unfilteredIterator(columns, clusteringsInQueryOrder, reversed));
-        }
-
-        private UnfilteredRowIterator filter(UnfilteredRowIterator iterator)
-        {
-            DecoratedKey key = partitionKey();
-            return Transformation.apply(iterator, new Transformation<UnfilteredRowIterator>()
-            {
-                @Override
-                protected Row applyToRow(Row row)
-                {
-                    return omissions.shouldOmit(key, row.clustering()) ? null : row;
-                }
-            });
         }
     }
 
