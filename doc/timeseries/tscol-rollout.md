@@ -52,12 +52,15 @@
 
 ## 41 절차 (데이터 초기화 경로 — 2026-11-04 사용자 결정)
 
-41은 tscol 후보가 오른 뒤 플랫폼 데이터를 초기화한다(새 ID 체계로 처음부터 다시 쌓음):
+41은 tscol 후보가 오른 뒤 플랫폼 데이터를 초기화한다(새 ID 체계로 처음부터 다시 쌓음). 절차의 주인은 플랫폼이고, 초기화 범위는 `pp` 키스페이스 말고도
+PG `pp`·`pf`, Valkey `PP:*`, Iceberg `tw_*`까지다.
 
-1. core 마이그레이션 변경(V9·V32의 `timeseries_tiering` 정책 → `frozen_format = 'columnar'`)이 먼저 들어간 플랫폼 이미지와 tscol 후보 배포.
-2. `DROP KEYSPACE pp` — 그림자 표까지 같이 지워진다.
-3. 표마다 `allow_auto_snapshot = true`라 DROP이 스냅샷을 남긴다. 버릴 데이터면 `nodetool clearsnapshot --all -- pp`.
-4. 부팅 마이그레이션이 pp를 새로 만든다(TSCS `frozen_format = 'columnar'`). 커버리지 원장·그림자 표는 없다.
+1. 41 동결, 전체 백업.
+2. r9 데이터레이크 이미지 배포. 노드 UN과 jar sha256 확인. **core는 아직 올리지 않는다.** V9·V32를 고친 core를 옛 `pp` 이력 위에 올리면 체크섬이 맞지 않아 `server-web`이 기동에 실패한다.
+3. 보존할 표(`console_*`, `ta_console_*`, AI anomaly 표 2개)의 스냅샷을 뜬다.
+4. `DROP KEYSPACE pp` — 그림자 표까지 같이 지워진다.
+5. storage 재시작 등으로 재생성하고, core가 든 `server-web`을 기동한다. 부팅 마이그레이션이 pp를 새로 만든다(TSCS `frozen_format = 'columnar'`). 커버리지 원장·그림자 표는 없다.
+6. 표마다 `allow_auto_snapshot = true`라 DROP이 스냅샷을 남긴다. **며칠 확인한 뒤에** `nodetool clearsnapshot --all -- pp`로 지운다(사용자 결정). 그때까지 디스크는 돌아오지 않는다.
 
 ## 2026.11 설치(옛 계층화 데이터가 있는 노드) 절차
 
