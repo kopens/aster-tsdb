@@ -194,21 +194,30 @@ public final class RowBlockCodec
     }
 
     /**
-     * @param columns the columns to materialise, or {@code null} for all; rows keep their liveness either way
-     * @return the rows {@link #encode} was given, in the table's clustering order, restricted to {@code columns}
+     * @param columns the read's column filter, or {@code null} for every column. Applied exactly as the row-format
+     *                deserializer applies it ({@code DeserializationHelper.includes}/{@code canSkipValue}): a column
+     *                the filter does not fetch is left out; a fetched but unqueried column keeps only the cells at or
+     *                above the row's liveness timestamp, with their values skipped. Anything else would hand a replica
+     *                reading this format a different row -- and a different digest -- than one reading row format.
+     * @return the rows {@link #encode} was given, in the table's clustering order, filtered as above
      */
     public static List<Row> decode(TableMetadata metadata, ByteBuffer payload, ColumnFilter columns)
     {
         List<ColumnMetadata> emitted = new ArrayList<>();
         for (ColumnMetadata column : metadata.regularColumns())
-            if (columns == null || columns.fetchedColumns().contains(column))
+            if (columns == null || columns.fetches(column))
                 emitted.add(column);
 
         Set<String> projection = new HashSet<>(List.of(ROW_TS, ROW_TTL, ROW_LDT, ROW_BASE));
-        for (ColumnMetadata column : emitted)
+        boolean[] queried = new boolean[emitted.size()];
+        for (int i = 0; i < emitted.size(); i++)
         {
+            ColumnMetadata column = emitted.get(i);
             String name = column.name.toString();
-            Collections.addAll(projection, name, WT + name, TTL + name, LDT + name, DEL + name);
+            queried[i] = columns == null || columns.fetchedColumnIsQueried(column);
+            Collections.addAll(projection, WT + name, TTL + name, LDT + name, DEL + name);
+            if (queried[i])
+                projection.add(name);                                     // an unqueried column's values are never read
         }
 
         ColumnarCursor cursor = ColumnarChunkCodec.cursor(payload, projection);
@@ -218,10 +227,12 @@ public final class RowBlockCodec
         {
             builder.newRow(Clustering.make(TimestampType.instance.fromTimeInMillis(cursor.timestamp())));
             long base;
+            long livenessTimestamp = LivenessInfo.NO_TIMESTAMP;
             ByteBuffer ts = cursor.getBytes(ROW_TS);
             if (ts != null)
             {
                 base = LongType.instance.compose(ts);
+                livenessTimestamp = base;
                 ByteBuffer rowTtl = cursor.getBytes(ROW_TTL);
                 builder.addPrimaryKeyLivenessInfo(rowTtl == null
                                                   ? LivenessInfo.create(base)
@@ -233,20 +244,23 @@ public final class RowBlockCodec
                 base = LongType.instance.compose(cursor.getBytes(ROW_BASE));
             }
 
-            for (ColumnMetadata column : emitted)
+            for (int i = 0; i < emitted.size(); i++)
             {
+                ColumnMetadata column = emitted.get(i);
                 String name = column.name.toString();
                 ByteBuffer delta = cursor.getBytes(WT + name);
                 if (delta == null)
                     continue;                                             // no cell for this column on this row
                 long timestamp = base + LongType.instance.compose(delta);
+                if (!queried[i] && timestamp < livenessTimestamp)
+                    continue;                                             // the row marker already proves the row live
                 if (cursor.getBytes(DEL + name) != null)
                 {
                     builder.addCell(new BufferCell(column, timestamp, Cell.NO_TTL, LongType.instance.compose(cursor.getBytes(LDT + name)),
                                                    ByteBufferUtil.EMPTY_BYTE_BUFFER, null));
                     continue;
                 }
-                ByteBuffer value = cursor.getBytes(name);
+                ByteBuffer value = queried[i] ? cursor.getBytes(name) : ByteBufferUtil.EMPTY_BYTE_BUFFER;
                 ByteBuffer cellTtl = cursor.getBytes(TTL + name);
                 builder.addCell(cellTtl == null
                                 ? BufferCell.live(column, timestamp, value)

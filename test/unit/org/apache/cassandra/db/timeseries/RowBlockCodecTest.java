@@ -145,20 +145,34 @@ public class RowBlockCodecTest
         assertEquals(rows, roundTrip(t, rows));
     }
 
+    /**
+     * The read path's column filter fetches every regular column but queries only some; row format then keeps a
+     * fetched-but-unqueried cell only when it is not older than the row marker, with its value skipped. Decoding must
+     * do exactly the same, or a replica reading this format returns different cells (and a different digest).
+     */
     @Test
-    public void projectionDecodesOnlyRequestedColumns()
+    public void columnFilterIsAppliedExactlyAsRowFormatDoes()
     {
         TableMetadata t = table(false);
-        List<Row> rows = List.of(full(t, 1_000, 1000), full(t, 2_000, 1001));
+        Row.Builder late = newRow(2_000);
+        late.addPrimaryKeyLivenessInfo(LivenessInfo.create(2000));
+        late.addCell(BufferCell.live(col(t, "v"), 2000, DoubleType.instance.decompose(2.0)));
+        late.addCell(BufferCell.live(col(t, "n"), 1999, Int32Type.instance.decompose(1)));  // older than the row marker
+        late.addCell(BufferCell.live(col(t, "s"), 2500, UTF8Type.instance.decompose("x"))); // newer than the row marker
+        List<Row> rows = List.of(full(t, 1_000, 1000), late.build());
+
         ColumnFilter onlyV = ColumnFilter.selection(t, RegularAndStaticColumns.of(col(t, "v")), false);
         List<Row> back = RowBlockCodec.decode(t, RowBlockCodec.encode(t, rows), onlyV);
+
         assertEquals(2, back.size());
-        for (int i = 0; i < 2; i++)
-        {
-            assertEquals(1, back.get(i).columnCount());
-            assertEquals(rows.get(i).getCell(col(t, "v")), back.get(i).getCell(col(t, "v")));
-            assertEquals(rows.get(i).primaryKeyLivenessInfo(), back.get(i).primaryKeyLivenessInfo());
-        }
+        Row first = back.get(0);
+        assertEquals(rows.get(0).getCell(col(t, "v")), first.getCell(col(t, "v")));
+        for (String other : new String[]{ "b", "m", "n", "s" })
+            assertEquals(other, rows.get(0).getCell(col(t, other)).withSkippedValue(), first.getCell(col(t, other)));
+        Row second = back.get(1);
+        assertEquals(rows.get(1).primaryKeyLivenessInfo(), second.primaryKeyLivenessInfo());
+        assertNull("older than the row marker and unqueried: dropped", second.getCell(col(t, "n")));
+        assertEquals(rows.get(1).getCell(col(t, "s")).withSkippedValue(), second.getCell(col(t, "s")));
     }
 
     @Test
